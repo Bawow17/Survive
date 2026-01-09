@@ -4,8 +4,12 @@
 -- Refactored to match ZombieAISystem pattern: separate state component, helper functions
 
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+
+local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
+local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
 
 local ChargerAISystem = {}
 
@@ -382,6 +386,11 @@ local function updateObstacleRaycastParams()
 	obstacleRaycastParams.FilterDescendantsInstances = obstacleExclusionCache
 end
 
+local function aiRaycast(origin: Vector3, direction: Vector3, params: RaycastParams): RaycastResult?
+	Prof.incCounter("AI.Raycasts", 1)
+	return Workspace:Raycast(origin, direction, params)
+end
+
 -- Detect obstacle in front of charger (including overhangs and steep slopes)
 local function detectObstacle(chargerPos: Vector3, direction: Vector3): boolean
 	if direction.Magnitude == 0 then
@@ -397,7 +406,7 @@ local function detectObstacle(chargerPos: Vector3, direction: Vector3): boolean
 	local origin = chargerPos + Vector3.new(0, 1, 0)
 	local rayDirection = normDir * OBSTACLE_RAYCAST_DISTANCE
 	
-	local result = Workspace:Raycast(origin, rayDirection, obstacleRaycastParams)
+	local result = aiRaycast(origin, rayDirection, obstacleRaycastParams)
 	
 	-- If we hit something solid, it's an obstacle
 	if result and result.Instance then
@@ -418,7 +427,7 @@ local function detectObstacle(chargerPos: Vector3, direction: Vector3): boolean
 	local upOrigin = chargerPos + Vector3.new(0, 1, 0)
 	local upDirection = Vector3.new(0, 4, 0)  -- Check 4 studs up
 	
-	local upResult = Workspace:Raycast(upOrigin, upDirection, obstacleRaycastParams)
+	local upResult = aiRaycast(upOrigin, upDirection, obstacleRaycastParams)
 	
 	if upResult and upResult.Instance then
 		local hitPart = upResult.Instance
@@ -435,7 +444,7 @@ local function detectObstacle(chargerPos: Vector3, direction: Vector3): boolean
 	local aheadOrigin = chargerPos + normDir * 2 + Vector3.new(0, 2, 0)
 	local downDirection = Vector3.new(0, -5, 0)
 	
-	local downResult = Workspace:Raycast(aheadOrigin, downDirection, obstacleRaycastParams)
+	local downResult = aiRaycast(aheadOrigin, downDirection, obstacleRaycastParams)
 	
 	if downResult and downResult.Instance then
 		local hitPart = downResult.Instance
@@ -468,12 +477,12 @@ local function calculateSteering(chargerPos: Vector3, currentDir: Vector3, targe
 	-- Cast left (rotate 90 degrees counter-clockwise)
 	local leftDir = Vector3.new(-normCurrent.Z, 0, normCurrent.X)
 	local leftRayDir = leftDir * OBSTACLE_RAYCAST_DISTANCE
-	local leftResult = Workspace:Raycast(origin, leftRayDir, obstacleRaycastParams)
+	local leftResult = aiRaycast(origin, leftRayDir, obstacleRaycastParams)
 	
 	-- Cast right (rotate 90 degrees clockwise)
 	local rightDir = Vector3.new(normCurrent.Z, 0, -normCurrent.X)
 	local rightRayDir = rightDir * OBSTACLE_RAYCAST_DISTANCE
-	local rightResult = Workspace:Raycast(origin, rightRayDir, obstacleRaycastParams)
+	local rightResult = aiRaycast(origin, rightRayDir, obstacleRaycastParams)
 	
 	-- Choose the clearer direction
 	local steerDir
@@ -514,6 +523,8 @@ local function setPathfindingState(entity: number, stateData: any)
 end
 
 function ChargerAISystem.step(dt: number)
+	Prof.beginTimer("AI.Time")
+
 	-- Handle paused player enemy transitions (individual pause mode only)
 	if not GameOptions.GlobalPause then
 		for playerEntity, data in pairs(pausedPlayerEnemies) do
@@ -1071,6 +1082,8 @@ function ChargerAISystem.step(dt: number)
 		-- Update facing direction (always, like ZombieAISystem)
 		setFacingDirection(entity, { x = faceDirVec3.X, y = 0, z = faceDirVec3.Z })
 	end
+
+	Prof.endTimer("AI.Time")
 end
 
 return ChargerAISystem

@@ -8,6 +8,8 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local ModelPaths = require(ReplicatedStorage.Shared.ModelPaths)
+local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
+local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingClient) or require(ReplicatedStorage.Shared.ProfilingStub)
 
 local player = Players.LocalPlayer
 
@@ -231,7 +233,9 @@ local function setModelTransparency(model: Model, targetTransparency: number)
 	end
 	
 	-- Set transparency for all visible parts (much faster than tweens!)
+	local descendantOps = 0
 	for _, descendant in ipairs(model:GetDescendants()) do
+		descendantOps += 1
 		if descendant:IsA("BasePart") and descendant.Name ~= "Hitbox" and descendant.Name ~= "Attackbox" then
 			-- Get or store original transparency
 			local originalTrans = descendant:GetAttribute("OriginalTransparency")
@@ -283,6 +287,10 @@ local function setModelTransparency(model: Model, targetTransparency: number)
 				end
 			end
 		end
+	end
+
+	if descendantOps > 0 then
+		Prof.incCounter("ClientEntityRenderer.DescendantOps", descendantOps)
 	end
 end
 
@@ -343,8 +351,10 @@ local function processFades()
 	if next(activeFades) == nil then
 		return
 	end
-	
+
+	local fadesProcessed = 0
 	for model, fade in pairs(activeFades) do
+		fadesProcessed += 1
 		if not model or not model.Parent then
 			-- Model destroyed, clean up
 			activeFades[model] = nil
@@ -380,6 +390,10 @@ local function processFades()
 			
 			setModelTransparency(model, currentTrans)
 		end
+	end
+
+	if fadesProcessed > 0 then
+		Prof.incCounter("ClientEntityRenderer.Fades", fadesProcessed)
 	end
 end
 
@@ -2082,6 +2096,7 @@ EntityDespawn.OnClientEvent:Connect(function(despawns)
 end)
 
 	RunService:BindToRenderStep("ECS.EntityLerp", Enum.RenderPriority.Camera.Value, function()
+		Prof.beginTimer("ClientEntityRenderer.Render")
 		local now = tick()
 		
 		-- CRITICAL: Death animations must process even during pause
@@ -2165,7 +2180,9 @@ end)
 	local cameraPos = camera and camera.CFrame.Position or Vector3.zero
 	
 	local toRemove = {}
+	local activeModels = 0
 	for key, record in pairs(renderedEntities) do
+		activeModels += 1
 		if record.pendingRemovalTime and now >= record.pendingRemovalTime then
 			table.insert(toRemove, key)
 		end
@@ -2378,6 +2395,9 @@ end)
 	for _, key in ipairs(toRemove) do
 		handleEntityDespawn(key, true)
 	end
+
+	Prof.incCounter("ClientEntityRenderer.ActiveModels", activeModels)
+	Prof.endTimer("ClientEntityRenderer.Render")
 end)
 
 -- Listen for pause/unpause events

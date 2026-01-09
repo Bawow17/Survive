@@ -2,12 +2,16 @@
 -- ZombieAISystem - drives zombie movement toward players and applies damage on contact
 
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local OctreeSystem = require(script.Parent.OctreeSystem)
 local GameTimeSystem = require(script.Parent.GameTimeSystem)
 local EasingUtils = require(game.ServerScriptService.Balance.EasingUtils)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+
+local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
+local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
 
 local ZombieAISystem = {}
 
@@ -285,6 +289,11 @@ local function updateObstacleRaycastParams()
 	obstacleRaycastParams.FilterDescendantsInstances = obstacleExclusionCache
 end
 
+local function aiRaycast(origin: Vector3, direction: Vector3, params: RaycastParams): RaycastResult?
+	Prof.incCounter("AI.Raycasts", 1)
+	return Workspace:Raycast(origin, direction, params)
+end
+
 -- Detect obstacle in front of enemy (including overhangs and steep slopes)
 local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direction: {x: number, z: number}): boolean
 	if not direction or (direction.x == 0 and direction.z == 0) then
@@ -307,7 +316,7 @@ local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direc
 	local origin = Vector3.new(enemyPos.x, enemyPos.y + 1, enemyPos.z)
 	local rayDirection = Vector3.new(normDir.x, 0, normDir.z) * OBSTACLE_RAYCAST_DISTANCE
 	
-	local result = Workspace:Raycast(origin, rayDirection, obstacleRaycastParams)
+	local result = aiRaycast(origin, rayDirection, obstacleRaycastParams)
 	
 	-- If we hit something solid, it's an obstacle
 	if result and result.Instance then
@@ -328,7 +337,7 @@ local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direc
 	local upOrigin = Vector3.new(enemyPos.x, enemyPos.y + 1, enemyPos.z)
 	local upDirection = Vector3.new(0, 4, 0)  -- Check 4 studs up
 	
-	local upResult = Workspace:Raycast(upOrigin, upDirection, obstacleRaycastParams)
+	local upResult = aiRaycast(upOrigin, upDirection, obstacleRaycastParams)
 	
 	if upResult and upResult.Instance then
 		local hitPart = upResult.Instance
@@ -349,7 +358,7 @@ local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direc
 	)
 	local downDirection = Vector3.new(0, -5, 0)
 	
-	local downResult = Workspace:Raycast(aheadOrigin, downDirection, obstacleRaycastParams)
+	local downResult = aiRaycast(aheadOrigin, downDirection, obstacleRaycastParams)
 	
 	if downResult and downResult.Instance then
 		local hitPart = downResult.Instance
@@ -387,12 +396,12 @@ local function calculateSteering(enemyPos: {x: number, y: number, z: number}, cu
 	-- Cast left (rotate 90 degrees counter-clockwise)
 	local leftDir = {x = -normCurrent.z, z = normCurrent.x}
 	local leftRayDir = Vector3.new(leftDir.x, 0, leftDir.z) * OBSTACLE_RAYCAST_DISTANCE
-	local leftResult = Workspace:Raycast(origin, leftRayDir, obstacleRaycastParams)
+	local leftResult = aiRaycast(origin, leftRayDir, obstacleRaycastParams)
 	
 	-- Cast right (rotate 90 degrees clockwise)
 	local rightDir = {x = normCurrent.z, z = -normCurrent.x}
 	local rightRayDir = Vector3.new(rightDir.x, 0, rightDir.z) * OBSTACLE_RAYCAST_DISTANCE
-	local rightResult = Workspace:Raycast(origin, rightRayDir, obstacleRaycastParams)
+	local rightResult = aiRaycast(origin, rightRayDir, obstacleRaycastParams)
 	
 	-- Choose the clearer direction
 	local steerDir
@@ -674,6 +683,8 @@ function ZombieAISystem.step(dt: number)
 	if not world then
 		return
 	end
+
+	Prof.beginTimer("AI.Time")
 	
 	-- Handle paused player enemy transitions (individual pause mode only)
 	if not GameOptions.GlobalPause then
@@ -813,6 +824,7 @@ function ZombieAISystem.step(dt: number)
 	end
 	
 	if #enemies == 0 then
+		Prof.endTimer("AI.Time")
 		return
 	end
 
@@ -1114,6 +1126,8 @@ function ZombieAISystem.step(dt: number)
 
 		setVelocity(enemyEntity, newVelocity)
 	end
+
+	Prof.endTimer("AI.Time")
 end
 
 -- Set StatusEffectSystem reference (called after it's initialized)

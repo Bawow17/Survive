@@ -2,8 +2,12 @@
 -- MovementSystem - updates entity positions based on velocity (non-player entities)
 
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
+
+local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
+local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
 
 local MovementSystem = {}
 
@@ -213,6 +217,7 @@ local function getGroundHeight(position: {x: number, y: number, z: number}): num
 	-- Perform raycast
 	updateRaycastParams() -- Update to exclude players, enemies, projectiles
 	local origin = Vector3.new(position.x, (position.y or 0) + 25, position.z)
+	Prof.incCounter("Movement.Raycasts", 1)
 	local result = Workspace:Raycast(origin, Vector3.new(0, -250, 0), raycastParams)
 	
 	local height = nil
@@ -266,6 +271,8 @@ function MovementSystem.step(dt: number)
 	if not world then
 		return
 	end
+
+	Prof.beginTimer("Movement.Time")
 
 	-- Periodic cache cleanup (MEMORY LEAK FIX 1.3)
 	cacheCleanupAccumulator = cacheCleanupAccumulator + dt
@@ -564,6 +571,8 @@ function MovementSystem.step(dt: number)
 			DirtyService.setIfChanged(world, entity, Position, newPosition, "Position")
 		end
 	end
+
+	Prof.endTimer("Movement.Time")
 end
 
 return MovementSystem

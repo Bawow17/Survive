@@ -2,12 +2,15 @@
 -- ProjectileCollisionSystem - Handles collision detection and damage for projectiles
 -- Manages hitbox detection, damage application, and piercing mechanics
 
-local _ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
 local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+
+local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
+local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
 
 local ProjectileCollisionSystem = {}
 local GRID_SIZE = SpatialGridSystem.getGridSize()
@@ -502,7 +505,10 @@ function ProjectileCollisionSystem.step(dt: number)
 	if not world then
 		return
 	end
-    
+
+	Prof.beginTimer("ProjectileCollision.Time")
+	local projChecks = 0
+
     local currentTime = tick()
     
     -- Periodic cleanup of expired recentHits entries (memory leak prevention)
@@ -619,6 +625,7 @@ function ProjectileCollisionSystem.step(dt: number)
         
         -- Check collision with nearby entities only
         for _, targetEntity in ipairs(uniqueNearbyEntities) do
+			projChecks += 1
 			if targetEntity ~= projectileEntity then
 				local targetEntityType = world:get(targetEntity, EntityType)
 				local targetPos = world:get(targetEntity, Position)
@@ -714,6 +721,9 @@ function ProjectileCollisionSystem.step(dt: number)
     -- if projectileCount > 0 then
     --	print(string.format("[ProjectileCollisionSystem] Checking %d projectiles for collisions", projectileCount))
     -- end
+
+	Prof.incCounter("ProjectileCollision.ProjChecks", projChecks)
+	Prof.endTimer("ProjectileCollision.Time")
 end
 
 function ProjectileCollisionSystem.getExplosionStats()

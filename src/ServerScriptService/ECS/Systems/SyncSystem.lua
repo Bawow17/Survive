@@ -3,6 +3,11 @@
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
+local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
+local PROFILING_ENABLED = ProfilingConfig.ENABLED
 
 local SyncSystem = {}
 
@@ -522,6 +527,8 @@ function SyncSystem.step(dt: number)
 		return
 	end
 
+	Prof.beginTimer("SyncSystem.PackSend")
+
 	local dirty = DirtyService.consumeDirty()
 	local perPlayerPayload: {[any]: {updates: {any}?, shared: {[string]: {[number]: any}}?, despawns: {number}?, projectiles: {{number}}?, enemies: {{number}}?}} = {}
 	
@@ -657,9 +664,31 @@ function SyncSystem.step(dt: number)
 		end
 
 		if entry.updates or entry.despawns or entry.shared or entry.projectiles or entry.enemies then
+			local entitiesCount = 0
+			if entry.updates then
+				entitiesCount += #entry.updates
+			end
+			if entry.projectiles then
+				entitiesCount += #entry.projectiles
+			end
+			if entry.enemies then
+				entitiesCount += #entry.enemies
+			end
+			if entry.despawns then
+				entitiesCount += #entry.despawns
+			end
+
+			if PROFILING_ENABLED then
+				local payloadBytes = #HttpService:JSONEncode(entry)
+				Prof.incCounter("SyncSystem.BytesPerTickPlayer", payloadBytes)
+			end
+			Prof.incCounter("SyncSystem.EntitiesPerTickPlayer", entitiesCount)
+
 			Remotes.EntityUpdate:FireClient(player, entry)
 		end
 	end
+
+	Prof.endTimer("SyncSystem.PackSend")
 end
 
 function SyncSystem.buildInitialSnapshot(player: Player?)
