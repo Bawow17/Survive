@@ -6,6 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 
 local PauseSystem = {}
+local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 
 -- System references
 local world: any
@@ -29,9 +30,82 @@ local pauseMetadata: {
 local GamePaused: RemoteEvent
 local GameUnpaused: RemoteEvent
 local RequestUnpause: RemoteEvent
+local DebugPauseFlag: BoolValue?
 
 -- Callback for handling unpause requests
-local unpauseCallback: ((action: string, player: Player) -> ())?
+local unpauseCallback: ((action: string, player: Player, upgradeId: string?, pauseToken: number?) -> ())?
+
+local playerPauseData: {[number]: {
+	count: number,
+	nextToken: number,
+	activeTokens: {[number]: boolean},
+	tokenOrder: {number},
+	currentToken: number?,
+}} = {}
+
+local function debugLog(message: string)
+	if DEBUG then
+		print(message)
+	end
+end
+
+local function getPauseData(playerEntity: number)
+	local data = playerPauseData[playerEntity]
+	if not data then
+		data = {
+			count = 0,
+			nextToken = 1,
+			activeTokens = {},
+			tokenOrder = {},
+			currentToken = nil,
+		}
+		playerPauseData[playerEntity] = data
+	end
+	return data
+end
+
+local function acquirePauseToken(playerEntity: number): number
+	local data = getPauseData(playerEntity)
+	local token = data.nextToken
+	data.nextToken += 1
+	data.count += 1
+	data.activeTokens[token] = true
+	table.insert(data.tokenOrder, token)
+	data.currentToken = token
+	return token
+end
+
+local function releasePauseToken(playerEntity: number, token: number): number
+	local data = playerPauseData[playerEntity]
+	if not data or not data.activeTokens[token] then
+		return -1
+	end
+	data.activeTokens[token] = nil
+	data.count = math.max(0, data.count - 1)
+	for i = #data.tokenOrder, 1, -1 do
+		if data.tokenOrder[i] == token then
+			table.remove(data.tokenOrder, i)
+			break
+		end
+	end
+	data.currentToken = data.tokenOrder[#data.tokenOrder]
+	if data.count == 0 then
+		playerPauseData[playerEntity] = nil
+	end
+	return data.count
+end
+
+local function getPlayerEntityFromPlayer(player: Player): number?
+	if not world or not Components then
+		return nil
+	end
+	for entity, stats in world:query(Components.PlayerStats) do
+		if stats.player == player then
+			return entity
+		end
+	end
+	return nil
+end
 
 function PauseSystem.init(worldRef: any, components: any, dirtyService: any)
 	world = worldRef
@@ -62,25 +136,37 @@ function PauseSystem.init(worldRef: any, components: any, dirtyService: any)
 		RequestUnpause.Parent = remotes
 	end
 	
+	-- Replicated debug flag for client-side logging/tests
+	DebugPauseFlag = remotes:FindFirstChild("DebugPause") :: BoolValue
+	if not DebugPauseFlag then
+		DebugPauseFlag = Instance.new("BoolValue")
+		DebugPauseFlag.Name = "DebugPause"
+		DebugPauseFlag.Parent = remotes
+	end
+	DebugPauseFlag.Value = DEBUG
+	
 	-- Listen for unpause requests from clients
 	RequestUnpause.OnServerEvent:Connect(function(player: Player, data: any)
 		-- In individual pause mode, check if this player is paused
 		if not GameOptions.GlobalPause then
-			-- Find player entity
-			local playerEntity = nil
-			if world and Components then
-				for entity, stats in world:query(Components.PlayerStats) do
-					if stats.player == player then
-						playerEntity = entity
-						break
-					end
-				end
-			end
+			local playerEntity = getPlayerEntityFromPlayer(player)
 			
 			if playerEntity then
 				local pauseState = world:get(playerEntity, Components.PlayerPauseState)
 				if not pauseState or not pauseState.isPaused then
 					return  -- This player is not paused
+				end
+				
+				-- Reject stale or invalid pause token (prevents queued level spam)
+				local pauseToken = data and data.pauseToken
+				local dataForPlayer = playerPauseData[playerEntity]
+				if pauseState.pauseReason == "levelup" and (not dataForPlayer or pauseToken ~= dataForPlayer.currentToken) then
+					debugLog(string.format("[PauseSystem] IGNORE unpause request: player=%s token=%s current=%s",
+						player.Name,
+						tostring(pauseToken),
+						tostring(dataForPlayer and dataForPlayer.currentToken)
+					))
+					return
 				end
 			else
 				return
@@ -94,10 +180,17 @@ function PauseSystem.init(worldRef: any, components: any, dirtyService: any)
 		
 		local action = data and data.action or "unknown"
 		local upgradeId = data and data.upgradeId
+		local pauseToken = data and data.pauseToken
+		
+		debugLog(string.format("[PauseSystem] Unpause request: player=%s action=%s token=%s",
+			player.Name,
+			action,
+			tostring(pauseToken)
+		))
 		
 		-- Invoke callback if set
 		if unpauseCallback then
-			unpauseCallback(action, player, upgradeId)
+			unpauseCallback(action, player, upgradeId, pauseToken)
 		end
 	end)
 end
@@ -123,7 +216,7 @@ function PauseSystem.isPaused(): boolean
 end
 
 -- Helper: Pause an individual player (multiplayer mode)
-local function pausePlayerIndividually(playerEntity: number, player: Player, reason: string, fromLevel: number?, toLevel: number?, upgradeChoices: {any}?)
+local function pausePlayerIndividually(playerEntity: number, player: Player, reason: string, fromLevel: number?, toLevel: number?, upgradeChoices: {any}?, pauseToken: number?, pauseCount: number?)
 	if not world or not Components or not DirtyService then
 		warn("[PauseSystem] Cannot pause player individually - missing references")
 		return
@@ -139,6 +232,8 @@ local function pausePlayerIndividually(playerEntity: number, player: Player, rea
 		pauseStartTime = pauseStartTime,
 		pauseEndTime = pauseStartTime + GameOptions.IndividualPauseTimeout,
 		upgradeChoices = upgradeChoices,
+		pauseToken = pauseToken,
+		pauseCount = pauseCount,
 	})
 	DirtyService.mark(playerEntity, "PlayerPauseState")
 	
@@ -147,6 +242,16 @@ local function pausePlayerIndividually(playerEntity: number, player: Player, rea
 	
 	-- Freeze cooldowns (set attribute for AbilityCooldownSystem to check)
 	player:SetAttribute("CooldownsFrozen", true)
+	
+	-- Server-authoritative movement freeze for level-up pause
+	if reason == "levelup" and player.Character then
+		local rootPart = player.Character:FindFirstChild("HumanoidRootPart")
+		if rootPart and rootPart:IsA("BasePart") then
+			rootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+			rootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+			rootPart.Anchored = true
+		end
+	end
 	
 	-- Note: Session timer continues during level-up pauses (independent timer)
 	
@@ -158,6 +263,8 @@ local function pausePlayerIndividually(playerEntity: number, player: Player, rea
 		upgradeChoices = upgradeChoices,
 		timeout = GameOptions.IndividualPauseTimeout,
 		showTimer = true,
+		pauseToken = pauseToken,
+		pauseCount = pauseCount,
 	})
 	
 	-- Trigger enemy pause transition for both AI systems
@@ -191,9 +298,18 @@ local function unpausePlayerIndividually(playerEntity: number, player: Player)
 		-- Remove PlayerPauseState component
 		world:remove(playerEntity, Components.PlayerPauseState)
 	end
+	playerPauseData[playerEntity] = nil
 	
 	-- Unfreeze cooldowns
 	player:SetAttribute("CooldownsFrozen", false)
+	
+	-- Restore server-side movement controls
+	if player.Character then
+		local rootPart = player.Character:FindFirstChild("HumanoidRootPart")
+		if rootPart and rootPart:IsA("BasePart") then
+			rootPart.Anchored = false
+		end
+	end
 	
 	-- Note: Session timer continues during level-up pauses (independent timer)
 	
@@ -216,16 +332,48 @@ function PauseSystem.pause(reason: string, triggeringPlayer: Player?, fromLevel:
 		-- Individual pause: only pause the triggering player
 		if triggeringPlayer and world and Components then
 			-- Find player entity
-			local playerEntity = nil
-			for entity, stats in world:query(Components.PlayerStats) do
-				if stats.player == triggeringPlayer then
-					playerEntity = entity
-					break
-				end
-			end
+			local playerEntity = getPlayerEntityFromPlayer(triggeringPlayer)
 			
 			if playerEntity then
-				pausePlayerIndividually(playerEntity, triggeringPlayer, reason, fromLevel, toLevel, upgradeChoices)
+				if reason == "levelup" then
+					local token = acquirePauseToken(playerEntity)
+					local pauseCount = getPauseData(playerEntity).count
+					
+					-- If already paused, update the pause state + UI without unpausing
+					if world:has(playerEntity, Components.PlayerPauseState) then
+						local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
+						local pauseStartTime = GameTimeSystem.getGameTime()
+						local pauseState = world:get(playerEntity, Components.PlayerPauseState)
+						if pauseState then
+							pauseState.pauseStartTime = pauseStartTime
+							pauseState.pauseEndTime = pauseStartTime + GameOptions.IndividualPauseTimeout
+							pauseState.upgradeChoices = upgradeChoices
+							pauseState.pauseToken = token
+							pauseState.pauseCount = pauseCount
+							world:set(playerEntity, Components.PlayerPauseState, pauseState)
+							DirtyService.mark(playerEntity, "PlayerPauseState")
+						end
+						
+						-- Update client UI for queued level without unfreezing
+						GamePaused:FireClient(triggeringPlayer, {
+							reason = reason,
+							fromLevel = fromLevel,
+							toLevel = toLevel,
+							upgradeChoices = upgradeChoices,
+							timeout = GameOptions.IndividualPauseTimeout,
+							showTimer = true,
+							pauseToken = token,
+							pauseCount = pauseCount,
+						})
+						
+						debugLog(string.format("[PauseSystem] Queue pause: player=%s token=%d count=%d", triggeringPlayer.Name, token, pauseCount))
+					else
+						pausePlayerIndividually(playerEntity, triggeringPlayer, reason, fromLevel, toLevel, upgradeChoices, token, pauseCount)
+						debugLog(string.format("[PauseSystem] Pause start: player=%s token=%d count=%d", triggeringPlayer.Name, token, pauseCount))
+					end
+				else
+					pausePlayerIndividually(playerEntity, triggeringPlayer, reason, fromLevel, toLevel, upgradeChoices)
+				end
 			end
 		end
 		return
@@ -290,8 +438,34 @@ function PauseSystem.getMetadata()
 end
 
 -- Set callback for handling unpause requests
-function PauseSystem.setUnpauseCallback(callback: (action: string, player: Player, upgradeId: string?) -> ())
+function PauseSystem.setUnpauseCallback(callback: (action: string, player: Player, upgradeId: string?, pauseToken: number?) -> ())
 	unpauseCallback = callback
+end
+
+function PauseSystem.releasePauseToken(playerEntity: number, player: Player, token: number?, source: string?)
+	if not token or not playerEntity then
+		return
+	end
+	local remaining = releasePauseToken(playerEntity, token)
+	if remaining < 0 then
+		debugLog(string.format("[PauseSystem] Release ignored: player=%s token=%s source=%s",
+			player.Name,
+			tostring(token),
+			tostring(source)
+		))
+		return
+	end
+	
+	debugLog(string.format("[PauseSystem] Release token: player=%s token=%d remaining=%d source=%s",
+		player.Name,
+		token,
+		remaining,
+		tostring(source)
+	))
+	
+	if remaining == 0 then
+		unpausePlayerIndividually(playerEntity, player)
+	end
 end
 
 -- Step function for individual pause timeout checking
@@ -330,11 +504,33 @@ function PauseSystem.step(dt: number)
 				
 				-- Apply the upgrade (call unpause callback)
 				if unpauseCallback then
-					unpauseCallback("upgrade", playerStats.player, randomUpgrade.id)
+					unpauseCallback("upgrade", playerStats.player, randomUpgrade.id, pauseState.pauseToken)
 				end
 			else
 				-- No upgrades available, just unpause
 				unpausePlayerIndividually(playerEntity, playerStats.player)
+			end
+		end
+		
+		-- Enforce movement freeze during level-up pause
+		if pauseState.isPaused and pauseState.pauseReason == "levelup" and playerStats and playerStats.player and playerStats.player.Character then
+			local rootPart = playerStats.player.Character:FindFirstChild("HumanoidRootPart")
+			if rootPart and rootPart:IsA("BasePart") then
+				local velocity = rootPart.AssemblyLinearVelocity
+				if not rootPart.Anchored then
+					rootPart.Anchored = true
+				end
+				rootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+				rootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+				
+				if DEBUG then
+					if velocity.Magnitude > 0.1 then
+						debugLog(string.format("[PauseSystem] Movement during pause: player=%s vel=%.2f",
+							playerStats.player.Name,
+							velocity.Magnitude
+						))
+					end
+				end
 			end
 		end
 	end
@@ -359,4 +555,3 @@ function PauseSystem.unpausePlayer(playerEntity: number, player: Player)
 end
 
 return PauseSystem
-

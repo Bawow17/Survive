@@ -4,6 +4,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local PauseSystem = require(game.ServerScriptService.ECS.Systems.PauseSystem)
 local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
 local StatusEffectSystem = require(game.ServerScriptService.ECS.Systems.StatusEffectSystem)
@@ -22,6 +23,7 @@ local PlayerStats: any
 
 -- Remote for broadcasting player stats to clients
 local PlayerStatsUpdate: RemoteEvent?
+local DebugGrantLevels: RemoteEvent?
 
 -- Cached query for exp chunks processing
 local expChunksQuery: any
@@ -49,6 +51,36 @@ function ExpSystem.init(worldRef: any, components: any, dirtyService: any)
 		newRemote.Name = "PlayerStatsUpdate"
 		newRemote.Parent = remotes
 		PlayerStatsUpdate = newRemote
+	end
+	
+	-- Debug-only repro helper: grant multiple levels quickly
+	if GameOptions.Debug and GameOptions.Debug.Enabled then
+		DebugGrantLevels = remotes:FindFirstChild("DebugGrantLevels") :: RemoteEvent
+		if not DebugGrantLevels then
+			DebugGrantLevels = Instance.new("RemoteEvent")
+			DebugGrantLevels.Name = "DebugGrantLevels"
+			DebugGrantLevels.Parent = remotes
+		end
+		
+		DebugGrantLevels.OnServerEvent:Connect(function(player: Player, data: any)
+			local levels = (data and data.levels) or 10
+			if typeof(levels) ~= "number" then
+				levels = 10
+			end
+			levels = math.clamp(math.floor(levels), 1, 20)
+			
+			local playerEntity: number? = nil
+			for entity, stats in world:query(Components.PlayerStats) do
+				if stats.player == player then
+					playerEntity = entity
+					break
+				end
+			end
+			
+			if playerEntity then
+				ExpSystem.debugGrantLevels(playerEntity, levels)
+			end
+		end)
 	end
 end
 
@@ -201,37 +233,9 @@ local function onLevelUp(playerEntity: number, newLevel: number, oldLevel: numbe
 		-- NOTE: Buffs are granted AFTER unpause (in the unpause callback in Bootstrap)
 		-- to ensure the full 2-second duration is available after the pause ends
 		
-		-- ATOMIC UPDATE: For queued levels, update existing pause state instead of creating new one
-		-- This prevents the brief unpause window that can occur between removing and re-adding pause state
-		if isQueuedLevel and world:has(playerEntity, Components.PlayerPauseState) then
-			local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
-			local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
-			local pauseState = world:get(playerEntity, Components.PlayerPauseState)
-			
-			-- Update pause state for next level without removing component
-			pauseState.pauseStartTime = GameTimeSystem.getGameTime()
-			pauseState.pauseEndTime = pauseState.pauseStartTime + GameOptions.IndividualPauseTimeout
-			pauseState.upgradeChoices = upgradeChoices
-			
-			world:set(playerEntity, Components.PlayerPauseState, pauseState)
-			DirtyService.mark(playerEntity, "PlayerPauseState")
-			
-			-- Update client UI with new level info (without triggering freeze/unfreeze)
-			local GamePaused = game:GetService("ReplicatedStorage"):FindFirstChild("RemoteEvents"):FindFirstChild("GamePaused")
-			if GamePaused then
-				GamePaused:FireClient(player, {
-					reason = "levelup",
-					fromLevel = oldLevel,
-					toLevel = newLevel,
-					upgradeChoices = upgradeChoices,
-					timeout = GameOptions.IndividualPauseTimeout,
-					showTimer = not GameOptions.GlobalPause,
-				})
-			end
-		else
-			-- First level-up or not queued: create new pause state normally
-			PauseSystem.pause("levelup", player, oldLevel, newLevel, upgradeChoices)
-		end
+		-- For queued levels, PauseSystem.pause() updates existing pause state and increments pause token
+		-- First level-up or not queued: PauseSystem.pause() creates new pause state normally
+		PauseSystem.pause("levelup", player, oldLevel, newLevel, upgradeChoices)
 	end
 end
 
@@ -328,6 +332,47 @@ local function applyExpDirect(playerEntity: number, amount: number)
 			level = level.current,
 			totalExp = exp.total,
 		})
+	end
+end
+
+-- Debug-only: Grant a fixed number of levels instantly (bypasses chunking)
+function ExpSystem.debugGrantLevels(playerEntity: number, levels: number)
+	if not world or not Experience or not Level then
+		return
+	end
+	
+	local exp = world:get(playerEntity, Experience)
+	local level = world:get(playerEntity, Level)
+	if not exp or not level then
+		return
+	end
+	
+	local maxGrant = math.max(0, ItemBalance.MaxLevel - level.current)
+	local grantCount = math.clamp(math.floor(levels), 1, maxGrant)
+	if grantCount <= 0 then
+		return
+	end
+	
+	local totalExp = 0
+	local currentLevel = level.current
+	local currentExp = exp.current
+	
+	for i = 1, grantCount do
+		local required = calculateExpRequired(currentLevel)
+		if i == 1 then
+			totalExp += math.max(0, required - currentExp)
+		else
+			totalExp += required
+		end
+		currentLevel += 1
+	end
+	
+	applyExpDirect(playerEntity, totalExp)
+	
+	if GameOptions.Debug and GameOptions.Debug.Enabled then
+		local playerStats = world:get(playerEntity, PlayerStats)
+		local playerName = playerStats and playerStats.player and playerStats.player.Name or tostring(playerEntity)
+		print(string.format("[ExpSystem] DebugGrantLevels: player=%s levels=%d", playerName, grantCount))
 	end
 end
 
@@ -527,4 +572,3 @@ function ExpSystem.printProgressionCurve()
 end
 
 return ExpSystem
-

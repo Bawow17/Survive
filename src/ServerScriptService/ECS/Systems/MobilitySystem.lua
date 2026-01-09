@@ -6,6 +6,9 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local GameTimeSystem = require(script.Parent.GameTimeSystem)
+local PauseSystem = require(script.Parent.PauseSystem)
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 local StatusEffectSystem = require(script.Parent.StatusEffectSystem)
 local SpatialGridSystem = require(script.Parent.SpatialGridSystem)
 local DamageSystem = require(script.Parent.DamageSystem)
@@ -84,6 +87,14 @@ local function handleMobilityActivation(player: Player, mobilityId: string)
 	-- Get player entity
 	local playerEntity = getPlayerEntity(player)
 	if not playerEntity then
+		return
+	end
+	
+	-- Reject mobility activation while player is paused
+	if PauseSystem and PauseSystem.isPlayerPaused(playerEntity) then
+		if DEBUG then
+			print(string.format("[MobilitySystem] Reject mobility during pause | player=%s mobility=%s", player.Name, tostring(mobilityId)))
+		end
 		return
 	end
 	

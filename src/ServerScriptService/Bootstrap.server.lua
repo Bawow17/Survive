@@ -286,7 +286,7 @@ function ECSWorldService.Initialize()
 	ExpOrbSpawner.init(world, Components, ECSWorldService, ModelReplicationService, ExpSinkSystem, DirtyService)
 	
 	-- Setup unpause callback (after ExpSystem and UpgradeSystem are initialized)
-	PauseSystem.setUnpauseCallback(function(action: string, player: Player, upgradeId: string?)
+	PauseSystem.setUnpauseCallback(function(action: string, player: Player, upgradeId: string?, pauseToken: number?)
 		local playerEntity = playerEntities[player]
 		
 		if action == "skip" then
@@ -335,13 +335,18 @@ function ECSWorldService.Initialize()
 				end
 			end
 			
+			-- Release this level's pause token (stay paused if more levels queued)
+			if not GameOptions.GlobalPause and playerEntity and player then
+				PauseSystem.releasePauseToken(playerEntity, player, pauseToken, "queue_next")
+			end
+			
 			return  -- Don't grant buffs yet or unpause (unless safety fallback triggered)
 		end
 		
 		-- Unpause FIRST (this extends pause-aware buffs like spawn protection)
 		if not GameOptions.GlobalPause and playerEntity then
-			-- Individual pause: only unpause this player
-			PauseSystem.unpausePlayer(playerEntity, player)
+			-- Individual pause: release final pause token (unpause happens when count hits 0)
+			PauseSystem.releasePauseToken(playerEntity, player, pauseToken, "queue_empty")
 		else
 			-- Global pause: unpause entire game
 			PauseSystem.unpause()

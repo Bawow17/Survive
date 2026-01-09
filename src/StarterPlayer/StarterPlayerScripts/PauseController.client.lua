@@ -75,6 +75,19 @@ local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
 local GamePaused = remotes:WaitForChild("GamePaused") :: RemoteEvent
 local GameUnpaused = remotes:WaitForChild("GameUnpaused") :: RemoteEvent
 local RequestUnpause = remotes:WaitForChild("RequestUnpause") :: RemoteEvent
+local DebugPauseFlag = remotes:FindFirstChild("DebugPause") :: BoolValue
+local DebugGrantLevels = remotes:FindFirstChild("DebugGrantLevels") :: RemoteEvent
+local debugEnabled = DebugPauseFlag and DebugPauseFlag.Value or false
+
+local currentPauseToken: number? = nil
+local debugReproActive = false
+local debugReproStartTime = 0
+local debugPausedPosition: Vector3? = nil
+local debugUnpauseCount = 0
+local debugMoveBreaches = 0
+local debugLastSpamTime = 0
+local debugLastPauseChange = 0
+local DEBUG_SPAM_INTERVAL = 0.03
 
 -- Initially hide the level-up frame
 levelUpFrame.Visible = false
@@ -326,6 +339,17 @@ GamePaused.OnClientEvent:Connect(function(data: any)
 	local upgradeChoices = data.upgradeChoices or {}
 	local timeout = data.timeout or 0
 	local showTimer = data.showTimer or false
+	currentPauseToken = data.pauseToken
+	debugLastPauseChange = tick()
+	
+	if debugEnabled then
+		print(string.format("[PauseController] GamePaused | reason=%s from=%s to=%s token=%s", 
+			tostring(reason),
+			tostring(fromLevel),
+			tostring(toLevel),
+			tostring(currentPauseToken)
+		))
+	end
 	
 	if reason == "levelup" then
 		-- Update title text
@@ -333,6 +357,10 @@ GamePaused.OnClientEvent:Connect(function(data: any)
 		
 		-- Freeze player movement and animations
 		freezePlayer()
+		
+		if debugEnabled and character and character.PrimaryPart then
+			debugPausedPosition = character.PrimaryPart.Position
+		end
 		
 		-- Populate all 5 choice buttons
 		for i = 1, 5 do
@@ -378,6 +406,17 @@ GameUnpaused.OnClientEvent:Connect(function()
 		return
 	end
 	lastUnfreezeTime = now
+	debugLastPauseChange = now
+	
+	if debugEnabled then
+		debugUnpauseCount += 1
+		print(string.format("[PauseController] GameUnpaused | token=%s count=%d", 
+			tostring(currentPauseToken),
+			debugUnpauseCount
+		))
+	end
+	currentPauseToken = nil
+	debugPausedPosition = nil
 	
 	-- Stop timer
 	isTimerActive = false
@@ -461,12 +500,73 @@ RunService.Heartbeat:Connect(function()
 	end
 end)
 
+-- Debug repro: spam upgrades + verify no movement while paused
+RunService.Heartbeat:Connect(function()
+	if not debugReproActive then
+		return
+	end
+	
+	local now = tick()
+	
+	if isPaused and currentPauseToken then
+		if character and character.PrimaryPart and debugPausedPosition then
+			local delta = (character.PrimaryPart.Position - debugPausedPosition).Magnitude
+			if delta > 0.5 then
+				debugMoveBreaches += 1
+				if debugMoveBreaches <= 3 then
+					print(string.format("[PauseController] Movement breach during pause | delta=%.2f", delta))
+				end
+			end
+		end
+		
+		if now - debugLastSpamTime >= DEBUG_SPAM_INTERVAL then
+			debugLastSpamTime = now
+			
+			local selectedUpgradeId: string? = nil
+			for _, choiceFrame in ipairs(choices) do
+				if choiceFrame.Visible then
+					local button = choiceFrame:FindFirstChild("Button")
+					if button then
+						local upgradeId = button:GetAttribute("UpgradeId")
+						if upgradeId then
+							selectedUpgradeId = upgradeId
+							break
+						end
+					end
+				end
+			end
+			
+			if selectedUpgradeId then
+				RequestUnpause:FireServer({
+					action = "upgrade",
+					upgradeId = selectedUpgradeId,
+					pauseToken = currentPauseToken,
+				})
+			else
+				RequestUnpause:FireServer({
+					action = "skip",
+					pauseToken = currentPauseToken,
+				})
+			end
+		end
+	end
+	
+	if not isPaused and not levelUpFrame.Visible and (now - debugLastPauseChange) > 1.0 then
+		stopDebugPauseRepro()
+	end
+end)
+
 -- Skip button handler
 skipButton.MouseButton1Click:Connect(function()
 	-- Fire request to server
 	RequestUnpause:FireServer({
-		action = "skip"
+		action = "skip",
+		pauseToken = currentPauseToken,
 	})
+	
+	if debugEnabled then
+		print(string.format("[PauseController] RequestUnpause skip | token=%s", tostring(currentPauseToken)))
+	end
 end)
 
 -- Wire up all choice buttons
@@ -478,11 +578,61 @@ for i, choiceFrame in ipairs(choices) do
 			if upgradeId then
 				RequestUnpause:FireServer({
 					action = "upgrade",
-					upgradeId = upgradeId
+					upgradeId = upgradeId,
+					pauseToken = currentPauseToken,
 				})
+				
+				if debugEnabled then
+					print(string.format("[PauseController] RequestUnpause upgrade | id=%s token=%s", tostring(upgradeId), tostring(currentPauseToken)))
+				end
 			end
 		end)
 	end
+end
+
+local function startDebugPauseRepro(levels: number)
+	if not debugEnabled or not DebugGrantLevels then
+		return
+	end
+	if debugReproActive then
+		return
+	end
+	debugReproActive = true
+	debugReproStartTime = tick()
+	debugUnpauseCount = 0
+	debugMoveBreaches = 0
+	debugPausedPosition = nil
+	debugLastSpamTime = 0
+	debugLastPauseChange = debugReproStartTime
+	
+	DebugGrantLevels:FireServer({
+		levels = levels,
+	})
+	
+	print(string.format("[PauseController] Debug repro started | levels=%d", levels))
+end
+
+local function stopDebugPauseRepro()
+	if not debugReproActive then
+		return
+	end
+	debugReproActive = false
+	
+	print(string.format("[PauseController] Debug repro done | duration=%.2fs unpauses=%d movementBreaches=%d",
+		tick() - debugReproStartTime,
+		debugUnpauseCount,
+		debugMoveBreaches
+	))
+end
+
+if debugEnabled then
+	player:GetAttributeChangedSignal("DebugPauseRepro"):Connect(function()
+		local value = player:GetAttribute("DebugPauseRepro")
+		if value then
+			local levels = player:GetAttribute("DebugPauseReproLevels") or 10
+			startDebugPauseRepro(levels)
+		end
+	end)
 end
 
 -- Update timer countdown (for individual pause mode)
@@ -502,4 +652,3 @@ RunService.RenderStepped:Connect(function()
 		isTimerActive = false
 	end
 end)
-
