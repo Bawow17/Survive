@@ -306,7 +306,11 @@ local function teleportSinkToPlayer(playerEntity: number)
 	local currentExp = (itemData and itemData.expAmount) or 0
 	
 	-- Destroy old entity
-	ECSWorldService.DestroyEntity(oldSink)
+	if SyncSystem then
+		SyncSystem.queueDespawn(oldSink)
+	end
+	local ExpOrbPool = require(game.ServerScriptService.ECS.ExpOrbPool)
+	ExpOrbPool.release(oldSink)
 	sinkData.sinkEntity = nil
 	
 	-- Create new entity at new position

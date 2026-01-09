@@ -7,9 +7,11 @@ local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplic
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
 local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 
 local ProjectileCollisionSystem = {}
 local GRID_SIZE = SpatialGridSystem.getGridSize()
+local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 
 local world: any
 local Components: any
@@ -94,6 +96,17 @@ end
 local seenEntitiesSet: {[number]: boolean} = {}
 local function clearSeenSet()
 	table.clear(seenEntitiesSet)
+end
+
+local hitDetectedCount = 0
+local damageAppliedCount = 0
+local missingHurtboxLogged: {[number]: boolean} = {}
+
+local function logTargetValidationFailure(targetEntity: number, reason: string)
+	if not DEBUG then
+		return
+	end
+	print(string.format("[ProjectileCollision] Target validation failed | target=%d | reason=%s", targetEntity, reason))
 end
 
 function ProjectileCollisionSystem.init(worldRef: any, components: any, dirtyService: any, ecsWorldService: any)
@@ -256,7 +269,10 @@ local function handleProjectileHit(
 	-- Apply damage (track ability damage if owner is a player)
 	local sourceEntity = ownerEntityId  -- Player entity ID
 	local abilityId = projectileData.type  -- Ability ID (MagicBolt, FireBall, etc.)
-    local targetDied = applyDamage(targetEntity, damage.amount, damage.type, sourceEntity, abilityId)
+    local targetDied, didApplyDamage = applyDamage(targetEntity, damage.amount, damage.type, sourceEntity, abilityId)
+	if didApplyDamage then
+		damageAppliedCount += 1
+	end
     
     -- Track hit targets for homing re-targeting (avoid targeting same enemy)
     local hitTargets = world:get(projectileEntity, HitTargets)
@@ -357,6 +373,13 @@ local function processTarget(
 	maxDistance: number?
 ): ({[number]: number}?, boolean, boolean, boolean)
 	if not targetEntityType or not targetPos or not targetHealth then
+		if not targetEntityType then
+			logTargetValidationFailure(targetEntity, "missing_entity_type")
+		elseif not targetPos then
+			logTargetValidationFailure(targetEntity, "missing_position_or_spatial")
+		elseif not targetHealth then
+			logTargetValidationFailure(targetEntity, "missing_health")
+		end
 		return projectileHits, false, false, false
 	end
 
@@ -432,6 +455,9 @@ local function processTarget(
 				aabbHalfSize = size / 2
 				aabbCenter = targetPosition + (offset or Vector3.new(0, 0, 0))
 			end
+		elseif DEBUG and not missingHurtboxLogged[targetEntity] then
+			missingHurtboxLogged[targetEntity] = true
+			logTargetValidationFailure(targetEntity, "missing_hurtbox")
 		end
 	end
 
@@ -451,6 +477,7 @@ local function processTarget(
 	if not hit then
 		return projectileHits, false, false, false
 	end
+	hitDetectedCount += 1
 
 	local shouldDestroyProjectile, targetDied = handleProjectileHit(
 		projectileEntity,
@@ -692,6 +719,13 @@ end
 function ProjectileCollisionSystem.getExplosionStats()
 	return {
 		activeExplosions = #activeExplosions,
+	}
+end
+
+function ProjectileCollisionSystem.getHitStats()
+	return {
+		hitsDetected = hitDetectedCount,
+		damageApplied = damageAppliedCount,
 	}
 end
 

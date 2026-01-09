@@ -4,6 +4,7 @@
 
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 
 local ExpCollectionSystem = {}
 local GRID_SIZE = SpatialGridSystem.getGridSize()
@@ -23,6 +24,23 @@ local PlayerStats: any
 -- Cached queries
 local orbQuery: any
 local playerQuery: any
+local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
+local DEBUG_LOG_INTERVAL = 2.0
+local lastDebugLogTime = 0.0
+
+local function logPickupFailure(orbEntity: number, playerEntity: number, playerName: string?, distance: number?, reason: string)
+	if not DEBUG then
+		return
+	end
+	local distanceStr = distance and string.format("%.2f", distance) or "unknown"
+	local playerStr = playerName or tostring(playerEntity)
+	print(string.format("[ExpCollection] Pickup validation failed | orb=%d | player=%s | distance=%s | reason=%s",
+		orbEntity,
+		playerStr,
+		distanceStr,
+		reason
+	))
+end
 
 function ExpCollectionSystem.init(worldRef: any, components: any, dirtyService: any, ecsWorldService: any)
 	world = worldRef
@@ -104,6 +122,7 @@ function ExpCollectionSystem.step(dt: number)
 	
 	-- Check each player against each orb
 	for playerEntity, playerPos, playerStats in playerQuery do
+		local playerName = playerStats and playerStats.player and playerStats.player.Name or nil
 		-- Get pickup range multiplier from player (Explorer passive)
 		local pickupRangeMult = 1.0
 		if playerStats and playerStats.player then
@@ -116,9 +135,20 @@ function ExpCollectionSystem.step(dt: number)
 			continue
 		end
 		
-		-- DIAGNOSTIC: Log player info
-		print(string.format("[ExpCollection] Player %d: pos=(%.1f,%.1f,%.1f) radius=%.1f", 
-			playerEntity, playerPos.x, playerPos.y, playerPos.z, collectionRadius))
+		local shouldLogDebug = false
+		if DEBUG then
+			local now = tick()
+			if now - lastDebugLogTime >= DEBUG_LOG_INTERVAL then
+				shouldLogDebug = true
+				lastDebugLogTime = now
+			end
+		end
+		
+		-- DIAGNOSTIC: Log player info (throttled)
+		if shouldLogDebug then
+			print(string.format("[ExpCollection] Player %d: pos=(%.1f,%.1f,%.1f) radius=%.1f", 
+				playerEntity, playerPos.x, playerPos.y, playerPos.z, collectionRadius))
+		end
 		
 		-- Phase 4.2: Spatial grid pre-filtering - only check nearby orbs (O(n*k) instead of O(n*m))
 		local playerPosition = Vector3.new(playerPos.x, playerPos.y, playerPos.z)
@@ -131,8 +161,8 @@ function ExpCollectionSystem.step(dt: number)
 			nearbySet[entity] = true
 		end
 		
-		-- FALLBACK: If spatial grid returns nothing, check all orbs (prevents missed pickups)
-		local skipSpatialFilter = next(nearbySet) == nil
+		-- Spatial grid does not track exp orbs, so don't use it for orb filtering
+		local skipSpatialFilter = true
 		
 		-- DIAGNOSTIC: Count total orbs and nearby orbs
 		local totalOrbs = 0
@@ -142,6 +172,14 @@ function ExpCollectionSystem.step(dt: number)
 		
 		for orbEntity, orbPos, orbItemData, orbEntityType in orbQuery do
 			totalOrbs += 1
+
+			local distance = nil
+			if DEBUG and orbPos then
+				local dx = playerPos.x - orbPos.x
+				local dy = playerPos.y - orbPos.y
+				local dz = playerPos.z - orbPos.z
+				distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+			end
 			
 			-- Skip if not nearby (spatial pre-filter) UNLESS spatial grid is empty
 			if not skipSpatialFilter and not nearbySet[orbEntity] then
@@ -150,18 +188,21 @@ function ExpCollectionSystem.step(dt: number)
 			nearbyCount += 1
 			
 			-- Skip if not an exp orb or already collected
-			if orbEntityType.type ~= "ExpOrb" or (orbItemData and orbItemData.collected) then
-				-- DIAGNOSTIC: Log why orb was skipped
-				if orbEntityType.type ~= "ExpOrb" then
-					print(string.format("[ExpCollection] Orb %d: SKIP - wrong type (%s)", orbEntity, orbEntityType.type))
-				elseif orbItemData and orbItemData.collected then
-					print(string.format("[ExpCollection] Orb %d: SKIP - already collected", orbEntity))
-				end
+			if not orbEntityType or orbEntityType.type ~= "ExpOrb" then
+				logPickupFailure(orbEntity, playerEntity, playerName, distance, "wrong_type")
 				continue
 			end
-			
+			if not orbItemData then
+				logPickupFailure(orbEntity, playerEntity, playerName, distance, "missing_item_data")
+				continue
+			end
+			if orbItemData and orbItemData.collected then
+				logPickupFailure(orbEntity, playerEntity, playerName, distance, "already_collected")
+				continue
+			end
 			-- MULTIPLAYER: Check ownership - can't collect other players' orbs
 			if orbItemData and orbItemData.ownerId and orbItemData.ownerId ~= playerEntity then
+				logPickupFailure(orbEntity, playerEntity, playerName, distance, "ownership_mismatch")
 				-- DIAGNOSTIC: Log ownership mismatch
 				print(string.format("[ExpCollection] Orb %d: SKIP - ownership mismatch (ownerId=%s, playerEntity=%s)", 
 					orbEntity, tostring(orbItemData.ownerId), tostring(playerEntity)))
@@ -187,10 +228,10 @@ function ExpCollectionSystem.step(dt: number)
 			local dy = playerPos.y - orbPos.y
 			local dz = playerPos.z - orbPos.z
 			local distSq = dx * dx + dy * dy + dz * dz
-			local distance = math.sqrt(distSq)
+			distance = math.sqrt(distSq)
 			
 			-- DIAGNOSTIC: Log orbs within 30 studs for debugging
-			if distance <= 30 then
+			if shouldLogDebug and distance <= 30 then
 				orbsInRange += 1
 				print(string.format("[ExpCollection] Orb %d: dist=%.2f type=%s collected=%s ownerId=%s playerEntity=%s magnetPull=%s", 
 					orbEntity, distance, orbEntityType.type, tostring(orbItemData and orbItemData.collected), 
@@ -200,8 +241,10 @@ function ExpCollectionSystem.step(dt: number)
 			-- Check if within collection radius
 			if distSq <= effectiveRadiusSq then
 				collectionAttempts += 1
-				print(string.format("[ExpCollection] ATTEMPTING COLLECTION: Orb %d at distance %.2f (radius %.2f)", 
-					orbEntity, distance, effectiveRadius))
+				if shouldLogDebug then
+					print(string.format("[ExpCollection] ATTEMPTING COLLECTION: Orb %d at distance %.2f (radius %.2f)", 
+						orbEntity, distance, effectiveRadius))
+				end
 				
 				local expAmount = orbItemData and orbItemData.expAmount or 10
 				local isSink = orbItemData and orbItemData.isSink or false
@@ -209,9 +252,11 @@ function ExpCollectionSystem.step(dt: number)
 			end
 		end
 		
-		-- DIAGNOSTIC: Summary for this player
-		print(string.format("[ExpCollection] Player %d summary: %d total orbs, %d nearby, %d in range, %d collection attempts", 
-			playerEntity, totalOrbs, nearbyCount, orbsInRange, collectionAttempts))
+		-- DIAGNOSTIC: Summary for this player (throttled)
+		if shouldLogDebug then
+			print(string.format("[ExpCollection] Player %d summary: %d total orbs, %d nearby, %d in range, %d collection attempts", 
+				playerEntity, totalOrbs, nearbyCount, orbsInRange, collectionAttempts))
+		end
 	end
 end
 

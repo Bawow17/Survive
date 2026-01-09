@@ -8,22 +8,74 @@ local EnemyPool = {}
 local MAX_POOL_SIZE = 100
 local pool: {number} = {}
 local poolCount = 0
+local lastExhaustWarnTime = 0
+local EXHAUST_WARN_COOLDOWN = 5.0
 
 local world: any
 local Components: any
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
+
+local function resetEnemyEntity(entity: number, enemyType: string, position: Vector3, owner: any)
+	local posData = { x = position.X, y = position.Y, z = position.Z }
+	world:set(entity, Components.Position, posData)
+	world:set(entity, Components.Velocity, { x = 0, y = 0, z = 0 })
+	world:set(entity, Components.EntityType, {
+		type = "Enemy",
+		subtype = enemyType,  -- "Zombie" or "Charger"
+		owner = owner,
+	})
+	world:set(entity, Components.Visual, { modelPath = nil, visible = true })
+	world:set(entity, Components.FacingDirection, { x = 0, y = 0, z = 1 })
+	
+	-- Initialize health (will be set by caller based on config)
+	world:set(entity, Components.Health, {
+		current = 100,
+		max = 100,
+	})
+	
+	-- Initialize AI component
+	world:set(entity, Components.AI, {
+		speed = 8,  -- Will be overwritten by balance config
+		state = "idle",
+	})
+	
+	-- Initialize Target
+	world:set(entity, Components.Target, {
+		id = nil,
+		position = { x = 0, y = 0, z = 0 },
+	})
+	
+	-- Initialize optional components
+	world:set(entity, Components.Lifetime, { remaining = 300, max = 300 })
+end
+
+local function assertHasComponents(entity: number)
+	if not DEBUG then
+		return
+	end
+	assert(world:has(entity, Components.Position), "[EnemyPool] Missing Position after acquire")
+	assert(world:has(entity, Components.EntityType), "[EnemyPool] Missing EntityType after acquire")
+	assert(world:has(entity, Components.Health), "[EnemyPool] Missing Health after acquire")
+	assert(world:has(entity, Components.AI), "[EnemyPool] Missing AI after acquire")
+end
 
 function EnemyPool.init(worldRef: any, components: any)
 	world = worldRef
 	Components = components
 	
 	-- Pre-allocate 100 enemy entities on startup
-	print("[EnemyPool] Initializing pool with " .. MAX_POOL_SIZE .. " entities...")
+	if DEBUG then
+		print("[EnemyPool] Initializing pool with " .. MAX_POOL_SIZE .. " entities...")
+	end
 	for i = 1, MAX_POOL_SIZE do
 		local entity = world:entity()
 		table.insert(pool, entity)
 	end
 	poolCount = MAX_POOL_SIZE
-	print("[EnemyPool] Pool initialized: " .. poolCount .. "/" .. MAX_POOL_SIZE .. " available")
+	if DEBUG then
+		print("[EnemyPool] Pool initialized: " .. poolCount .. "/" .. MAX_POOL_SIZE .. " available")
+	end
 end
 
 -- Acquire an enemy entity from pool (resets all components)
@@ -33,44 +85,22 @@ function EnemyPool.acquire(enemyType: string, position: Vector3, owner: any): nu
 		poolCount -= 1
 		
 		-- Reset all components to safe defaults
-		local posData = { x = position.X, y = position.Y, z = position.Z }
-		world:set(entity, Components.Position, posData)
-		world:set(entity, Components.Velocity, { x = 0, y = 0, z = 0 })
-		world:set(entity, Components.EntityType, {
-			type = "Enemy",
-			subtype = enemyType,  -- "Zombie" or "Charger"
-			owner = owner,
-		})
-		world:set(entity, Components.Visual, { modelPath = nil, visible = true })
-		world:set(entity, Components.FacingDirection, { x = 0, y = 0, z = 1 })
-		
-		-- Initialize health (will be set by caller based on config)
-		world:set(entity, Components.Health, {
-			current = 100,
-			max = 100,
-		})
-		
-		-- Initialize AI component
-		world:set(entity, Components.AI, {
-			speed = 8,  -- Will be overwritten by balance config
-			state = "idle",
-		})
-		
-		-- Initialize Target
-		world:set(entity, Components.Target, {
-			id = nil,
-			position = { x = 0, y = 0, z = 0 },
-		})
-		
-		-- Initialize optional components
-		world:set(entity, Components.Lifetime, { remaining = 300, max = 300 })
+		resetEnemyEntity(entity, enemyType, position, owner)
+		assertHasComponents(entity)
 		
 		return entity
 	end
 	
 	-- Pool exhausted - create new entity (fallback)
-	warn("[EnemyPool] Pool exhausted (" .. poolCount .. "/" .. MAX_POOL_SIZE .. "), allocating new entity")
-	return world:entity()
+	local now = tick()
+	if now - lastExhaustWarnTime >= EXHAUST_WARN_COOLDOWN then
+		lastExhaustWarnTime = now
+		warn("[EnemyPool] Pool exhausted (" .. poolCount .. "/" .. MAX_POOL_SIZE .. "), allocating new entity")
+	end
+	local entity = world:entity()
+	resetEnemyEntity(entity, enemyType, position, owner)
+	assertHasComponents(entity)
+	return entity
 end
 
 -- Return an enemy entity to pool (clears components for reuse)

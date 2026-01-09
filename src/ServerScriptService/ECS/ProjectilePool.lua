@@ -15,20 +15,26 @@ local WARNING_COOLDOWN = 5.0  -- Only warn every 5 seconds
 
 local world: any
 local Components: any
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 
 function ProjectilePool.init(worldRef: any, components: any)
 	world = worldRef
 	Components = components
 	
 	-- Pre-allocate 10000 projectile entities on startup
-	print("[ProjectilePool] Initializing pool with " .. MAX_POOL_SIZE .. " entities...")
+	if DEBUG then
+		print("[ProjectilePool] Initializing pool with " .. MAX_POOL_SIZE .. " entities...")
+	end
 	for i = 1, MAX_POOL_SIZE do
 		local entity = world:entity()
 		table.insert(pool, entity)
 	end
 	poolCount = MAX_POOL_SIZE
-	print("[ProjectilePool] Pool initialized: " .. poolCount .. "/" .. MAX_POOL_SIZE .. " available")
-	print("[ProjectilePool] Will warn when usage exceeds " .. (POOL_WARNING_THRESHOLD * 100) .. "%")
+	if DEBUG then
+		print("[ProjectilePool] Pool initialized: " .. poolCount .. "/" .. MAX_POOL_SIZE .. " available")
+		print("[ProjectilePool] Will warn when usage exceeds " .. (POOL_WARNING_THRESHOLD * 100) .. "%")
+	end
 end
 
 -- Acquire a projectile entity from pool (resets all components)

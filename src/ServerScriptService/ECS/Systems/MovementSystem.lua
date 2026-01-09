@@ -2,6 +2,8 @@
 -- MovementSystem - updates entity positions based on velocity (non-player entities)
 
 local Workspace = game:GetService("Workspace")
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 
 local MovementSystem = {}
 
@@ -406,7 +408,7 @@ function MovementSystem.step(dt: number)
 				
 			-- Only log warning for normal frame times (skip when game is paused/massive lag spike)
 			-- Also skip warning for near-stationary enemies with tiny displacements (floating-point noise)
-			if dt < 0.1 and not (enemySpeed < 5.0 and displacement < 0.5) then
+			if DEBUG and dt < 0.1 and not (enemySpeed < 5.0 and displacement < 0.5) then
 				warn(string.format("[MovementSystem] Clamped entity %d: %.2f -> %.2f studs (speed: %.1f, dt: %.4f)", 
 					entity, displacement, maxDisplacementPerFrame, enemySpeed, dt))
 			end

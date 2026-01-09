@@ -12,5 +12,9 @@ return {
 	EnemyPauseTransition = {
 		FreezeDuration = 3.0,  -- Freeze enemies for 3 seconds (then restore + retarget)
 	},
+	
+	-- Debug toggles (extra logs/asserts should be gated here)
+	Debug = {
+		Enabled = false,
+	},
 }
-

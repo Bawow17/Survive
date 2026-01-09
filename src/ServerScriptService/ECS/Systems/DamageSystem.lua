@@ -19,6 +19,9 @@ local HitFlash: any
 local Knockback: any
 local DeathAnimation: any
 
+local damageAttemptCount = 0
+local damageAppliedCount = 0
+
 -- Configuration
 local HIT_FLASH_DURATION = 0.15  -- Increased from 0.2 to 0.15 for snappier response
 local KNOCKBACK_MIN_DISTANCE = 1 -- Minimum knockback distance
@@ -85,12 +88,13 @@ end
 -- abilityId: optional ability identifier (for damage stat tracking)
 function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, damageType: string, sourceEntity: number?, abilityId: string?): boolean
 	if not world or not targetEntity then
-		return false
+		return false, false
 	end
+	damageAttemptCount += 1
 	
 	-- Check invincibility
 	if StatusEffectSystem and StatusEffectSystem.hasInvincibility(targetEntity) then
-		return false  -- Damage blocked by invincibility
+		return false, false  -- Damage blocked by invincibility
 	end
 	
 	-- Get entity type to determine if this is a player or enemy
@@ -104,7 +108,7 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 		if MobilitySystem and MobilitySystem.absorbShieldBashDamage then
 			local absorbed = MobilitySystem.absorbShieldBashDamage(targetEntity, damageAmount)
 			if absorbed then
-				return false  -- Damage absorbed by Shield Bash, will be healed at end
+				return false, false  -- Damage absorbed by Shield Bash, will be healed at end
 			end
 		end
 	end
@@ -113,7 +117,7 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	if isPlayer then
 		local pauseState = world:get(targetEntity, Components.PlayerPauseState)
 		if pauseState and pauseState.pauseReason == "death" then
-			return false  -- Dead players cannot take damage
+			return false, false  -- Dead players cannot take damage
 		end
 	end
 	
@@ -148,7 +152,7 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	-- Get health component
 	local health = world:get(targetEntity, Health)
 	if not health then
-		return false
+		return false, false
 	end
 	
 	-- Apply damage to overheal first (for players)
@@ -186,6 +190,10 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	end
 	
 	-- Update ECS health (clamped to 0.01 minimum for players)
+	local applied = newHealth ~= health.current
+	if applied then
+		damageAppliedCount += 1
+	end
 	DirtyService.setIfChanged(world, targetEntity, Health, {
 		current = newHealth,
 		max = health.max
@@ -370,7 +378,14 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 		end
 	end
 	
-	return died
+	return died, applied
+end
+
+function DamageSystem.getStats()
+	return {
+		damageAttempts = damageAttemptCount,
+		damageApplied = damageAppliedCount,
+	}
 end
 
 return DamageSystem

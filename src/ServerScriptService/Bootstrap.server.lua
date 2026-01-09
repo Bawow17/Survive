@@ -35,6 +35,7 @@ local GlobalBalance = require(game.ServerScriptService.Balance.GlobalBalance)
 local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 
 -- Ability Registry - Auto-discovers and loads all abilities
 local AbilityRegistry = require(game.ServerScriptService.Abilities.AbilityRegistry)
@@ -497,11 +498,13 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 	local baseHealth = enemyConfig.baseHealth * (EnemyBalance.HealthMultiplier or 1) * (GlobalBalance.HealthMultiplier or 1) * healthScaling * multiplayerHealthScale
 	
 	-- Debug: Log multiplayer scaling for first few enemies
-	local debugCount = workspace:GetAttribute("MultiplayerHealthScalingDebug") or 0
-	if debugCount < 3 then
-		workspace:SetAttribute("MultiplayerHealthScalingDebug", debugCount + 1)
-		print(string.format("[CreateEnemy] %s | Players: %d | Health: %.1f (base: %.1f, multiplayer: %.2fx)", 
-			enemyType, playerCount, baseHealth, enemyConfig.baseHealth, multiplayerHealthScale))
+	if DEBUG then
+		local debugCount = workspace:GetAttribute("MultiplayerHealthScalingDebug") or 0
+		if debugCount < 3 then
+			workspace:SetAttribute("MultiplayerHealthScalingDebug", debugCount + 1)
+			print(string.format("[CreateEnemy] %s | Players: %d | Health: %.1f (base: %.1f, multiplayer: %.2fx)", 
+				enemyType, playerCount, baseHealth, enemyConfig.baseHealth, multiplayerHealthScale))
+		end
 	end
 	local baseDamage = enemyConfig.baseDamage * (EnemyBalance.DamageMultiplier or 1)
 	local baseSpeed = enemyConfig.baseSpeed
@@ -569,6 +572,12 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 		}, "ChargerState")
 	end
 
+	if DEBUG then
+		assert(world:has(entity, Position), "[Bootstrap] Enemy missing Position after spawn")
+		assert(world:has(entity, EntityType), "[Bootstrap] Enemy missing EntityType after spawn")
+		assert(world:has(entity, Health), "[Bootstrap] Enemy missing Health after spawn")
+	end
+
     -- Enemy created
 
 	return entity
@@ -621,6 +630,12 @@ function ECSWorldService.CreateExpOrb(orbType: string, position: Vector3, ownerI
 		max = ItemBalance.OrbLifetime
 	}, "Lifetime")
 	
+	if DEBUG then
+		assert(world:has(entity, Position), "[Bootstrap] ExpOrb missing Position after spawn")
+		assert(world:has(entity, EntityType), "[Bootstrap] ExpOrb missing EntityType after spawn")
+		assert(world:has(entity, ItemData), "[Bootstrap] ExpOrb missing ItemData after spawn")
+	end
+
 	markNewEntity(entity)
 	
 	-- Exp orb created (visible from spawn)
