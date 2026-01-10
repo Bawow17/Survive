@@ -13,13 +13,11 @@ local ExpOrbSpawner = {}
 local world: any
 local Components: any
 local ECSWorldService: any
-local ModelReplicationService: any
 local ExpSinkSystem: any  -- Reference to sink system
-local MagnetPullSystem: any  -- Reference to magnet system
+local PickupService: any
 
 local Position: any
 local PlayerStats: any
-local DirtyService: any
 
 local spawnAccumulator = 0
 local initialDelayAccumulator = 0
@@ -127,19 +125,15 @@ local function updateRaycastParams()
 	raycastParams.FilterDescendantsInstances = getPlayerPartsToExclude()
 end
 
-function ExpOrbSpawner.init(worldRef: any, components: any, ecsWorldService: any, modelReplicationService: any, expSinkSystem: any, dirtyService: any)
+function ExpOrbSpawner.init(worldRef: any, components: any, ecsWorldService: any, expSinkSystem: any, pickupService: any)
 	world = worldRef
 	Components = components
 	ECSWorldService = ecsWorldService
-	ModelReplicationService = modelReplicationService
 	ExpSinkSystem = expSinkSystem
-	DirtyService = dirtyService
+	PickupService = pickupService
 
 	Position = Components.Position
 	PlayerStats = Components.PlayerStats
-	
-	-- Get MagnetPullSystem reference
-	MagnetPullSystem = require(game.ServerScriptService.ECS.Systems.MagnetPullSystem)
 	
 	-- Create cached queries
 	orbCountQuery = world:query(Components.EntityType):cached()
@@ -274,14 +268,6 @@ function ExpOrbSpawner.step(dt: number)
 	local expSpawnRate = EasingUtils.evaluate(ItemBalance.ExpPerSecondScaling, adjustedTime)
 	spawnAccumulator += expSpawnRate * dt
 
-	-- Count current NON-SINK orbs (matches ExpSinkSystem logic)
-	local orbCount = 0
-	for entity, entityType, itemData in world:query(Components.EntityType, Components.ItemData) do
-		if entityType and entityType.type == "ExpOrb" and not (itemData and itemData.isSink) then
-			orbCount += 1
-		end
-	end
-
 	-- Get player positions (only for IN-GAME players)
 	local playerPositions = {}
 	local GameStateManager = require(game.ServerScriptService.ECS.Systems.GameStateManager)
@@ -357,10 +343,8 @@ function ExpOrbSpawner.step(dt: number)
 				-- Don't spawn orb, exp absorbed into red sink
 			else
 				-- Spawn orb normally for this player
-				ModelReplicationService.replicateExpOrb()
-				
-				-- Use configured height offset (2 studs by default)
-				local heightOffset = ItemBalance.OrbHeightOffset or 2.0
+				-- Use configured height offset + 1 stud for pickups
+				local heightOffset = (ItemBalance.OrbHeightOffset or 2.0) + 1.0
 				spawnPosVector = getGroundedPosition(spawnPosVector, heightOffset)
 				
 				-- Skip spawn if no valid ground found within +/- 20 studs
@@ -368,25 +352,8 @@ function ExpOrbSpawner.step(dt: number)
 					continue
 				end
 
-				local orbEntity = ECSWorldService.CreateExpOrb(orbType, spawnPosVector, playerEntity)
-				if orbEntity then
-					orbCount += 1
-					
-					-- Auto-tag with magnet if there's an active session
-					if MagnetPullSystem then
-						local activeSessions = MagnetPullSystem.getActiveSessions()
-						for _, playerEntity in ipairs(activeSessions) do
-							local now = GameTimeSystem.getGameTime()
-							local pullDuration = PowerupBalance.PowerupTypes.Magnet.pullDuration
-							
-							DirtyService.setIfChanged(world, orbEntity, Components.MagnetPull, {
-								targetPlayer = playerEntity,
-								startTime = now,
-								duration = pullDuration,
-							}, "MagnetPull")
-							break  -- Only tag to first active session
-						end
-					end
+				if PickupService then
+					PickupService.spawnExpPickup(orbType, spawnPosVector, playerEntity)
 				end
 			end
 		end
@@ -394,4 +361,3 @@ function ExpOrbSpawner.step(dt: number)
 end
 
 return ExpOrbSpawner
-

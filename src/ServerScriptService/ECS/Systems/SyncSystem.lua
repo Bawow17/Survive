@@ -95,7 +95,6 @@ local NIL_HELPER_LOG_INTERVAL = 2
 local AOI_TRACKED_TYPES = {
 	Enemy = true,
 	Projectile = true,
-	ExpOrb = true,
 	Powerup = true,
 	AfterimageClone = true,
 }
@@ -176,14 +175,6 @@ local initialComponents = {
 	MobilityData = true,
 	MobilityCooldown = true,
 	PassiveEffects = true,  -- Need for mobility multipliers on client
-}
-
-local EXP_ORB_ALLOWED_UPDATES = {
-	ItemData = true,
-	Visual = true,
-	MagnetPull = true,
-	HitFlash = true,
-	DeathAnimation = true,
 }
 
 -- Component tracking (legacy - all components now sync every frame)
@@ -495,19 +486,7 @@ local function filterFlagsForEntity(entityType: string?, flags: {[string]: boole
 		return nil, false
 	end
 	if entityType == "ExpOrb" then
-		local filtered: {[string]: boolean}? = nil
-		for componentName in pairs(flags) do
-			if EXP_ORB_ALLOWED_UPDATES[componentName] then
-				if not filtered then
-					filtered = {}
-				end
-				filtered[componentName] = true
-			end
-		end
-		if not filtered then
-			return nil, false
-		end
-		return filtered, true
+		return nil, false
 	end
 	return flags, true
 end
@@ -727,30 +706,7 @@ local function buildProjectileSpawn(entityId: number): {[string]: any}?
 end
 
 local function buildExpOrbSpawn(entityId: number): {[string]: any}?
-	local pos = world:get(entityId, componentLookup.Position)
-	if not pos then
-		return nil
-	end
-	local itemData = world:get(entityId, componentLookup.ItemData)
-	local visual = world:get(entityId, componentLookup.Visual)
-	local lifetime = world:get(entityId, componentLookup.Lifetime)
-	local magnetPull = world:get(entityId, componentLookup.MagnetPull)
-	local seed = (itemData and itemData.uniqueId) or entityId
-
-	return {
-		id = entityId,
-		origin = getVectorTable(pos),
-		spawnTime = tick(),
-		lifetime = getLifetimeSeconds(lifetime),
-		seed = seed,
-		itemColor = itemData and itemData.color or nil,
-		isSink = itemData and itemData.isSink or nil,
-		uniqueId = itemData and itemData.uniqueId or nil,
-		ownerId = itemData and itemData.ownerId or nil,
-		expAmount = itemData and itemData.expAmount or nil,
-		visualScale = visual and visual.scale or nil,
-		magnetPull = magnetPull and cloneTable(magnetPull) or nil,
-	}
+	return nil
 end
 
 local function addSpawnForPlayer(player: Player, entry: {entities: {[number]: any}?, projectileSpawns: {any}?, orbSpawns: {any}?}, entityId: number): boolean
@@ -770,16 +726,6 @@ local function addSpawnForPlayer(player: Player, entry: {entities: {[number]: an
 		return false
 	end
 	if entityType == "ExpOrb" then
-		local spawnData = buildExpOrbSpawn(entityId)
-		if spawnData then
-			local list = entry.orbSpawns
-			if not list then
-				list = {}
-				entry.orbSpawns = list
-			end
-			table.insert(list, spawnData)
-			return true
-		end
 		return false
 	end
 
@@ -956,17 +902,9 @@ function shouldIncludeEntityForPlayer(entity: number, player: Player?)
 		return true  -- Changed from per-player filtering to global visibility
 	end
 	
-	-- MULTIPLAYER: Per-player items (exp orbs)
+	-- ExpOrb entities are deprecated; never sync them.
 	if entityType.type == "ExpOrb" then
-		local itemData = world:get(entity, componentLookup.ItemData)
-		if itemData and itemData.ownerId then
-			-- Per-player orb: only send to owner
-			if not player then return false end
-			local ownerPlayer = getPlayerFromEntity(itemData.ownerId)
-			return ownerPlayer == player
-		end
-		-- No owner = global orb, visible to all
-		return true
+		return false
 	end
 	
 	-- MULTIPLAYER: Per-player powerups (Health only)
@@ -1952,7 +1890,6 @@ function SyncSystem.buildInitialSnapshot(player: Player?)
 		shared = {},
 		entities = {},
 		projectileSpawns = {},
-		orbSpawns = {},
 		isInitial = false,
 	}
 
@@ -1979,11 +1916,6 @@ function SyncSystem.buildInitialSnapshot(player: Player?)
 				local spawnData = buildProjectileSpawn(entity)
 				if spawnData then
 					table.insert(snapshot.projectileSpawns, spawnData)
-				end
-			elseif entityType == "ExpOrb" then
-				local spawnData = buildExpOrbSpawn(entity)
-				if spawnData then
-					table.insert(snapshot.orbSpawns, spawnData)
 				end
 			else
 				local payload, shareInfo = buildComponentPayload(entity, initialComponents)

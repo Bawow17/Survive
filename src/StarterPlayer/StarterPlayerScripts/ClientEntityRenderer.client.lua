@@ -263,6 +263,21 @@ local function applySharedDefinitions(sharedData: any)
 end
 
 local function resolveEntityData(entityData: {[string]: any}): {[string]: any}
+	-- Fast path: most updates don't use shared numeric references; avoid per-update table allocation.
+	local needsResolve = false
+	for componentName, value in pairs(entityData) do
+		if shareableComponents[componentName] and typeof(value) == "number" then
+			local bucket = sharedComponents[componentName]
+			if bucket and bucket[value] ~= nil then
+				needsResolve = true
+				break
+			end
+		end
+	end
+	if not needsResolve then
+		return entityData
+	end
+
 	local resolved = shallowCopy(entityData)
 	for componentName, value in pairs(entityData) do
 		if shareableComponents[componentName] and typeof(value) == "number" then
@@ -338,6 +353,7 @@ local EXP_ORB_STALE_THRESHOLD = 5.0  -- Exp orbs without updates for 5s are stal
 local INVISIBLE_ENEMY_DIAGNOSTIC_INTERVAL = 5.0  -- Check for invisible enemies every 5s
 local SPAWN_BUDGET_PER_FRAME = 15
 local FADE_OP_BUDGET_PER_FRAME = 750
+local ENABLE_CLIENT_GROUND_SNAP = false -- Raycasting per update is extremely expensive; server already aligns enemies to ground.
 
 -- Active fades being processed with chunked updates
 local activeFades: {[Model]: {
@@ -1047,15 +1063,31 @@ local function checkForInvisibleEnemies(now: number)
 end
 
 -- Client-side ground detection using raycasting
-local groundRaycastParams = RaycastParams.new()
-groundRaycastParams.FilterType = Enum.RaycastFilterType.Exclude
-groundRaycastParams.IgnoreWater = true
-
-local groundIgnoreCache = {}
+local groundRaycastParams: RaycastParams? = nil
+local groundIgnoreCache: {Instance}? = nil
 local lastGroundIgnoreRefresh = 0
 local GROUND_IGNORE_REFRESH_INTERVAL = 1
 
+local function getGroundRaycastParams(): RaycastParams
+	local existing = groundRaycastParams
+	if existing then
+		return existing
+	end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.IgnoreWater = true
+	groundRaycastParams = params
+	return params
+end
+
 local function getGroundIgnoreList()
+	local cache = groundIgnoreCache
+	if not cache then
+		cache = {}
+		groundIgnoreCache = cache
+	end
+
 	local now = tick()
 	if now - lastGroundIgnoreRefresh < GROUND_IGNORE_REFRESH_INTERVAL and #groundIgnoreCache > 0 then
 		return groundIgnoreCache
@@ -1065,11 +1097,7 @@ local function getGroundIgnoreList()
 	for _, player in ipairs(Players:GetPlayers()) do
 		local character = player.Character
 		if character then
-			for _, descendant in ipairs(character:GetDescendants()) do
-				if descendant:IsA("BasePart") then
-					table.insert(groundIgnoreCache, descendant)
-				end
-			end
+			table.insert(groundIgnoreCache, character)
 		end
 	end
 
@@ -1078,10 +1106,15 @@ local function getGroundIgnoreList()
 end
 
 local function getGroundHeight(position: Vector3): number?
-	groundRaycastParams.FilterDescendantsInstances = getGroundIgnoreList()
+	if not ENABLE_CLIENT_GROUND_SNAP then
+		return nil
+	end
+
+	local raycastParams = getGroundRaycastParams()
+	raycastParams.FilterDescendantsInstances = getGroundIgnoreList()
 	
 	local origin = Vector3.new(position.X, position.Y + 25, position.Z)
-	local result = workspace:Raycast(origin, Vector3.new(0, -250, 0), groundRaycastParams)
+	local result = workspace:Raycast(origin, Vector3.new(0, -250, 0), raycastParams)
 	if result then
 		return result.Position.Y
 	end
@@ -1101,7 +1134,7 @@ local function computeTargetCFrame(position: Vector3?, facingData: any, velocity
 	end
 
 	-- Only apply ground snapping to enemies, not projectiles, exp orbs, powerups, or afterimage clones
-	if entityType ~= "Projectile" and entityType ~= "ExpOrb" and entityType ~= "Powerup" and entityType ~= "AfterimageClone" then
+	if ENABLE_CLIENT_GROUND_SNAP and entityType ~= "Projectile" and entityType ~= "ExpOrb" and entityType ~= "Powerup" and entityType ~= "AfterimageClone" then
 		local groundHeight = getGroundHeight(targetPosition)
 		if groundHeight then
 			targetPosition = Vector3.new(targetPosition.X, groundHeight, targetPosition.Z)
@@ -1613,37 +1646,7 @@ local function buildProjectileEntityData(spawnData: {[string]: any}): {[string]:
 end
 
 local function buildOrbEntityData(spawnData: {[string]: any}): {[string]: any}?
-	local origin = spawnData.origin
-	if not origin then
-		return nil
-	end
-	local data: {[string]: any} = {
-		Position = origin,
-		EntityType = { type = "ExpOrb" },
-		ItemData = {
-			type = "ExpOrb",
-			expAmount = spawnData.expAmount,
-			isSink = spawnData.isSink,
-			color = spawnData.itemColor,
-			uniqueId = spawnData.uniqueId,
-			ownerId = spawnData.ownerId,
-			collected = false,
-		},
-		spawnTime = spawnData.spawnTime,
-		lifetime = spawnData.lifetime,
-		seed = spawnData.seed,
-	}
-	if spawnData.visualScale or spawnData.uniqueId then
-		data.Visual = {
-			scale = spawnData.visualScale,
-			uniqueId = spawnData.uniqueId,
-			visible = true,
-		}
-	end
-	if spawnData.magnetPull then
-		data.MagnetPull = spawnData.magnetPull
-	end
-	return data
+	return nil
 end
 
 local function ensureModelTransform(record: RenderRecord, position: Vector3?, velocityComponent: any, facingComponent: any)
@@ -2242,6 +2245,9 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 	if not record then
 		return
 	end
+	if record.entityType == "ExpOrb" then
+		return
+	end
 
 	local positionComponent = entityData.Position or entityData.position
 	local positionVector = positionComponent and toVector3(positionComponent)
@@ -2516,6 +2522,9 @@ local function enqueueSpawn(entityId: string | number, rawData: {[string]: any})
 		profInc("duplicateSpawnForExistingEntityId", 1)
 		return
 	end
+	-- Mark as network-known immediately so updates in the same packet don't get treated as "unknown".
+	-- Visuals are still only created when the spawn queue processes this entry.
+	knownEntityIds[key] = true
 	spawnQueueSet[key] = true
 	table.insert(spawnQueue, {
 		entityId = entityId,
@@ -2546,7 +2555,6 @@ local function processSpawnQueue()
 		end
 		spawnQueueSet[key] = nil
 		if not renderedEntities[key] then
-			knownEntityIds[key] = true
 			handleEntitySync(entityId, entry.data)
 			if not renderedEntities[key] then
 				knownEntityIds[key] = nil
@@ -2660,10 +2668,19 @@ local function processUpdates(message: any)
 		local key = entityKey(entityId)
 		if not hasInitialSync then
 			profInc("updatesBeforeInitialSync", 1)
+			bufferUpdate(key, updateData)
+			return
 		end
 
 		if not knownEntityIds[key] then
 			profInc("updatesForUnknownEntityId", 1)
+			bufferUpdate(key, updateData)
+			return
+		end
+
+		-- Known on the network, but visuals may still be pending in the spawn queue.
+		local record = renderedEntities[key]
+		if not record or not record.model or not record.model.Parent then
 			bufferUpdate(key, updateData)
 			return
 		end

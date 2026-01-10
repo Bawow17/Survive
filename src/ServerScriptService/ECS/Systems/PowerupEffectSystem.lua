@@ -4,7 +4,6 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local PowerupBalance = require(game.ServerScriptService.Balance.PowerupBalance)
-local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 
 local PowerupEffectSystem = {}
 
@@ -135,41 +134,15 @@ local function applyNuke(playerEntity: number)
 	broadcastToClient(playerEntity, "Nuke")
 end
 
--- MAGNET: Pull player's exp orbs towards them (and tag new ones during duration)
+-- MAGNET: Enable magnet session (client handles visual pull, server validates range)
 local function applyMagnet(playerEntity: number)
 	if not world then return end
-	
-	local now = GameTimeSystem.getGameTime()
+
 	local pullDuration = PowerupBalance.PowerupTypes.Magnet.pullDuration
 	
-	-- Start magnet session (new orbs will be auto-tagged by spawn systems)
+	-- Start magnet session (used for server validation + client UI)
 	local MagnetPullSystem = require(game.ServerScriptService.ECS.Systems.MagnetPullSystem)
 	MagnetPullSystem.startMagnetSession(playerEntity, pullDuration)
-	
-	-- MULTIPLAYER: Tag only this player's exp orbs with MagnetPull component
-	for entity, entityType, itemData in world:query(Components.EntityType, Components.ItemData) do
-		if entityType.type == "ExpOrb" then
-			-- Skip red sink orbs (they are special and should not be magnetized)
-			if itemData and itemData.isSink then
-				continue
-			end
-			
-			-- MULTIPLAYER: Only magnetize orbs owned by this player
-			if itemData and itemData.ownerId ~= playerEntity then
-				continue
-			end
-			
-			-- Check if it doesn't already have MagnetPull
-			local existingPull = world:get(entity, Components.MagnetPull)
-			if not existingPull then
-				DirtyService.setIfChanged(world, entity, Components.MagnetPull, {
-					targetPlayer = playerEntity,
-					startTime = now,
-					duration = pullDuration,
-				}, "MagnetPull")
-			end
-		end
-	end
 	
 	-- Broadcast to client for highlight
 	broadcastToClient(playerEntity, "Magnet")
@@ -326,4 +299,3 @@ function PowerupEffectSystem.applyPowerup(playerEntity: number, powerupType: str
 end
 
 return PowerupEffectSystem
-

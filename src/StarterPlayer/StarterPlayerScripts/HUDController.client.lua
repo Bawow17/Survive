@@ -107,6 +107,21 @@ local function applySharedDefinitions(sharedData: any)
 end
 
 local function resolveEntityData(entityData: {[string]: any}): {[string]: any}
+	-- Fast path: avoid allocating a copy when there are no shared numeric references in this payload.
+	local needsResolve = false
+	for componentName, value in pairs(entityData) do
+		if typeof(value) == "number" then
+			local bucket = sharedComponents[componentName]
+			if bucket and bucket[value] ~= nil then
+				needsResolve = true
+				break
+			end
+		end
+	end
+	if not needsResolve then
+		return entityData
+	end
+
 	local resolved = shallowCopy(entityData)
 	for componentName, value in pairs(entityData) do
 		if typeof(value) == "number" then
@@ -117,6 +132,13 @@ local function resolveEntityData(entityData: {[string]: any}): {[string]: any}
 		end
 	end
 	return resolved
+end
+
+local function isPlayerEntityPayload(data: any): boolean
+	if typeof(data) ~= "table" then
+		return false
+	end
+	return data.PlayerStats ~= nil or data.Experience ~= nil or data.Level ~= nil
 end
 
 local function tweenFill(frame: Frame, goalScale: number)
@@ -656,11 +678,35 @@ local function processSnapshot(snapshot: any)
 		return
 	end
 
+	if playerEntityId then
+		local direct = entities[playerEntityId] or entities[tostring(playerEntityId)]
+		if typeof(direct) == "table" then
+			handlePlayerEntityData(playerEntityId, resolveEntityData(direct))
+		end
+		return
+	end
+
+	-- Prefer selecting the actual player entity from the snapshot instead of doing work for every entity.
+	local fallbackEntityId: any = nil
+	local fallbackData: any = nil
 	for entityId, data in pairs(entities) do
 		if typeof(data) == "table" then
-			local resolved = resolveEntityData(data)
-			handlePlayerEntityData(tonumber(entityId) or entityId, resolved)
+			if not fallbackEntityId then
+				fallbackEntityId = entityId
+				fallbackData = data
+			end
+			if isPlayerEntityPayload(data) then
+				local resolved = resolveEntityData(data)
+				handlePlayerEntityData(tonumber(entityId) or entityId, resolved)
+				return
+			end
 		end
+	end
+
+	-- Fallback (legacy behavior): take the first entity if we couldn't identify the player payload.
+	if fallbackEntityId and typeof(fallbackData) == "table" then
+		local resolved = resolveEntityData(fallbackData)
+		handlePlayerEntityData(tonumber(fallbackEntityId) or fallbackEntityId, resolved)
 	end
 end
 
@@ -673,10 +719,18 @@ local function processUpdates(message: any)
 
 	local entities = message.entities
 	if typeof(entities) == "table" then
-		for entityId, data in pairs(entities) do
-			if typeof(data) == "table" then
-				local resolved = resolveEntityData(data)
-				handlePlayerEntityData(tonumber(entityId) or entityId, resolved)
+		if playerEntityId then
+			local direct = entities[playerEntityId] or entities[tostring(playerEntityId)]
+			if typeof(direct) == "table" then
+				handlePlayerEntityData(playerEntityId, resolveEntityData(direct))
+			end
+		else
+			for entityId, data in pairs(entities) do
+				if isPlayerEntityPayload(data) then
+					local resolved = resolveEntityData(data)
+					handlePlayerEntityData(tonumber(entityId) or entityId, resolved)
+					break
+				end
 			end
 		end
 	end
@@ -685,8 +739,15 @@ local function processUpdates(message: any)
 	if typeof(updates) == "table" then
 		for _, updateData in ipairs(updates) do
 			if typeof(updateData) == "table" and updateData.id then
-				local resolved = resolveEntityData(updateData)
-				handlePlayerEntityData(updateData.id, resolved)
+				if playerEntityId then
+					if updateData.id == playerEntityId then
+						handlePlayerEntityData(updateData.id, resolveEntityData(updateData))
+					end
+				else
+					if isPlayerEntityPayload(updateData) then
+						handlePlayerEntityData(updateData.id, resolveEntityData(updateData))
+					end
+				end
 			end
 		end
 	end
@@ -695,8 +756,15 @@ local function processUpdates(message: any)
 	if typeof(resyncs) == "table" then
 		for _, updateData in ipairs(resyncs) do
 			if typeof(updateData) == "table" and updateData.id then
-				local resolved = resolveEntityData(updateData)
-				handlePlayerEntityData(updateData.id, resolved)
+				if playerEntityId then
+					if updateData.id == playerEntityId then
+						handlePlayerEntityData(updateData.id, resolveEntityData(updateData))
+					end
+				else
+					if isPlayerEntityPayload(updateData) then
+						handlePlayerEntityData(updateData.id, resolveEntityData(updateData))
+					end
+				end
 			end
 		end
 	end

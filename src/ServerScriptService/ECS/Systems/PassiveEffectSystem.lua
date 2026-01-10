@@ -121,6 +121,7 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 	-- Store pickup range multiplier for ExpCollectionSystem
 	local pickupRangeMult = effects.pickupRangeMultiplier or 1.0
 	player:SetAttribute("PickupRangeMultiplier", pickupRangeMult)
+	player:SetAttribute("BasePickupRange", DEFAULT_PICKUP_RANGE)
 	
 	-- Store exp multiplier for ExpCollectionSystem
 	local expMult = effects.expMultiplier or 1.0
@@ -246,4 +247,3 @@ function PassiveEffectSystem.refreshPlayerSpeed(playerEntity: number)
 end
 
 return PassiveEffectSystem
-

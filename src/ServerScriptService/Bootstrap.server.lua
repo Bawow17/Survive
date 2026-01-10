@@ -56,12 +56,12 @@ local EnemyRegistry = require(game.ServerScriptService.Enemies.EnemyRegistry)
 
 -- EXP/Leveling Systems
 local ExpOrbSpawner = require(game.ServerScriptService.ECS.Systems.ExpOrbSpawner)
-local ExpCollectionSystem = require(game.ServerScriptService.ECS.Systems.ExpCollectionSystem)
 local ExpSystem = require(game.ServerScriptService.ECS.Systems.ExpSystem)
 local ExpSinkSystem = require(game.ServerScriptService.ECS.Systems.ExpSinkSystem)
 local EnemyExpDropSystem = require(game.ServerScriptService.ECS.Systems.EnemyExpDropSystem)
 local PauseSystem = require(game.ServerScriptService.ECS.Systems.PauseSystem)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
+local PickupService = require(game.ServerScriptService.Services.PickupService)
 
 -- Upgrade Systems
 local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
@@ -161,6 +161,7 @@ function ECSWorldService.Initialize()
 	
 	-- Initialize model replication first (clones models from ServerStorage to ReplicatedStorage)
 	ModelReplicationService.init()
+	ModelReplicationService.replicateExpOrb()
 	
 	-- Initialize object pools (PERFORMANCE OPTIMIZATION: pre-allocate reusable entities)
 	ProjectilePool.init(world, Components)
@@ -288,12 +289,13 @@ function ECSWorldService.Initialize()
 	
 	-- Initialize EXP/Leveling systems
 	ExpSystem.init(world, Components, DirtyService)
-	ExpSinkSystem.init(world, Components, DirtyService, ECSWorldService, SyncSystem)
-	EnemyExpDropSystem.init(world, Components, DirtyService, ECSWorldService, ExpSinkSystem)
-	ExpCollectionSystem.init(world, Components, DirtyService, ECSWorldService)
-	ExpCollectionSystem.setExpSystem(ExpSystem)  -- Set reference after ExpSystem is initialized
-	ExpCollectionSystem.setExpSinkSystem(ExpSinkSystem)  -- Set reference after ExpSinkSystem is initialized
-	ExpOrbSpawner.init(world, Components, ECSWorldService, ModelReplicationService, ExpSinkSystem, DirtyService)
+	PickupService.init(world, Components, ExpSystem, function(player)
+		return playerEntities[player]
+	end)
+	ExpSinkSystem.init(world, Components, PickupService)
+	PickupService.setExpSinkSystem(ExpSinkSystem)
+	EnemyExpDropSystem.init(world, Components, ECSWorldService, ExpSinkSystem, PickupService)
+	ExpOrbSpawner.init(world, Components, ECSWorldService, ExpSinkSystem, PickupService)
 	
 	-- Setup unpause callback (after ExpSystem and UpgradeSystem are initialized)
 	PauseSystem.setUnpauseCallback(function(action: string, player: Player, upgradeId: string?, pauseToken: number?)
@@ -697,7 +699,6 @@ function ECSWorldService.SpawnStarterExps(player: Player, playerPosition: Vector
 	
 	-- Spawn orbs
 	local spawned = 0
-	local spawnedEntities = {}  -- Track spawned orb entities
 	
 	for i = 1, orbCount do
 		local maxAttempts = config.MaxSpawnAttempts or 3
@@ -740,7 +741,7 @@ function ECSWorldService.SpawnStarterExps(player: Player, playerPosition: Vector
 				
 				local result = workspace:Raycast(origin, Vector3.new(0, -200, 0), raycastParams)
 				if result then
-					validPosition = Vector3.new(spawnPos.X, result.Position.Y + 0.5, spawnPos.Z)
+					validPosition = Vector3.new(spawnPos.X, result.Position.Y + 1.5, spawnPos.Z)
 					break
 				end
 			else
@@ -752,9 +753,8 @@ function ECSWorldService.SpawnStarterExps(player: Player, playerPosition: Vector
 		-- Spawn orb if valid position found
 		if validPosition then
 			local orbType = pickOrbType()
-			-- All orbs now visible from creation
-			local orbEntity = ECSWorldService.CreateExpOrb(orbType, validPosition, playerEntity, nil)
-			if orbEntity then
+			if PickupService then
+				PickupService.spawnExpPickup(orbType, validPosition, playerEntity)
 				spawned = spawned + 1
 			end
 		end
@@ -1228,10 +1228,6 @@ local function stepWorld(dt: number)
 	ExpOrbSpawner.step(dt)
 	debug.profileend()
 	
-	debug.profilebegin("ExpCollection")
-	ExpCollectionSystem.step(dt)
-	debug.profileend()
-	
 	debug.profilebegin("ExpSystem")
 	ExpSystem.step(dt)
 	debug.profileend()
@@ -1242,6 +1238,10 @@ local function stepWorld(dt: number)
 	else
 		warn("[Bootstrap] ExpSinkSystem.step not available!")
 	end
+	debug.profileend()
+
+	debug.profilebegin("PickupService")
+	PickupService.step(dt)
 	debug.profileend()
 	
 	-- Pause system (for individual pause timeout checking)
@@ -1510,6 +1510,11 @@ end)
 
 Players.PlayerRemoving:Connect(function(player)
 	local entity = playerEntities[player]
+	if entity then
+		PickupService.cleanupPlayer(player, entity)
+	else
+		PickupService.cleanupPlayer(player, nil)
+	end
 	if entity then
 		ECSWorldService.DestroyEntity(entity)
 	end

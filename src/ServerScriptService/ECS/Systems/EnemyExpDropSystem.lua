@@ -5,16 +5,14 @@
 local Workspace = game:GetService("Workspace")
 local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
 local PowerupBalance = require(game.ServerScriptService.Balance.PowerupBalance)
-local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 
 local EnemyExpDropSystem = {}
 
 local world: any
 local Components: any
-local DirtyService: any
 local ECSWorldService: any
 local ExpSinkSystem: any
-local MagnetPullSystem: any
+local PickupService: any
 
 -- Use Random.new() for better randomization
 local RNG = Random.new()
@@ -68,7 +66,7 @@ local function getPlayerPartsToExclude()
 	return playerPartsCache
 end
 
-local function getGroundedPosition(position: Vector3): Vector3?
+local function getGroundedPosition(position: Vector3, heightOffset: number): Vector3?
 	raycastParams.FilterDescendantsInstances = getPlayerPartsToExclude()
 	local origin = position + Vector3.new(0, 25, 0)
 	local result = Workspace:Raycast(origin, Vector3.new(0, -200, 0), raycastParams)
@@ -82,7 +80,6 @@ local function getGroundedPosition(position: Vector3): Vector3?
 			return nil
 		end
 		
-		local heightOffset = ItemBalance.OrbHeightOffset or 2.0
 		return Vector3.new(position.X, groundY + heightOffset, position.Z)
 	end
 	
@@ -90,15 +87,12 @@ local function getGroundedPosition(position: Vector3): Vector3?
 	return nil
 end
 
-function EnemyExpDropSystem.init(worldRef: any, components: any, dirtyService: any, ecsWorldService: any, expSinkSystem: any)
+function EnemyExpDropSystem.init(worldRef: any, components: any, ecsWorldService: any, expSinkSystem: any, pickupService: any)
 	world = worldRef
 	Components = components
-	DirtyService = dirtyService
 	ECSWorldService = ecsWorldService
 	ExpSinkSystem = expSinkSystem
-	
-	-- Get MagnetPullSystem reference
-	MagnetPullSystem = require(game.ServerScriptService.ECS.Systems.MagnetPullSystem)
+	PickupService = pickupService
 end
 
 -- Pick random orb type based on enemy drop weights
@@ -173,7 +167,7 @@ function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vec
 	if shouldDropPowerup then
 		-- Drop powerup instead of exp
 		local powerupType = pickPowerupType()
-		local groundedPosition = getGroundedPosition(deathPosition)
+		local groundedPosition = getGroundedPosition(deathPosition, PowerupBalance.PowerupHeightOffset or 2.0)
 		
 		-- Skip drop if no valid ground found within +/- 20 studs
 		if not groundedPosition then
@@ -212,7 +206,7 @@ function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vec
 		local scaledExp = math.floor(baseExp * hpMultiplier * ItemBalance.EnemyDrops.BaseExpMultiplier)
 		
 		-- Ground the drop position (same as ambient spawns: ground + 2 studs)
-		local groundedPosition = getGroundedPosition(deathPosition)
+		local groundedPosition = getGroundedPosition(deathPosition, (ItemBalance.OrbHeightOffset or 2.0) + 1.0)
 		
 		-- Skip drop if no valid ground found within +/- 20 studs
 		if not groundedPosition then
@@ -237,33 +231,9 @@ function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vec
 				if ExpSinkSystem.shouldAbsorb(playerEntity) then
 					ExpSinkSystem.depositExp(scaledExp, playerEntity)
 				else
-					-- Spawn orb for this specific player
-					local orbEntity = ECSWorldService.CreateExpOrb(orbType, groundedPosition, playerEntity)
-					if orbEntity then
-						-- Update exp amount with scaled value
-						local itemData = world:get(orbEntity, Components.ItemData)
-						if itemData and scaledExp ~= baseExp then
-							itemData.expAmount = scaledExp
-							DirtyService.setIfChanged(world, orbEntity, Components.ItemData, itemData, "ItemData")
-						end
-						
-						-- Auto-tag with magnet if there's an active session for this player
-						if MagnetPullSystem then
-							local activeSessions = MagnetPullSystem.getActiveSessions()
-							for _, magnetPlayerEntity in ipairs(activeSessions) do
-								if magnetPlayerEntity == playerEntity then
-									local now = GameTimeSystem.getGameTime()
-									local pullDuration = PowerupBalance.PowerupTypes.Magnet.pullDuration
-									
-									DirtyService.setIfChanged(world, orbEntity, Components.MagnetPull, {
-										targetPlayer = playerEntity,
-										startTime = now,
-										duration = pullDuration,
-									}, "MagnetPull")
-									break
-								end
-							end
-						end
+					-- Spawn pickup for this specific player
+					if PickupService then
+						PickupService.spawnExpPickup(orbType, groundedPosition, playerEntity, scaledExp)
 					end
 				end
 			end
@@ -272,4 +242,3 @@ function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vec
 end
 
 return EnemyExpDropSystem
-
