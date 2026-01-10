@@ -542,13 +542,30 @@ local function initRemotes()
 	
 	-- Listen for ongoing entity updates (EntityUpdate - ongoing changes)
 	EntityUpdate.OnClientEvent:Connect(function(message)
-		if typeof(message) ~= "table" or typeof(message.updates) ~= "table" then
+		if typeof(message) ~= "table" then
 			return
 		end
 		
-		-- Process each update in the message
-		for _, updateData in ipairs(message.updates) do
-			processMobilityUpdate(updateData)
+		local entities = message.entities
+		if typeof(entities) == "table" then
+			for _, entityData in pairs(entities) do
+				processMobilityUpdate(entityData)
+			end
+		end
+		
+		local updates = message.updates
+		if typeof(updates) == "table" then
+			-- Process each update in the message
+			for _, updateData in ipairs(updates) do
+				processMobilityUpdate(updateData)
+			end
+		end
+		
+		local resyncs = message.resyncs
+		if typeof(resyncs) == "table" then
+			for _, updateData in ipairs(resyncs) do
+				processMobilityUpdate(updateData)
+			end
 		end
 	end)
 end
@@ -1194,4 +1211,3 @@ end
 -- Initialize
 initRemotes()
 setupPauseListeners()
-

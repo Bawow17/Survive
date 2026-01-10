@@ -671,9 +671,29 @@ local function processUpdates(message: any)
 
 	applySharedDefinitions(message.shared)
 
+	local entities = message.entities
+	if typeof(entities) == "table" then
+		for entityId, data in pairs(entities) do
+			if typeof(data) == "table" then
+				local resolved = resolveEntityData(data)
+				handlePlayerEntityData(tonumber(entityId) or entityId, resolved)
+			end
+		end
+	end
+
 	local updates = message.updates
 	if typeof(updates) == "table" then
 		for _, updateData in ipairs(updates) do
+			if typeof(updateData) == "table" and updateData.id then
+				local resolved = resolveEntityData(updateData)
+				handlePlayerEntityData(updateData.id, resolved)
+			end
+		end
+	end
+
+	local resyncs = message.resyncs
+	if typeof(resyncs) == "table" then
+		for _, updateData in ipairs(resyncs) do
 			if typeof(updateData) == "table" and updateData.id then
 				local resolved = resolveEntityData(updateData)
 				handlePlayerEntityData(updateData.id, resolved)

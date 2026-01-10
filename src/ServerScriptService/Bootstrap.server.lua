@@ -5,6 +5,16 @@ local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
+local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
+local PROFILING_ENABLED = ProfilingConfig.ENABLED
+
+local function profInc(name: string, amount: number?)
+	if PROFILING_ENABLED then
+		Prof.incCounter(name, amount)
+	end
+end
+
 local ECS = require(game.ServerScriptService.ECS.ECSFacade)
 local DirtyService = require(game.ServerScriptService.ECS.DirtyService)
 local ProjectilePool = require(game.ServerScriptService.ECS.ProjectilePool)
@@ -1454,6 +1464,7 @@ RequestInitialSync.OnServerInvoke = function(player)
 	end
 	if next(snapshot) then
 		EntitySync:FireClient(player, snapshot)
+		profInc("initialSyncSentCount", 1)
 	end
 	return snapshot
 end
@@ -1492,6 +1503,7 @@ Players.PlayerAdded:Connect(function(player)
 		local snapshot = SyncSystem.buildInitialSnapshot(player)
 		if next(snapshot) then
 			EntitySync:FireClient(player, snapshot)
+			profInc("initialSyncSentCount", 1)
 		end
 	end)
 end)

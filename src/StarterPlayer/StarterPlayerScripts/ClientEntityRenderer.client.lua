@@ -10,6 +10,13 @@ local TweenService = game:GetService("TweenService")
 local ModelPaths = require(ReplicatedStorage.Shared.ModelPaths)
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingClient) or require(ReplicatedStorage.Shared.ProfilingStub)
+local PROFILING_ENABLED = ProfilingConfig.ENABLED
+
+local function profInc(name: string, amount: number?)
+	if PROFILING_ENABLED then
+		Prof.incCounter(name, amount)
+	end
+end
 
 local player = Players.LocalPlayer
 
@@ -45,6 +52,7 @@ afterimageClonesFolder.Parent = workspace
 
 local EntitySync = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):WaitForChild("EntitySync")
 local EntityUpdate = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):WaitForChild("EntityUpdate")
+local EntityUpdateUnreliable = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):FindFirstChild("EntityUpdateUnreliable")
 local EntityDespawn = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):WaitForChild("EntityDespawn")
 local RequestInitialSync = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):WaitForChild("RequestInitialSync")
 
@@ -61,6 +69,10 @@ local PROJECTILE_MIN_CONTINUE_SPEED = 0.5 -- studs/sec; if slower, despawn immed
 local USE_PROJECTILE_TWEENS = false
 local PROJECTILE_TWEEN_USES_FIXED_PATH = false -- ensure server updates drive visuals
 local FACE_THRESHOLD = 0.05
+local BUFFERED_UPDATE_TTL = 0.75
+local BUFFERED_UPDATE_CLEAN_INTERVAL = 0.5
+local ORB_BOB_AMPLITUDE = 0.6
+local ORB_BOB_FREQUENCY = 1.6
 
 local shareableComponents = {
 	EntityType = true,
@@ -91,17 +103,37 @@ type RenderRecord = {
 	currentCFrame: CFrame?,
     activeTween: Tween?,
     tweenEndsAt: number?,
-    tweenEndPosition: Vector3?,
+	tweenEndPosition: Vector3?,
 	pendingRemovalTime: number?,
 	despawnQueued: boolean?,
 	lastRenderTick: number?,
 	isFadedOut: boolean?,  -- Track if entity is faded out due to distance
 	isSpawning: boolean?,  -- Track if entity is still fading in from spawn
+	fadeParts: {BasePart}?,
+	fadeDecals: {Decal}?,
+	fadeTextures: {Texture}?,
+	fadeSurfaceGuis: {SurfaceGui}?,
+	anchoredParts: {BasePart}?,
+	spawnToken: number?,
+	simType: string?,
+	simOrigin: Vector3?,
+	simVelocity: Vector3?,
+	simSpawnTime: number?,
+	simLifetime: number?,
+	simSeed: number?,
 }
 
 local renderedEntities: {[string]: RenderRecord} = {}
+local recordByModel: {[Model]: RenderRecord} = {}
 local modelCache: {[string]: Model} = {}
 local MAX_CACHE_SIZE = 50 -- Limit model cache size to prevent memory bloat (increased to prevent clearing)
+local hasInitialSync = false
+local knownEntityIds: {[string]: boolean} = {}
+local bufferedUpdates: {[string]: {data: {[string]: any}, expiresAt: number}} = {}
+local bufferedUpdateTotal = 0
+local MAX_BUFFERED_UPDATES = 5000
+local lastBufferedUpdateCleanup = 0
+local handleEntityDespawn: (string | number, boolean?) -> ()
 local lastProjectileCleanup = 0
 local lastExpOrbCleanup = 0
 local lastDeathCleanupCheck = 0
@@ -113,6 +145,95 @@ local function entityKey(entityId: string | number): string
 		return tostring(entityId)
 	end
 	return entityId
+end
+
+local function bufferUpdate(key: string, updateData: {[string]: any})
+	local now = tick()
+	local existing = bufferedUpdates[key]
+	if existing then
+		existing.data = updateData
+		existing.expiresAt = now + BUFFERED_UPDATE_TTL
+		profInc("bufferedUpdateCount", 1)
+		return
+	end
+
+	if bufferedUpdateTotal >= MAX_BUFFERED_UPDATES then
+		local cleanupNow = now
+		if cleanupNow - lastBufferedUpdateCleanup >= BUFFERED_UPDATE_CLEAN_INTERVAL then
+			lastBufferedUpdateCleanup = cleanupNow
+			for entryKey, entry in pairs(bufferedUpdates) do
+				if entry.expiresAt <= cleanupNow then
+					bufferedUpdates[entryKey] = nil
+					bufferedUpdateTotal = math.max(bufferedUpdateTotal - 1, 0)
+					profInc("bufferedUnknownUpdatesEvicted", 1)
+				end
+			end
+		end
+	end
+
+	if bufferedUpdateTotal >= MAX_BUFFERED_UPDATES then
+		profInc("droppedUpdateCount", 1)
+		return
+	end
+
+	bufferedUpdates[key] = {
+		data = updateData,
+		expiresAt = now + BUFFERED_UPDATE_TTL,
+	}
+	bufferedUpdateTotal += 1
+	profInc("bufferedUpdateCount", 1)
+end
+
+local function cleanupExpiredBufferedUpdates(now: number)
+	if now - lastBufferedUpdateCleanup < BUFFERED_UPDATE_CLEAN_INTERVAL then
+		return
+	end
+	lastBufferedUpdateCleanup = now
+	for entryKey, entry in pairs(bufferedUpdates) do
+		if entry.expiresAt <= now then
+			bufferedUpdates[entryKey] = nil
+			bufferedUpdateTotal = math.max(bufferedUpdateTotal - 1, 0)
+			profInc("bufferedUnknownUpdatesEvicted", 1)
+		end
+	end
+end
+
+local function buildModelCaches(model: Model): {fadeParts: {BasePart}, fadeDecals: {Decal}, fadeTextures: {Texture}, fadeSurfaceGuis: {SurfaceGui}, anchoredParts: {BasePart}}
+	local fadeParts = {}
+	local fadeDecals = {}
+	local fadeTextures = {}
+	local fadeSurfaceGuis = {}
+	local anchoredParts = {}
+
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			if descendant.Name ~= "Hitbox" and descendant.Name ~= "Attackbox" then
+				table.insert(fadeParts, descendant)
+			end
+			if descendant.Anchored then
+				table.insert(anchoredParts, descendant)
+			end
+		elseif descendant:IsA("Decal") then
+			table.insert(fadeDecals, descendant)
+		elseif descendant:IsA("Texture") then
+			table.insert(fadeTextures, descendant)
+		elseif descendant:IsA("SurfaceGui") then
+			table.insert(fadeSurfaceGuis, descendant)
+		end
+	end
+
+	return {
+		fadeParts = fadeParts,
+		fadeDecals = fadeDecals,
+		fadeTextures = fadeTextures,
+		fadeSurfaceGuis = fadeSurfaceGuis,
+		anchoredParts = anchoredParts,
+	}
+end
+
+local function destroyVisualModel(model: Model)
+	profInc("visualsDestroyed", 1)
+	model:Destroy()
 end
 
 local function shallowCopy(original: {[any]: any}): {[any]: any}
@@ -215,6 +336,8 @@ local PROJECTILE_CLEAN_INTERVAL = 5
 local PROJECTILE_STALE_THRESHOLD = 1.5
 local EXP_ORB_STALE_THRESHOLD = 5.0  -- Exp orbs without updates for 5s are stale
 local INVISIBLE_ENEMY_DIAGNOSTIC_INTERVAL = 5.0  -- Check for invisible enemies every 5s
+local SPAWN_BUDGET_PER_FRAME = 15
+local FADE_OP_BUDGET_PER_FRAME = 750
 
 -- Active fades being processed with chunked updates
 local activeFades: {[Model]: {
@@ -223,70 +346,116 @@ local activeFades: {[Model]: {
 	startTime: number,
 	duration: number,
 	lastUpdate: number,
+	pendingOpsCount: number?,
+	done: boolean?,
+	model: Model?,
+	fadeParts: {BasePart}?,
+	fadeDecals: {Decal}?,
+	fadeTextures: {Texture}?,
+	fadeSurfaceGuis: {SurfaceGui}?,
 	onComplete: (() -> ())?
 }} = {}
 
+local fadeOpQueue: {{list: {any}, index: number, target: number, kind: string, fade: any}} = {}
+local fadeOpQueueHead = 1
+local fadeQueuedOps = 0
+
+local spawnQueue: {{entityId: string | number, data: {[string]: any}}} = {}
+local spawnQueueHead = 1
+local spawnQueueSet: {[string]: boolean} = {}
+
 -- Optimized fade function - sets transparency immediately without tweens
-local function setModelTransparency(model: Model, targetTransparency: number)
+local function setModelTransparency(model: Model, targetTransparency: number, cache: {fadeParts: {BasePart}?, fadeDecals: {Decal}?, fadeTextures: {Texture}?, fadeSurfaceGuis: {SurfaceGui}?}?)
 	if not model or not model.Parent then
 		return
 	end
 	
 	-- Set transparency for all visible parts (much faster than tweens!)
 	local descendantOps = 0
-	for _, descendant in ipairs(model:GetDescendants()) do
-		descendantOps += 1
-		if descendant:IsA("BasePart") and descendant.Name ~= "Hitbox" and descendant.Name ~= "Attackbox" then
-			-- Get or store original transparency
-			local originalTrans = descendant:GetAttribute("OriginalTransparency")
-			if not originalTrans or typeof(originalTrans) ~= "number" then
-				descendant:SetAttribute("OriginalTransparency", descendant.Transparency)
-				originalTrans = descendant.Transparency
+	local fadeParts = cache and cache.fadeParts
+	local fadeDecals = cache and cache.fadeDecals
+	local fadeTextures = cache and cache.fadeTextures
+	local fadeSurfaceGuis = cache and cache.fadeSurfaceGuis
+
+	if not fadeParts then
+		local record = recordByModel[model]
+		if record then
+			fadeParts = record.fadeParts
+			fadeDecals = record.fadeDecals
+			fadeTextures = record.fadeTextures
+			fadeSurfaceGuis = record.fadeSurfaceGuis
+		end
+	end
+
+	if fadeParts then
+		for _, part in ipairs(fadeParts) do
+			if part and part.Parent then
+				descendantOps += 1
+				local originalTrans = part:GetAttribute("OriginalTransparency")
+				if not originalTrans or typeof(originalTrans) ~= "number" then
+					part:SetAttribute("OriginalTransparency", part.Transparency)
+					originalTrans = part.Transparency
+				end
+
+				local actualTarget = targetTransparency
+				if targetTransparency == 0 and typeof(originalTrans) == "number" then
+					actualTarget = originalTrans
+				end
+
+				part.Transparency = actualTarget
 			end
-			
-			-- Calculate actual target
-			local actualTarget = targetTransparency
-			if targetTransparency == 0 and typeof(originalTrans) == "number" then
-				actualTarget = originalTrans  -- Restore original when fading in
-			end
-			
-			descendant.Transparency = actualTarget
-			
-			-- Handle decals/textures (only if they exist)
-			for _, child in ipairs(descendant:GetChildren()) do
-				if child:IsA("Decal") then
-					local decal = child :: Decal
+		end
+
+		if fadeDecals then
+			for _, decal in ipairs(fadeDecals) do
+				if decal and decal.Parent then
+					descendantOps += 1
 					local originalDecalTrans = decal:GetAttribute("OriginalTransparency")
 					if not originalDecalTrans or typeof(originalDecalTrans) ~= "number" then
 						decal:SetAttribute("OriginalTransparency", decal.Transparency)
 						originalDecalTrans = decal.Transparency
 					end
-					
+
 					local actualDecalTarget = targetTransparency
 					if targetTransparency == 0 and typeof(originalDecalTrans) == "number" then
 						actualDecalTarget = originalDecalTrans
 					end
-					
+
 					decal.Transparency = actualDecalTarget
-				elseif child:IsA("Texture") then
-					local texture = child :: Texture
+				end
+			end
+		end
+
+		if fadeTextures then
+			for _, texture in ipairs(fadeTextures) do
+				if texture and texture.Parent then
+					descendantOps += 1
 					local originalTextureTrans = texture:GetAttribute("OriginalTransparency")
 					if not originalTextureTrans or typeof(originalTextureTrans) ~= "number" then
 						texture:SetAttribute("OriginalTransparency", texture.Transparency)
 						originalTextureTrans = texture.Transparency
 					end
-					
+
 					local actualTextureTarget = targetTransparency
 					if targetTransparency == 0 and typeof(originalTextureTrans) == "number" then
 						actualTextureTarget = originalTextureTrans
 					end
-					
+
 					texture.Transparency = actualTextureTarget
-				elseif child:IsA("SurfaceGui") then
-					child.Enabled = targetTransparency < 0.5
 				end
 			end
 		end
+
+		if fadeSurfaceGuis then
+			for _, surfaceGui in ipairs(fadeSurfaceGuis) do
+				if surfaceGui and surfaceGui.Parent then
+					descendantOps += 1
+					surfaceGui.Enabled = targetTransparency < 0.5
+				end
+			end
+		end
+	else
+		return
 	end
 
 	if descendantOps > 0 then
@@ -295,22 +464,165 @@ local function setModelTransparency(model: Model, targetTransparency: number)
 end
 
 -- Get current average transparency of model
-local function getCurrentModelTransparency(model: Model): number
+local function getCurrentModelTransparency(model: Model, cache: {fadeParts: {BasePart}?}?): number
 	if not model or not model.Parent then
 		return 0
 	end
 	
 	local totalTrans = 0
 	local count = 0
-	for _, descendant in ipairs(model:GetDescendants()) do
-		if descendant:IsA("BasePart") and descendant.Name ~= "Hitbox" and descendant.Name ~= "Attackbox" then
-			totalTrans = totalTrans + descendant.Transparency
-			count = count + 1
-			break  -- Just check first part for speed
+	local fadeParts = cache and cache.fadeParts
+	if not fadeParts then
+		local record = recordByModel[model]
+		if record then
+			fadeParts = record.fadeParts
+		end
+	end
+
+	if fadeParts then
+		for _, part in ipairs(fadeParts) do
+			if part and part.Parent then
+				totalTrans = totalTrans + part.Transparency
+				count = count + 1
+				break
+			end
 		end
 	end
 	
 	return count > 0 and (totalTrans / count) or 0
+end
+
+local function applyFadeInstance(instance: Instance, targetTransparency: number, kind: string)
+	if kind == "part" then
+		local part = instance :: BasePart
+		if part and part.Parent then
+			local originalTrans = part:GetAttribute("OriginalTransparency")
+			if not originalTrans or typeof(originalTrans) ~= "number" then
+				part:SetAttribute("OriginalTransparency", part.Transparency)
+				originalTrans = part.Transparency
+			end
+			local actualTarget = targetTransparency
+			if targetTransparency == 0 and typeof(originalTrans) == "number" then
+				actualTarget = originalTrans
+			end
+			part.Transparency = actualTarget
+			return true
+		end
+	elseif kind == "decal" then
+		local decal = instance :: Decal
+		if decal and decal.Parent then
+			local originalDecalTrans = decal:GetAttribute("OriginalTransparency")
+			if not originalDecalTrans or typeof(originalDecalTrans) ~= "number" then
+				decal:SetAttribute("OriginalTransparency", decal.Transparency)
+				originalDecalTrans = decal.Transparency
+			end
+			local actualDecalTarget = targetTransparency
+			if targetTransparency == 0 and typeof(originalDecalTrans) == "number" then
+				actualDecalTarget = originalDecalTrans
+			end
+			decal.Transparency = actualDecalTarget
+			return true
+		end
+	elseif kind == "texture" then
+		local texture = instance :: Texture
+		if texture and texture.Parent then
+			local originalTextureTrans = texture:GetAttribute("OriginalTransparency")
+			if not originalTextureTrans or typeof(originalTextureTrans) ~= "number" then
+				texture:SetAttribute("OriginalTransparency", texture.Transparency)
+				originalTextureTrans = texture.Transparency
+			end
+			local actualTextureTarget = targetTransparency
+			if targetTransparency == 0 and typeof(originalTextureTrans) == "number" then
+				actualTextureTarget = originalTextureTrans
+			end
+			texture.Transparency = actualTextureTarget
+			return true
+		end
+	elseif kind == "surface" then
+		local surfaceGui = instance :: SurfaceGui
+		if surfaceGui and surfaceGui.Parent then
+			surfaceGui.Enabled = targetTransparency < 0.5
+			return true
+		end
+	end
+
+	return false
+end
+
+local function enqueueFadeList(fade: any, list: {any}?, kind: string, targetTransparency: number)
+	if not list or #list == 0 then
+		return
+	end
+	table.insert(fadeOpQueue, {
+		list = list,
+		index = 1,
+		target = targetTransparency,
+		kind = kind,
+		fade = fade,
+	})
+	fade.pendingOpsCount = (fade.pendingOpsCount or 0) + 1
+	fadeQueuedOps += #list
+end
+
+local function enqueueFadeOps(fade: any, targetTransparency: number)
+	enqueueFadeList(fade, fade.fadeParts, "part", targetTransparency)
+	enqueueFadeList(fade, fade.fadeDecals, "decal", targetTransparency)
+	enqueueFadeList(fade, fade.fadeTextures, "texture", targetTransparency)
+	enqueueFadeList(fade, fade.fadeSurfaceGuis, "surface", targetTransparency)
+end
+
+local function finishFadeIfReady(fade: any)
+	if fade.pendingOpsCount and fade.pendingOpsCount <= 0 then
+		fade.pendingOpsCount = 0
+		if fade.done and fade.model then
+			activeFades[fade.model] = nil
+			if fade.onComplete then
+				local callback = fade.onComplete
+				fade.onComplete = nil
+				callback()
+			end
+		end
+	end
+end
+
+local function processFadeOps()
+	local opsThisFrame = 0
+	local budget = FADE_OP_BUDGET_PER_FRAME
+	while budget > 0 and fadeOpQueueHead <= #fadeOpQueue do
+		local task = fadeOpQueue[fadeOpQueueHead]
+		local list = task.list
+		while budget > 0 and task.index <= #list do
+			local instance = list[task.index]
+			task.index += 1
+			if applyFadeInstance(instance, task.target, task.kind) then
+				opsThisFrame += 1
+				Prof.incCounter("ClientEntityRenderer.DescendantOps", 1)
+			end
+			fadeQueuedOps = math.max(fadeQueuedOps - 1, 0)
+			budget -= 1
+		end
+		if task.index > #list then
+			fadeOpQueueHead += 1
+			if task.fade then
+				task.fade.pendingOpsCount = (task.fade.pendingOpsCount or 1) - 1
+				finishFadeIfReady(task.fade)
+			end
+		end
+	end
+
+	if fadeOpQueueHead > 50 and fadeOpQueueHead > (#fadeOpQueue / 2) then
+		local newQueue = {}
+		for i = fadeOpQueueHead, #fadeOpQueue do
+			newQueue[#newQueue + 1] = fadeOpQueue[i]
+		end
+		fadeOpQueue = newQueue
+		fadeOpQueueHead = 1
+	end
+
+	if opsThisFrame > 0 then
+		Prof.incCounter("fadeOpsThisFrame", opsThisFrame)
+	end
+	Prof.gauge("fadeQueueDepth", fadeQueuedOps)
 end
 
 -- Queue a fade operation (non-blocking, processed in chunks)
@@ -324,23 +636,44 @@ local function fadeModel(model: Model, targetTransparency: number, duration: num
 	
 	-- If immediate (0 duration), just set transparency now
 	if duration <= 0 then
-		setModelTransparency(model, targetTransparency)
+		local record = recordByModel[model]
+		local cache = record and {
+			fadeParts = record.fadeParts,
+			fadeDecals = record.fadeDecals,
+			fadeTextures = record.fadeTextures,
+			fadeSurfaceGuis = record.fadeSurfaceGuis,
+		} or buildModelCaches(model)
+		setModelTransparency(model, targetTransparency, cache)
 		if onComplete then
 			onComplete()
 		end
 		return
 	end
 	
-	local startTrans = getCurrentModelTransparency(model)
+	local record = recordByModel[model]
+	local cache = record and {
+		fadeParts = record.fadeParts,
+		fadeDecals = record.fadeDecals,
+		fadeTextures = record.fadeTextures,
+		fadeSurfaceGuis = record.fadeSurfaceGuis,
+	} or buildModelCaches(model)
+	local startTrans = getCurrentModelTransparency(model, cache)
 	local currentTime = tick()
 	
 	-- Queue fade to be processed in chunks over time
 	activeFades[model] = {
+		model = model,
 		targetTrans = targetTransparency,
 		startTrans = startTrans,
 		startTime = currentTime,
 		duration = duration,
 		lastUpdate = currentTime,
+		pendingOpsCount = 0,
+		done = false,
+		fadeParts = cache and cache.fadeParts or nil,
+		fadeDecals = cache and cache.fadeDecals or nil,
+		fadeTextures = cache and cache.fadeTextures or nil,
+		fadeSurfaceGuis = cache and cache.fadeSurfaceGuis or nil,
 		onComplete = onComplete
 	}
 end
@@ -358,9 +691,9 @@ local function processFades()
 		if not model or not model.Parent then
 			-- Model destroyed, clean up
 			activeFades[model] = nil
-			if fade.onComplete then
-				fade.onComplete()
-			end
+			fade.done = true
+			fade.pendingOpsCount = 0
+			finishFadeIfReady(fade)
 			continue
 		end
 		
@@ -369,17 +702,19 @@ local function processFades()
 		
 		-- Check if fade is complete
 		if elapsed >= fade.duration then
-			setModelTransparency(model, fade.targetTrans)  -- Ensure exact target
-			activeFades[model] = nil
-			if fade.onComplete then
-				fade.onComplete()
+			if fade.pendingOpsCount and fade.pendingOpsCount > 0 then
+				fade.done = true
+			else
+				fade.done = true
+				enqueueFadeOps(fade, fade.targetTrans)
+				finishFadeIfReady(fade)
 			end
 			continue
 		end
 		
 		-- OPTIMIZATION: Only update transparency in chunks (every FADE_CHUNK_INTERVAL)
 		local timeSinceLastUpdate = currentTime - fade.lastUpdate
-		if timeSinceLastUpdate >= FADE_CHUNK_INTERVAL then
+		if timeSinceLastUpdate >= FADE_CHUNK_INTERVAL and (not fade.pendingOpsCount or fade.pendingOpsCount == 0) then
 			fade.lastUpdate = currentTime
 			
 			-- Calculate progress (0 to 1)
@@ -388,7 +723,7 @@ local function processFades()
 			-- Linear interpolation from start to target transparency
 			local currentTrans = fade.startTrans + (fade.targetTrans - fade.startTrans) * progress
 			
-			setModelTransparency(model, currentTrans)
+			enqueueFadeOps(fade, currentTrans)
 		end
 	end
 
@@ -518,7 +853,8 @@ local function updateDeathAnimations()
 			hitFlashHighlights[model] = nil
 			-- Ensure model is destroyed if it still exists
 			if model and model.Parent then
-				model:Destroy()
+				recordByModel[model] = nil
+				destroyVisualModel(model)
 			end
 		else
 			local startTime = info.startTime or now
@@ -536,7 +872,8 @@ local function updateDeathAnimations()
 						if activeFades[model] then
 							activeFades[model] = nil
 						end
-						model:Destroy()
+						recordByModel[model] = nil
+						destroyVisualModel(model)
 					end
 					deathAnimations[model] = nil
 					-- Explicitly destroy highlight before clearing reference
@@ -558,7 +895,8 @@ local function updateDeathAnimations()
 						if activeFades[model] then
 							activeFades[model] = nil
 						end
-						model:Destroy()
+						recordByModel[model] = nil
+						destroyVisualModel(model)
 					end
 					deathAnimations[model] = nil
 					-- Explicitly destroy highlight before clearing reference
@@ -595,11 +933,25 @@ local function cleanupStaleProjectiles(now: number)
 			local mappedRecord = keyFromAttr and renderedEntities[keyFromAttr]
 			local lastStamp = typeof(lastUpdateAttr) == "number" and lastUpdateAttr or 0
 
-			if not mappedRecord or (now - lastStamp) > PROJECTILE_STALE_THRESHOLD then
+			if mappedRecord and mappedRecord.simType == "Projectile" then
+				if mappedRecord.simLifetime and mappedRecord.simSpawnTime then
+					if (now - mappedRecord.simSpawnTime) > (mappedRecord.simLifetime + 0.25) then
+						handleEntityDespawn(keyFromAttr, true)
+					end
+				end
+			elseif not mappedRecord or (now - lastStamp) > PROJECTILE_STALE_THRESHOLD then
 				if activeFades[projectileModel] then
 					activeFades[projectileModel] = nil
 				end
-				projectileModel:Destroy()
+				if mappedRecord then
+					handleEntityDespawn(keyFromAttr, true)
+				elseif projectileModel and projectileModel.Parent then
+					if keyFromAttr then
+						knownEntityIds[keyFromAttr] = nil
+					end
+					recordByModel[projectileModel] = nil
+					destroyVisualModel(projectileModel)
+				end
 			end
 		end
 	end
@@ -624,14 +976,34 @@ local function cleanupStaleExpOrbs(now: number)
 			local lastStamp = typeof(lastUpdateAttr) == "number" and lastUpdateAttr or 0
 			local timeSinceUpdate = now - lastStamp
 
-			if not mappedRecord or timeSinceUpdate > EXP_ORB_STALE_THRESHOLD then
+			if mappedRecord and mappedRecord.simType == "ExpOrb" then
+				if mappedRecord.simLifetime and mappedRecord.simSpawnTime then
+					if (now - mappedRecord.simSpawnTime) > (mappedRecord.simLifetime + 0.25) then
+						handleEntityDespawn(keyFromAttr, true)
+					end
+				end
+			elseif not mappedRecord or timeSinceUpdate > EXP_ORB_STALE_THRESHOLD then
 				if activeFades[orbModel] then
 					activeFades[orbModel] = nil
 				end
 				if deathAnimations[orbModel] then
 					deathAnimations[orbModel] = nil
 				end
-				orbModel:Destroy()
+				if mappedRecord then
+					local ok = false
+					if handleEntityDespawn then
+						ok = pcall(handleEntityDespawn, keyFromAttr, true)
+					end
+					if not ok then
+						profInc("cleanupErrors", 1)
+					end
+				elseif orbModel and orbModel.Parent then
+					if keyFromAttr then
+						knownEntityIds[keyFromAttr] = nil
+					end
+					recordByModel[orbModel] = nil
+					destroyVisualModel(orbModel)
+				end
 				cleanupCount = cleanupCount + 1
 			end
 		end
@@ -955,6 +1327,7 @@ local function createVisualModel(entityType: string, entitySubtype: string?, vis
 	local cacheKey = entitySubtype or entityType
 	local cached = modelCache[cacheKey]
 	if cached then
+		profInc("visualsReusedFromPool", 1)
 		local cloned = cached:Clone()
 		-- Apply color to cloned models (exp orbs and projectiles with attribute colors)
 		if visualColor then
@@ -1182,6 +1555,97 @@ local function extractEntityType(entityData: {[string]: any}): (string, string?)
 	return "Unknown", nil
 end
 
+local function buildProjectileEntityData(spawnData: {[string]: any}): {[string]: any}?
+	local origin = spawnData.origin
+	local velocity = spawnData.velocity
+	local visualTypeId = spawnData.visualTypeId
+	if not visualTypeId then
+		return nil
+	end
+	local data: {[string]: any} = {
+		Position = origin,
+		Velocity = velocity,
+		EntityType = {
+			type = "Projectile",
+			subtype = visualTypeId,
+			owner = spawnData.ownerEntity,
+		},
+		spawnTime = spawnData.spawnTime,
+		lifetime = spawnData.lifetime,
+		origin = origin,
+		velocity = velocity,
+		visualTypeId = visualTypeId,
+		ownerUserId = spawnData.ownerUserId,
+	}
+	if spawnData.visualColor or spawnData.visualScale then
+		data.Visual = {
+			color = spawnData.visualColor,
+			scale = spawnData.visualScale,
+		}
+	end
+	if spawnData.lifetime then
+		data.Lifetime = {
+			remaining = spawnData.lifetime,
+			max = spawnData.lifetime,
+		}
+	end
+	if spawnData.ownerUserId or spawnData.ownerEntity then
+		data.Owner = {
+			userId = spawnData.ownerUserId,
+			entity = spawnData.ownerEntity,
+		}
+	end
+	if velocity then
+		local vx = velocity.x or velocity.X or 0
+		local vy = velocity.y or velocity.Y or 0
+		local vz = velocity.z or velocity.Z or 0
+		local speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+		data.ProjectileData = {
+			type = visualTypeId,
+			speed = speed,
+		}
+	else
+		data.ProjectileData = {
+			type = visualTypeId,
+		}
+	end
+	return data
+end
+
+local function buildOrbEntityData(spawnData: {[string]: any}): {[string]: any}?
+	local origin = spawnData.origin
+	if not origin then
+		return nil
+	end
+	local data: {[string]: any} = {
+		Position = origin,
+		EntityType = { type = "ExpOrb" },
+		ItemData = {
+			type = "ExpOrb",
+			expAmount = spawnData.expAmount,
+			isSink = spawnData.isSink,
+			color = spawnData.itemColor,
+			uniqueId = spawnData.uniqueId,
+			ownerId = spawnData.ownerId,
+			collected = false,
+		},
+		spawnTime = spawnData.spawnTime,
+		lifetime = spawnData.lifetime,
+		seed = spawnData.seed,
+	}
+	if spawnData.visualScale or spawnData.uniqueId then
+		data.Visual = {
+			scale = spawnData.visualScale,
+			uniqueId = spawnData.uniqueId,
+			visible = true,
+		}
+	end
+	if spawnData.magnetPull then
+		data.MagnetPull = spawnData.magnetPull
+	end
+	return data
+end
+
 local function ensureModelTransform(record: RenderRecord, position: Vector3?, velocityComponent: any, facingComponent: any)
 	local model = record.model
 	if not model then
@@ -1194,9 +1658,11 @@ local function ensureModelTransform(record: RenderRecord, position: Vector3?, ve
 	-- CRITICAL: For AfterimageClones, manually position each anchored part
 	if record.entityType == "AfterimageClone" then
 		local offset = targetCFrame.Position - baseCFrame.Position
-		for _, part in ipairs(model:GetDescendants()) do
-			if part:IsA("BasePart") and part.Anchored then
-				part.CFrame = part.CFrame + offset
+		if record.anchoredParts then
+			for _, part in ipairs(record.anchoredParts) do
+				if part and part.Parent then
+					part.CFrame = part.CFrame + offset
+				end
 			end
 		end
 		-- Update model's pivot tracking
@@ -1314,13 +1780,15 @@ local function scheduleTransform(entityId: string | number, position: Vector3?, 
         if position then
             local snapCFrame = computeTargetCFrame(targetPosition, facingComponent or record.facingDirection, nil, currentCFrame, record.entityType)
             
-            -- CRITICAL: Manually position each anchored part (PivotTo doesn't work with anchored parts)
-            local offset = snapCFrame.Position - currentCFrame.Position
-            for _, part in ipairs(model:GetDescendants()) do
-                if part:IsA("BasePart") and part.Anchored then
+        -- CRITICAL: Manually position each anchored part (PivotTo doesn't work with anchored parts)
+        local offset = snapCFrame.Position - currentCFrame.Position
+        if record.anchoredParts then
+            for _, part in ipairs(record.anchoredParts) do
+                if part and part.Parent then
                     part.CFrame = part.CFrame + offset
                 end
             end
+        end
             
             record.currentCFrame = snapCFrame
             record.fromCFrame = snapCFrame
@@ -1339,11 +1807,15 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	
 	-- Check if entity already exists
 	if renderedEntities[key] then
+		profInc("duplicateSpawnForExistingEntityId", 1)
 		return
 	end
 	
 	local entityData = resolveEntityData(rawData)
 	local entityTypeName, entitySubtype = extractEntityType(entityData)
+	if entityTypeName == "Projectile" and (not entitySubtype or entitySubtype == "Unknown") then
+		entitySubtype = entityData.visualTypeId or (entityData.ProjectileData and entityData.ProjectileData.type)
+	end
 
 	if entityTypeName == "Player" or entityTypeName == "Unknown" then
 		return
@@ -1472,16 +1944,33 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		end
 	end
 
+	local caches = buildModelCaches(model)
+
 	-- Extract position early for spawn distance check
 	local positionComponent = entityData.Position or entityData.position
 	local positionVector = positionComponent and toVector3(positionComponent)
+	local originVector = entityData.origin and toVector3(entityData.origin)
+	local velocityComponent = entityData.Velocity or entityData.velocity
+	local velocityVector = velocityComponent and toVelocityVector(velocityComponent)
+	local spawnTimeValue = typeof(entityData.spawnTime) == "number" and entityData.spawnTime or nil
+	local lifetimeSeconds = typeof(entityData.lifetime) == "number" and entityData.lifetime or nil
+	if not lifetimeSeconds and entityData.Lifetime and typeof(entityData.Lifetime) == "table" then
+		lifetimeSeconds = entityData.Lifetime.remaining or entityData.Lifetime.max
+	end
 	local projectileData = entityData.ProjectileData
+	if entityTypeName == "Projectile" and originVector and velocityVector and spawnTimeValue then
+		local age = math.max(tick() - spawnTimeValue, 0)
+		if lifetimeSeconds then
+			age = math.min(age, lifetimeSeconds)
+		end
+		positionVector = originVector + velocityVector * age
+	end
 
 	    local record: RenderRecord = {
 			model = model,
 			spawnTime = tick(),  -- NEW: Track when model was created
 			entityType = entityTypeName,
-			velocity = entityData.Velocity,
+			velocity = velocityComponent or entityData.Velocity,
 		facingDirection = entityData.FacingDirection,
 			lastUpdate = tick(),
 			isFadedOut = false,
@@ -1490,8 +1979,34 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			-- Clone-specific fields for client-side positioning
 			cloneSourcePlayer = cloneSourcePlayer,  -- Player to orbit around
 			cloneIndex = cloneIndex,  -- Index in triangle formation (1-3)
+			fadeParts = caches.fadeParts,
+			fadeDecals = caches.fadeDecals,
+			fadeTextures = caches.fadeTextures,
+			fadeSurfaceGuis = caches.fadeSurfaceGuis,
+			anchoredParts = caches.anchoredParts,
+			spawnToken = 0,
+			simType = nil,
+			simOrigin = originVector or positionVector,
+			simVelocity = velocityVector,
+			simSpawnTime = spawnTimeValue,
+			simLifetime = lifetimeSeconds,
+			simSeed = entityData.seed,
 		}
 		renderedEntities[key] = record
+		recordByModel[model] = record
+		if entityTypeName == "Projectile" then
+			if record.simOrigin and record.simVelocity then
+				record.simType = "Projectile"
+				record.simSpawnTime = record.simSpawnTime or tick()
+			end
+		elseif entityTypeName == "ExpOrb" then
+			if record.simOrigin then
+				record.simType = "ExpOrb"
+				record.simSpawnTime = record.simSpawnTime or tick()
+				record.simSeed = record.simSeed or tonumber(key) or 0
+			end
+		end
+		profInc("visualsCreated", 1)
 		model:SetAttribute("ECS_EntityId", key)
 		model:SetAttribute("ECS_LastUpdate", record.lastUpdate)
 	
@@ -1512,7 +2027,7 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		local nearCullingEdge = spawnDistance > 280
 		
 		-- Set initial transparency
-		setModelTransparency(model, 1)
+		setModelTransparency(model, 1, record)
 		
 		if nearCullingEdge then
 			-- Start already faded out, don't waste time fading in then out
@@ -1520,10 +2035,14 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			record.isSpawning = false
 		else
 			-- Normal spawn - fade in over time
+			local spawnToken = record.spawnToken or 0
 			task.delay(0.05, function()  -- Small delay to ensure model is fully set up
-				if model and model.Parent and record then
+				if renderedEntities[key] ~= record or record.spawnToken ~= spawnToken then
+					return
+				end
+				if model and model.Parent then
 					fadeModel(model, 0, SPAWN_FADE_DURATION, function()
-						if record then
+						if renderedEntities[key] == record then
 							record.isSpawning = false
 						end
 					end)
@@ -1646,7 +2165,8 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	if entityTypeName == "Projectile" and positionVector then
 		-- Check if this projectile is owned by local player
 		local ownerData = entityData.Owner or entityData.owner
-		if ownerData and ownerData.player == player then
+		local ownerUserId = ownerData and (ownerData.userId or ownerData.UserId)
+		if (ownerData and ownerData.player == player) or (ownerUserId and ownerUserId == player.UserId) or (entityData.ownerUserId and entityData.ownerUserId == player.UserId) then
 			-- This is our projectile, override spawn position with our current position
 			local character = player.Character
 			local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
@@ -1720,11 +2240,6 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 	local record = renderedEntities[key]
 
 	if not record then
-		handleEntitySync(entityId, entityData)
-		record = renderedEntities[key]
-	end
-
-	if not record then
 		return
 	end
 
@@ -1735,7 +2250,7 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 
 	if positionVector or velocityComponent or facingComponent then
 		-- For projectiles with fixed tween path, ignore per-update transforms to avoid jitter
-		local ignore = false
+		local ignore = record.simType == "Projectile" or record.simType == "ExpOrb"
 		if record.entityType == "Projectile" and USE_PROJECTILE_TWEENS and PROJECTILE_TWEEN_USES_FIXED_PATH then
 			ignore = true
 		end
@@ -1746,6 +2261,9 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 
 	if entityData.Velocity then
 		record.velocity = entityData.Velocity
+		if record.simType == "Projectile" then
+			record.simVelocity = toVelocityVector(entityData.Velocity)
+		end
 	end
 	
 	if entityData.FacingDirection then
@@ -1774,11 +2292,9 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 		-- CLIENT-SIDE FALLBACK: Immediately fade collected orbs even if despawn is delayed
 		-- ONLY fade when collected = true (not when MagnetPull is removed)
 		if itemData and itemData.collected and not record.isFadedOut then
+			local despawnId = entityId
 			fadeModel(record.model, 1, 0.1, function()
-				-- After fade, destroy if still exists
-				if record.model and record.model.Parent then
-					record.model:Destroy()
-				end
+				handleEntityDespawn(despawnId, true)
 			end)
 			record.isFadedOut = true
 		end
@@ -1786,57 +2302,41 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 		-- Handle Visual uniqueId changes for teleportation
 		if itemData and itemData.isSink then
 			if visualData and type(visualData) == "table" and visualData.uniqueId and visualData.uniqueId ~= record.visualUniqueId then
-				-- UniqueId changed = red orb teleported, recreate model
-				
-				-- Destroy old model
-				if record.model and record.model.Parent then
-					record.model:Destroy()
+				-- UniqueId changed = red orb teleported, reuse existing model
+				record.visualUniqueId = visualData.uniqueId
+
+				if record.model and positionVector then
+					record.model:PivotTo(CFrame.new(positionVector))
+					record.currentCFrame = record.model:GetPivot()
+					record.fromCFrame = record.currentCFrame
+					record.toCFrame = record.currentCFrame
+					record.lerpStart = tick()
+					record.lerpEnd = record.lerpStart
 				end
-				
-				-- Recreate model at new position
-				local visualColor = itemData and itemData.color
-				local newModel = createVisualModel("ExpOrb", "Red", visualColor)
-				if newModel and positionVector then
-					-- Apply scale
-					if visualData.scale and visualData.scale ~= 1 then
-						newModel:ScaleTo(visualData.scale)
-					end
+
+				-- Ensure red trail exists
+				local primaryPart = record.model and (record.model.PrimaryPart or record.model:FindFirstChildWhichIsA("BasePart"))
+				if primaryPart and not primaryPart:FindFirstChild("SinkTrail") then
+					local attachment0 = Instance.new("Attachment")
+					attachment0.Name = "SinkTrail0"
+					attachment0.Position = Vector3.new(0, -primaryPart.Size.Y * 0.5, 0)
+					attachment0.Parent = primaryPart
 					
-					-- Set position
-					newModel:PivotTo(CFrame.new(positionVector))
+					local attachment1 = Instance.new("Attachment")
+					attachment1.Name = "SinkTrail1"
+					attachment1.Position = Vector3.new(0, primaryPart.Size.Y * 0.5, 0)
+					attachment1.Parent = primaryPart
 					
-					newModel:SetAttribute("ECS_EntityId", entityId)
-					newModel:SetAttribute("ECS_LastUpdate", tick())
-					newModel.Parent = expOrbsFolder
-					
-					record.model = newModel
-					record.currentCFrame = newModel:GetPivot()
-					record.visualUniqueId = visualData.uniqueId
-					
-					-- Add red trail to recreated model
-					local primaryPart = newModel.PrimaryPart or newModel:FindFirstChildWhichIsA("BasePart")
-					if primaryPart and not primaryPart:FindFirstChild("SinkTrail") then
-						local attachment0 = Instance.new("Attachment")
-						attachment0.Name = "SinkTrail0"
-						attachment0.Position = Vector3.new(0, -primaryPart.Size.Y * 0.5, 0)
-						attachment0.Parent = primaryPart
-						
-						local attachment1 = Instance.new("Attachment")
-						attachment1.Name = "SinkTrail1"
-						attachment1.Position = Vector3.new(0, primaryPart.Size.Y * 0.5, 0)
-						attachment1.Parent = primaryPart
-						
-						local trail = Instance.new("Trail")
-						trail.Name = "SinkTrail"
-						trail.Attachment0 = attachment0
-						trail.Attachment1 = attachment1
-						trail.Color = ColorSequence.new(Color3.fromRGB(255, 60, 60))
-						trail.LightEmission = 0.8
-						trail.LightInfluence = 0
-						trail.WidthScale = NumberSequence.new(1.2)
-						trail.Lifetime = 0.5
-						trail.Parent = primaryPart
-					end
+					local trail = Instance.new("Trail")
+					trail.Name = "SinkTrail"
+					trail.Attachment0 = attachment0
+					trail.Attachment1 = attachment1
+					trail.Color = ColorSequence.new(Color3.fromRGB(255, 60, 60))
+					trail.LightEmission = 0.8
+					trail.LightInfluence = 0
+					trail.WidthScale = NumberSequence.new(1.2)
+					trail.Lifetime = 0.5
+					trail.Parent = primaryPart
 				end
 			end
 		end
@@ -1849,9 +2349,9 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 				local redColor = itemData.color or Color3.fromRGB(255, 60, 60)
 				
 				-- Re-color all parts
-				if record.model then
-					for _, part in ipairs(record.model:GetDescendants()) do
-						if part:IsA("BasePart") then
+				if record.fadeParts then
+					for _, part in ipairs(record.fadeParts) do
+						if part and part.Parent then
 							part.Color = redColor
 							part.Material = Enum.Material.Neon
 						end
@@ -1951,12 +2451,15 @@ local function performDespawn(key: string, record: RenderRecord)
 		hitFlashHighlights[model] = nil
 		
 		if record.entityType == "Projectile" then
-			for _, part in ipairs(model:GetDescendants()) do
-				if part:IsA("BasePart") then
-					part.Transparency = 1
+			if record.fadeParts then
+				for _, part in ipairs(record.fadeParts) do
+					if part and part.Parent then
+						part.Transparency = 1
+					end
 				end
 			end
-			model:Destroy()
+			recordByModel[model] = nil
+			destroyVisualModel(model)
 		else
 			-- For non-projectiles (enemies), force immediate destroy in published games
 			-- Don't wait for tween, just destroy
@@ -1967,19 +2470,36 @@ local function performDespawn(key: string, record: RenderRecord)
 			if activeFades[model] then
 				activeFades[model] = nil
 			end
-			model:Destroy()
+			recordByModel[model] = nil
+			destroyVisualModel(model)
 		end
 	end
 
 	renderedEntities[key] = nil
 end
 
-local function handleEntityDespawn(entityId: string | number, force: boolean?)
+handleEntityDespawn = function(entityId: string | number, force: boolean?)
 	local key = entityKey(entityId)
+	knownEntityIds[key] = nil
 	local record = renderedEntities[key]
 	if not record then
+		if spawnQueueSet[key] then
+			spawnQueueSet[key] = nil
+			for i = spawnQueueHead, #spawnQueue do
+				if spawnQueue[i] and entityKey(spawnQueue[i].entityId) == key then
+					spawnQueue[i] = spawnQueue[#spawnQueue]
+					spawnQueue[#spawnQueue] = nil
+					break
+				end
+			end
+		end
+		if bufferedUpdates[key] then
+			bufferedUpdates[key] = nil
+			bufferedUpdateTotal = math.max(bufferedUpdateTotal - 1, 0)
+		end
 		return
 	end
+	record.spawnToken = (record.spawnToken or 0) + 1
 
 	if record.entityType == "Projectile" and not force then
 		record.pendingRemovalTime = record.pendingRemovalTime or (tick() + PROJECTILE_DEATH_VISUAL_DELAY)
@@ -1990,6 +2510,119 @@ local function handleEntityDespawn(entityId: string | number, force: boolean?)
 	performDespawn(key, record)
 end
 
+local function enqueueSpawn(entityId: string | number, rawData: {[string]: any})
+	local key = entityKey(entityId)
+	if renderedEntities[key] or spawnQueueSet[key] then
+		profInc("duplicateSpawnForExistingEntityId", 1)
+		return
+	end
+	spawnQueueSet[key] = true
+	table.insert(spawnQueue, {
+		entityId = entityId,
+		data = rawData,
+		enqueuedAt = tick(),
+	})
+end
+
+local function processSpawnQueue()
+	local now = tick()
+	local processed = 0
+	local queueTimeTotal = 0
+	local queueTimeCount = 0
+	while processed < SPAWN_BUDGET_PER_FRAME do
+		local entry = spawnQueue[spawnQueueHead]
+		if not entry then
+			break
+		end
+		spawnQueue[spawnQueueHead] = nil
+		spawnQueueHead += 1
+		processed += 1
+
+		local entityId = entry.entityId
+		local key = entityKey(entityId)
+		if entry.enqueuedAt then
+			queueTimeTotal += math.max(now - entry.enqueuedAt, 0)
+			queueTimeCount += 1
+		end
+		spawnQueueSet[key] = nil
+		if not renderedEntities[key] then
+			knownEntityIds[key] = true
+			handleEntitySync(entityId, entry.data)
+			if not renderedEntities[key] then
+				knownEntityIds[key] = nil
+			end
+			local buffered = bufferedUpdates[key]
+			if buffered then
+				bufferedUpdates[key] = nil
+				bufferedUpdateTotal = math.max(bufferedUpdateTotal - 1, 0)
+				if buffered.expiresAt > now then
+					handleEntityUpdate(entityId, buffered.data)
+					profInc("bufferedUnknownUpdatesApplied", 1)
+				else
+					profInc("bufferedUnknownUpdatesEvicted", 1)
+				end
+			end
+		end
+	end
+
+	if spawnQueueHead > 50 and spawnQueueHead > (#spawnQueue / 2) then
+		local newQueue = {}
+		for i = spawnQueueHead, #spawnQueue do
+			newQueue[#newQueue + 1] = spawnQueue[i]
+		end
+		spawnQueue = newQueue
+		spawnQueueHead = 1
+	end
+
+	local depth = math.max(#spawnQueue - spawnQueueHead + 1, 0)
+	Prof.gauge("spawnQueueDepth", depth)
+	if queueTimeCount > 0 then
+		Prof.gauge("spawnQueueTimeAvgMs", (queueTimeTotal / queueTimeCount) * 1000)
+	end
+	if processed > 0 then
+		Prof.incCounter("spawnsProcessedThisFrame", processed)
+	end
+	if depth > 0 and processed >= SPAWN_BUDGET_PER_FRAME then
+		Prof.incCounter("spawnBudgetHitCount", 1)
+	end
+	cleanupExpiredBufferedUpdates(now)
+end
+
+local function processSpawnPayloads(entities: any, projectileSpawns: any, orbSpawns: any): number
+	local spawnCount = 0
+	if typeof(entities) == "table" then
+		for entityId, data in pairs(entities) do
+			if typeof(data) == "table" then
+				spawnCount += 1
+				enqueueSpawn(entityId, data)
+			end
+		end
+	end
+	if typeof(projectileSpawns) == "table" then
+		for _, spawnData in ipairs(projectileSpawns) do
+			if typeof(spawnData) == "table" and spawnData.id then
+				local entityData = buildProjectileEntityData(spawnData)
+				if entityData then
+					spawnCount += 1
+					enqueueSpawn(spawnData.id, entityData)
+				end
+			end
+		end
+	end
+	if typeof(orbSpawns) == "table" then
+		for _, spawnData in ipairs(orbSpawns) do
+			if typeof(spawnData) == "table" and spawnData.id then
+				local entityData = buildOrbEntityData(spawnData)
+				if entityData then
+					spawnCount += 1
+					enqueueSpawn(spawnData.id, entityData)
+				end
+			end
+		end
+	end
+	return spawnCount
+end
+
 local function processSnapshot(snapshot: any)
 	if typeof(snapshot) ~= "table" then
 		return
@@ -1997,15 +2630,16 @@ local function processSnapshot(snapshot: any)
 
 	applySharedDefinitions(snapshot.shared)
 
-	local entities = snapshot.entities
-	if typeof(entities) ~= "table" then
-		return
+	local spawnCount = processSpawnPayloads(snapshot.entities, snapshot.projectileSpawns, snapshot.orbSpawns)
+
+	if spawnCount > 0 then
+		profInc("spawnEventsReceived", spawnCount)
+		profInc("spawnBatchEntities", spawnCount)
 	end
 
-	for entityId, data in pairs(entities) do
-		if typeof(data) == "table" then
-			handleEntitySync(entityId, data)
-		end
+	if snapshot.isInitial == true and not hasInitialSync then
+		hasInitialSync = true
+		profInc("initialSyncReceivedCount", 1)
 	end
 end
 
@@ -2016,6 +2650,28 @@ local function processUpdates(message: any)
 
 	applySharedDefinitions(message.shared)
 
+	local spawnCount = processSpawnPayloads(message.entities, message.projectileSpawns, message.orbSpawns)
+	if spawnCount > 0 then
+		profInc("spawnEventsReceived", spawnCount)
+		profInc("spawnBatchEntities", spawnCount)
+	end
+
+	local function handleUpdate(entityId: string | number, updateData: {[string]: any})
+		local key = entityKey(entityId)
+		if not hasInitialSync then
+			profInc("updatesBeforeInitialSync", 1)
+		end
+
+		if not knownEntityIds[key] then
+			profInc("updatesForUnknownEntityId", 1)
+			bufferUpdate(key, updateData)
+			return
+		end
+
+		handleEntityUpdate(entityId, updateData)
+	end
+
+	local updateCount = 0
 	-- Phase 4.5: Process compact projectile batches (40-60% bandwidth reduction)
 	local projectiles = message.projectiles
 	if typeof(projectiles) == "table" then
@@ -2028,7 +2684,8 @@ local function processUpdates(message: any)
 					Position = {x = compactData[2], y = compactData[3], z = compactData[4]},
 					Velocity = {x = compactData[5], y = compactData[6], z = compactData[7]},
 				}
-				handleEntityUpdate(entityId, updateData)
+				updateCount += 1
+				handleUpdate(entityId, updateData)
 			end
 		end
 	end
@@ -2045,7 +2702,8 @@ local function processUpdates(message: any)
 					Position = {x = compactData[2], y = compactData[3], z = compactData[4]},
 					Velocity = {x = compactData[5], y = compactData[6], z = compactData[7]},
 				}
-				handleEntityUpdate(entityId, updateData)
+				updateCount += 1
+				handleUpdate(entityId, updateData)
 			end
 		end
 	end
@@ -2055,18 +2713,40 @@ local function processUpdates(message: any)
 	if typeof(updates) == "table" then
 		for _, updateData in ipairs(updates) do
 			if typeof(updateData) == "table" and updateData.id then
-				handleEntityUpdate(updateData.id, updateData)
+				updateCount += 1
+				handleUpdate(updateData.id, updateData)
 			end
 		end
 	end
 
+	local resyncs = message.resyncs
+	if typeof(resyncs) == "table" then
+		for _, updateData in ipairs(resyncs) do
+			if typeof(updateData) == "table" and updateData.id then
+				updateCount += 1
+				handleUpdate(updateData.id, updateData)
+			end
+		end
+	end
+
+	if updateCount > 0 then
+		profInc("updateEventsReceived", updateCount)
+	end
+
 	local despawns = message.despawns
+	local despawnCount = 0
 	if typeof(despawns) == "table" then
 		for _, entityId in ipairs(despawns) do
+			despawnCount += 1
 			handleEntityDespawn(entityId)
 		end
 	elseif despawns then
+		despawnCount = 1
 		handleEntityDespawn(despawns)
+	end
+
+	if despawnCount > 0 then
+		profInc("despawnEventsReceived", despawnCount)
 	end
 end
 
@@ -2084,13 +2764,22 @@ end
 
 EntitySync.OnClientEvent:Connect(processSnapshot)
 EntityUpdate.OnClientEvent:Connect(processUpdates)
+if EntityUpdateUnreliable and EntityUpdateUnreliable:IsA("UnreliableRemoteEvent") then
+	EntityUpdateUnreliable.OnClientEvent:Connect(processUpdates)
+end
 
 EntityDespawn.OnClientEvent:Connect(function(despawns)
 	if typeof(despawns) == "table" then
+		local count = 0
 		for _, entityId in ipairs(despawns) do
+			count += 1
 			handleEntityDespawn(entityId)
 		end
+		if count > 0 then
+			profInc("despawnEventsReceived", count)
+		end
 	elseif despawns then
+		profInc("despawnEventsReceived", 1)
 		handleEntityDespawn(despawns)
 	end
 end)
@@ -2108,8 +2797,9 @@ end)
 			return
 		end
 		
-		-- PERFORMANCE OPTIMIZATION: Process all active transparency fades each frame
+		processSpawnQueue()
 		processFades()
+		processFadeOps()
 		cleanupStaleProjectiles(now)
 		cleanupStaleExpOrbs(now)
 		-- Diagnostic toggle for invisible enemy detection
@@ -2155,7 +2845,8 @@ end)
 				
 				-- Destroy model
 				if model and model.Parent then
-					model:Destroy()
+					recordByModel[model] = nil
+					destroyVisualModel(model)
 				end
 				deathAnimations[model] = nil
 			end
@@ -2181,8 +2872,22 @@ end)
 	
 	local toRemove = {}
 	local activeModels = 0
+	local activeEnemies = 0
+	local activeProjectiles = 0
+	local activeOrbs = 0
+	local simulatedProjectiles = 0
 	for key, record in pairs(renderedEntities) do
 		activeModels += 1
+		if record.entityType == "Enemy" then
+			activeEnemies += 1
+		elseif record.entityType == "Projectile" or record.entityType == "Explosion" then
+			activeProjectiles += 1
+			if record.simType == "Projectile" then
+				simulatedProjectiles += 1
+			end
+		elseif record.entityType == "ExpOrb" then
+			activeOrbs += 1
+		end
 		if record.pendingRemovalTime and now >= record.pendingRemovalTime then
 			table.insert(toRemove, key)
 		end
@@ -2255,6 +2960,41 @@ end)
 				end
 			end
 		end
+
+		local simPosition: Vector3? = nil
+		if record.simType == "Projectile" then
+			local simOrigin = record.simOrigin
+			local simVelocity = record.simVelocity
+			local simSpawnTime = record.simSpawnTime
+			if simOrigin and simVelocity and simSpawnTime then
+				local age = math.max(now - simSpawnTime, 0)
+				if record.simLifetime then
+					if age >= record.simLifetime then
+						record.pendingRemovalTime = now
+						table.insert(toRemove, key)
+					else
+						simPosition = simOrigin + simVelocity * age
+					end
+				else
+					simPosition = simOrigin + simVelocity * age
+				end
+			end
+		elseif record.simType == "ExpOrb" then
+			local simOrigin = record.simOrigin
+			local simSpawnTime = record.simSpawnTime
+			if simOrigin then
+				local phase = (record.simSeed or 0) * 0.1
+				local bob = math.sin((now + phase) * ORB_BOB_FREQUENCY) * ORB_BOB_AMPLITUDE
+				simPosition = simOrigin + Vector3.new(0, bob, 0)
+				if record.simLifetime and simSpawnTime and (now - simSpawnTime) >= record.simLifetime then
+					record.pendingRemovalTime = now
+					table.insert(toRemove, key)
+				end
+			end
+		end
+		if simPosition and model then
+			model:SetAttribute("ECS_LastUpdate", now)
+		end
 		
 		-- Skip ExpOrbs and Powerups from render loop UNLESS they're moving
 		if record.entityType == "ExpOrb" or record.entityType == "Powerup" then
@@ -2264,14 +3004,14 @@ end)
 			                    (math.abs(record.velocity.x or 0) > 0.01 or 
 			                     math.abs(record.velocity.y or 0) > 0.01 or 
 			                     math.abs(record.velocity.z or 0) > 0.01)
-			if not hasVelocity then
+			if not hasVelocity and not record.simType then
 				continue  -- Static item, skip rendering updates
 			end
 			-- Otherwise, allow interpolation for movement (e.g., magnet pull)
 		end
 		
 		-- Calculate distance to camera for LOD
-		local modelPos = model:GetPivot().Position
+		local modelPos = simPosition or model:GetPivot().Position
 		local dx = modelPos.X - cameraPos.X
 		local dy = modelPos.Y - cameraPos.Y
 		local dz = modelPos.Z - cameraPos.Z
@@ -2299,6 +3039,15 @@ end)
 		-- Skip projectiles/explosions beyond render distance (they move fast, full cull is fine)
 		if record.entityType ~= "Enemy" and distSq > MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE then
 			continue  -- Don't render projectiles >300 studs away
+		end
+
+		if simPosition then
+			local baseCFrame = record.currentCFrame or model:GetPivot()
+			local simCFrame = computeTargetCFrame(simPosition, record.facingDirection, record.velocity, baseCFrame, record.entityType)
+			record.fromCFrame = simCFrame
+			record.toCFrame = simCFrame
+			record.lerpStart = now
+			record.lerpEnd = now
 		end
 		
 		local fromCFrame = record.fromCFrame or model:GetPivot()
@@ -2367,9 +3116,11 @@ end)
 		-- CRITICAL: For AfterimageClones, manually position each anchored part
 		if record.entityType == "AfterimageClone" and record.currentCFrame then
 			local offset = newCFrame.Position - record.currentCFrame.Position
-			for _, part in ipairs(model:GetDescendants()) do
-				if part:IsA("BasePart") and part.Anchored then
-					part.CFrame = part.CFrame + offset
+			if record.anchoredParts then
+				for _, part in ipairs(record.anchoredParts) do
+					if part and part.Parent then
+						part.CFrame = part.CFrame + offset
+					end
 				end
 			end
 		else
@@ -2396,7 +3147,11 @@ end)
 		handleEntityDespawn(key, true)
 	end
 
-	Prof.incCounter("ClientEntityRenderer.ActiveModels", activeModels)
+	Prof.gauge("ActiveModels", activeModels)
+	Prof.gauge("ActiveEnemies", activeEnemies)
+	Prof.gauge("ActiveProjectiles", activeProjectiles)
+	Prof.gauge("projectilesSimulated", simulatedProjectiles)
+	Prof.gauge("ActiveOrbs", activeOrbs)
 	Prof.endTimer("ClientEntityRenderer.Render")
 end)
 

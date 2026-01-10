@@ -6,11 +6,13 @@ local timerStarts: {[string]: number} = {}
 local timerTotals: {[string]: number} = {}
 local timerCounts: {[string]: number} = {}
 local counters: {[string]: number} = {}
+local gauges: {[string]: {last: number, max: number}} = {}
 
 local function resetWindow()
 	table.clear(timerTotals)
 	table.clear(timerCounts)
 	table.clear(counters)
+	table.clear(gauges)
 end
 
 function Profiling.beginTimer(name: string)
@@ -32,8 +34,20 @@ function Profiling.incCounter(name: string, amount: number?)
 	counters[name] = (counters[name] or 0) + delta
 end
 
+function Profiling.gauge(name: string, value: number)
+	local entry = gauges[name]
+	if entry then
+		entry.last = value
+		if value > entry.max then
+			entry.max = value
+		end
+	else
+		gauges[name] = {last = value, max = value}
+	end
+end
+
 function Profiling.printWindow()
-	if next(timerTotals) == nil and next(counters) == nil then
+	if next(timerTotals) == nil and next(counters) == nil and next(gauges) == nil then
 		return
 	end
 
@@ -52,6 +66,10 @@ function Profiling.printWindow()
 
 	for name, value in pairs(counters) do
 		table.insert(lines, string.format("%s: %d", name, value))
+	end
+
+	for name, entry in pairs(gauges) do
+		table.insert(lines, string.format("%s: %d/%d", name, entry.last, entry.max))
 	end
 
 	print(table.concat(lines, " | "))
