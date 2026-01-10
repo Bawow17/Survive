@@ -29,10 +29,10 @@ local ICESHARD_ID = "IceShard"
 local ICESHARD_NAME = Balance.Name
 
 local playerQuery: any
-local projectileFacingQuery: any
 
 -- Spawn a burst of IceShard projectiles (handles shotgun spread)
 local function spawnIceShardBurst(
+	playerEntity: number,
 	player: Player,
 	position: Vector3,
 	baseDirection: Vector3,
@@ -83,7 +83,8 @@ local function spawnIceShardBurst(
 			position,
 			direction,
 			player,
-			targetPoint
+			targetPoint,
+			playerEntity
 		)
 		
 		if projectileEntity then
@@ -157,7 +158,7 @@ local function performIceShardBurst(playerEntity: number, player: Player): boole
 		targetEntity  -- NEW: Pass selected target entity
 	)
 
-	local created = spawnIceShardBurst(player, position, baseDirection, targetPosition, targetDistance, stats)
+	local created = spawnIceShardBurst(playerEntity, player, position, baseDirection, targetPosition, targetDistance, stats)
 	return created > 0
 end
 
@@ -207,7 +208,6 @@ function IceShardSystem.init(worldRef: any, components: any, dirtyService: any, 
 	AbilityPulse = Components.AbilityPulse
 
 	playerQuery = world:query(Components.EntityType, Components.Position, Components.Ability):cached()
-	projectileFacingQuery = world:query(Components.Projectile, Components.Velocity, Components.ProjectileData):cached()
 end
 
 -- Step function (called every frame)
@@ -348,16 +348,6 @@ function IceShardSystem.step(dt: number)
 		end
 	end
 
-	-- Update facing direction for IceShard projectiles
-		for projectileEntity, projectile, velocity, projectileData in projectileFacingQuery do
-		if projectileData.type == ICESHARD_ID then
-			DirtyService.setIfChanged(world, projectileEntity, Components.FacingDirection, {
-				x = velocity.x,
-				y = velocity.y,
-				z = velocity.z
-			}, "FacingDirection")
-		end
-	end
 end
 
 return IceShardSystem

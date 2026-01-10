@@ -6,6 +6,7 @@ local _ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
+local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
 
 -- Targeting prediction tuning
 local PREDICTION_FACTOR = 0.6  -- 60% of predicted position (conservative)
@@ -20,18 +21,8 @@ local Components: any = nil
 local DirtyService: any = nil
 local ECSWorldService: any = nil
 
--- Projectile spawn queue system (backpressure handling when pool is exhausted)
-local MAX_QUEUE_SIZE_PER_PLAYER = 100  -- Max pending projectiles per player
-local QUEUE_PROCESS_RATE = 10  -- Process 10 projectiles per frame when pool has capacity
-local projectileSpawnQueue: {[Player]: {{
-	abilityId: string,
-	balance: any,
-	spawnPosition: Vector3,
-	direction: Vector3,
-	targetPosition: Vector3,
-	timestamp: number
-}}} = {}
-local queueProcessAccumulator = 0
+local playerEntityQuery: any
+local playerEntityCache: {[Player]: number} = setmetatable({}, { __mode = "k" })
 
 -- Virtual damage tracking for smart multi-targeting
 -- Structure: {playerEntity: {enemyEntity: predictedDamageTaken}}
@@ -93,6 +84,24 @@ function AbilitySystemBase.init(worldRef: any, components: any, dirtyService: an
 	DirtyService = dirtyService
 	ECSWorldService = ecsWorldService
 	ensureEnemyQuery()
+	playerEntityQuery = world:query(Components.PlayerStats):cached()
+end
+
+local function resolvePlayerEntity(player: Player): number?
+	local cached = playerEntityCache[player]
+	if cached and world and world:contains(cached) then
+		return cached
+	end
+	if not playerEntityQuery then
+		return nil
+	end
+	for entity, stats in playerEntityQuery do
+		if stats and stats.player == player then
+			playerEntityCache[player] = entity
+			return entity
+		end
+	end
+	return nil
 end
 
 -- Get ability stats for a player (merges base balance with upgrades and passive effects)
@@ -619,7 +628,9 @@ function AbilitySystemBase.createProjectile(
 	spawnPosition: Vector3,
 	direction: Vector3,
 	owner: Player,
-	targetPosition: Vector3
+	targetPosition: Vector3,
+	ownerEntityOverride: number?,
+	extraConfig: any?
 ): number?
 	if not world or not Components or not DirtyService or not ECSWorldService then
 		warn("[AbilitySystemBase] Not initialized")
@@ -630,137 +641,13 @@ function AbilitySystemBase.createProjectile(
 	local spawnOffset = balance.spawnOffset or Vector3.new(0, 0, 0)
 	local finalSpawnPosition = spawnPosition + spawnOffset
 
-	-- Calculate velocity: direction * speed
-	local velocity = direction * balance.projectileSpeed
-
 	-- Ensure model is replicated before creating projectile
 	if balance.modelPath then
 		ModelReplicationService.replicateAbility(abilityId)
 	end
 
-	-- Determine travel time based on distance to target
-	local distanceToTarget = (targetPosition - finalSpawnPosition).Magnitude
-	local travelTime = balance.duration
-	if balance.projectileSpeed > 0 then
-		travelTime = math.max(distanceToTarget / balance.projectileSpeed, 0.01)
-	end
-
-	-- Create projectile using ECSWorldService
-	local projectileStats = {
-		damage = balance.damage,
-		speed = balance.projectileSpeed,
-		lifetime = balance.duration,
-		radius = 1.0,
-		gravity = 0
-	}
-	local entity = ECSWorldService.CreateProjectile(abilityId, finalSpawnPosition, velocity, owner, projectileStats)
-	if not entity then
-		-- Pool exhausted - queue projectile for later spawning
-		if not projectileSpawnQueue[owner] then
-			projectileSpawnQueue[owner] = {}
-		end
-		
-		local queue = projectileSpawnQueue[owner]
-		if #queue < MAX_QUEUE_SIZE_PER_PLAYER then
-			table.insert(queue, {
-				abilityId = abilityId,
-				balance = balance,
-				spawnPosition = finalSpawnPosition,
-				direction = direction,
-				targetPosition = targetPosition,
-				timestamp = tick()
-			})
-		else
-			-- Queue full - drop oldest projectile
-			table.remove(queue, 1)
-			table.insert(queue, {
-				abilityId = abilityId,
-				balance = balance,
-				spawnPosition = finalSpawnPosition,
-				direction = direction,
-				targetPosition = targetPosition,
-				timestamp = tick()
-			})
-			warn(string.format("[AbilitySystemBase] Spawn queue full for %s, dropped oldest projectile", owner.Name))
-		end
-		
-		return nil  -- Return nil to indicate queued spawn
-	end
-
-	-- Update projectile data with ability-specific stats
-	-- Explosion scale is MULTIPLICATIVE with projectile scale
-	-- Config explosionScale (e.g., 2.5) is a multiplier RELATIVE to projectile size
-	-- This ensures explosion inherits ALL scaling (upgrades, attributes, passives)
-	local explosionScale = balance.explosionScale or 1.0
-	
-	-- CRITICAL: Check if explosionScale was already calculated by attribute (e.g., The Big One)
-	-- If explosionScale is already larger than projectile scale, it's a final calculated value
-	-- and shouldn't be multiplied again (to prevent double-scaling)
-	local projectileScale = balance.scale or 1.0
-	if explosionScale <= projectileScale * 2 then
-		-- Normal case: explosionScale is a config multiplier, apply projectile scaling
-		explosionScale = explosionScale * projectileScale
-	end
-	-- Else: explosionScale is pre-calculated (e.g., The Big One), use as-is
-	
-	-- Store scaled explosion damage (includes upgrades/passives)
-	local explosionDamage = balance.explosionDamage or nil
-	
-	DirtyService.setIfChanged(world, entity, Components.ProjectileData, {
-		type = abilityId,
-		speed = balance.projectileSpeed,
-		owner = owner,
-		damage = balance.damage,
-		gravity = 0,
-		hasHit = false,
-		stayHorizontal = balance.StayHorizontal or false,  -- Store for homing system
-		alwaysStayHorizontal = balance.AlwaysStayHorizontal or false,  -- Y-lock at spawn
-		stickToPlayer = balance.StickToPlayer or false,  -- Follow player X/Y/Z movement
-		explosionScale = explosionScale,  -- Explosion scale (defaults to projectile scale)
-		explosionDamage = explosionDamage,  -- Scaled explosion damage (includes upgrades/passives)
-		startPosition = {
-			x = finalSpawnPosition.X,
-			y = finalSpawnPosition.Y,
-			z = finalSpawnPosition.Z,
-		},
-		targetPosition = {
-			x = targetPosition.X,
-			y = targetPosition.Y,
-			z = targetPosition.Z,
-		},
-		travelTime = travelTime,
-	}, "ProjectileData")
-
-	-- Set damage and piercing
-	DirtyService.setIfChanged(world, entity, Components.Damage, { 
-		amount = balance.damage, 
-		type = "magic" 
-	}, "Damage")
-
-	DirtyService.setIfChanged(world, entity, Components.Piercing, { 
-		remaining = 1 + (balance.penetration or 0),
-		max = 1 + (balance.penetration or 0) 
-	}, "Piercing")
-
-	-- Set visual component with proper model path and scale
-	if balance.modelPath then
-		local visualData = { 
-			modelPath = balance.modelPath,
-			visible = true,
-			scale = balance.scale or 1  -- Include scale for size upgrades
-		}
-		
-		-- Add attribute color if present (for colored projectiles)
-		if balance.attributeColor then
-			visualData.color = balance.attributeColor
-		end
-		
-		DirtyService.setIfChanged(world, entity, Components.Visual, visualData, "Visual")
-	end
-
 	-- Update collision radius based on actual hitbox size from model
 	local baseCollisionRadius = 1.0  -- Fallback if no model/hitbox found
-	
 	if balance.modelPath then
 		local hitboxSize = ModelHitboxHelper.getModelHitboxData(balance.modelPath)
 		if hitboxSize then
@@ -769,40 +656,81 @@ function AbilitySystemBase.createProjectile(
 			baseCollisionRadius = math.max(hitboxSize.X, hitboxSize.Z) / 2
 		end
 	end
-	
+
 	-- Apply scale multiplier from size upgrades/passives
 	local scaledCollisionRadius = baseCollisionRadius * (balance.scale or 1)
-	
-	DirtyService.setIfChanged(world, entity, Components.Collision, {
-		radius = scaledCollisionRadius,
-		solid = false
-	}, "Collision")
-	
-	-- Set facing direction to the correct normalized direction
-	local normalizedDirection = direction.Unit
-	DirtyService.setIfChanged(world, entity, Components.FacingDirection, {
-		x = normalizedDirection.X,
-		y = normalizedDirection.Y,
-		z = normalizedDirection.Z
-	}, "FacingDirection")
-	
-	-- Add homing component if targetingMode = 3
+
+	local ownerEntity = ownerEntityOverride or resolvePlayerEntity(owner)
+	local homing = nil
 	if balance.targetingMode == 3 then
-		DirtyService.setIfChanged(world, entity, Components.Homing, {
-			targetEntity = nil,  -- Will be acquired by HomingSystem on first update
-			homingStrength = balance.homingStrength or 180,
-			homingDistance = balance.homingDistance or 100,
-			homingMaxAngle = balance.homingMaxAngle or 90,
-			lastUpdateTime = 0,  -- Update immediately on first frame
-		}, "Homing")
-		
-		-- Initialize HitTargets to track already-hit enemies
-		DirtyService.setIfChanged(world, entity, Components.HitTargets, {
-			targets = {}  -- Table of entity IDs that have been hit
-		}, "HitTargets")
+		homing = {
+			strengthDeg = balance.homingStrength or 180,
+			maxAngleDeg = balance.homingMaxAngle or 90,
+			acquireRadius = balance.homingDistance or 100,
+			stayHorizontal = balance.StayHorizontal or false,
+			alwaysStayHorizontal = balance.AlwaysStayHorizontal or false,
+		}
 	end
 
-	return entity
+	local aoe = nil
+	if balance.hasExplosion then
+		local explosionScale = balance.explosionScale or 1.0
+		local projectileScale = balance.scale or 1.0
+		if explosionScale <= projectileScale * 2 then
+			explosionScale = explosionScale * projectileScale
+		end
+
+		local explosionModelPath = balance.explosionModelPath
+		local explosionRadius = 10
+		if explosionModelPath then
+			local hitboxSize = ModelHitboxHelper.getModelHitboxData(explosionModelPath)
+			if hitboxSize then
+				local baseRadius = math.max(hitboxSize.X, hitboxSize.Y, hitboxSize.Z) / 2
+				explosionRadius = baseRadius * explosionScale
+			end
+		end
+
+		aoe = {
+			radius = explosionRadius,
+			damage = balance.explosionDamage or 0,
+			trigger = "hit",
+			triggerOnExpire = true,
+			delay = balance.explosionDelay or 0,
+			duration = balance.explosionDuration or 0.5,
+			tickInterval = balance.explosionTickInterval or 0,
+			modelPath = explosionModelPath,
+			scale = explosionScale,
+		}
+	end
+
+	local payload = {
+		kind = abilityId,
+		origin = finalSpawnPosition,
+		direction = direction,
+		speed = balance.projectileSpeed,
+		damage = balance.damage,
+		radius = scaledCollisionRadius,
+		lifetime = balance.duration,
+		ownerEntity = ownerEntity,
+		pierce = balance.penetration,
+		modelPath = balance.modelPath,
+		visualScale = balance.scale or 1,
+		visualColor = balance.attributeColor,
+		homing = homing,
+		aoe = aoe,
+		hitCooldown = balance.hitCooldown or 0.04,
+		stayHorizontal = balance.StayHorizontal or false,
+		alwaysStayHorizontal = balance.AlwaysStayHorizontal or false,
+		stickToPlayer = balance.StickToPlayer or false,
+	}
+
+	if extraConfig and type(extraConfig) == "table" then
+		for key, value in pairs(extraConfig) do
+			payload[key] = value
+		end
+	end
+
+	return ProjectileService.spawnProjectile(payload)
 end
 
 -- Check if player is alive (has character with humanoid > 0 health)
@@ -870,125 +798,14 @@ end
 
 -- Process queued projectile spawns (call this from ability systems every frame)
 function AbilitySystemBase.processSpawnQueue(dt: number)
-	if not world or not Components or not ECSWorldService then
-		return
-	end
-	
-	-- Process up to QUEUE_PROCESS_RATE projectiles per frame
-	local processed = 0
-	
-	for owner, queue in pairs(projectileSpawnQueue) do
-		if not owner or not owner.Parent then
-			-- Player disconnected, clear queue
-			projectileSpawnQueue[owner] = nil
-			continue
-		end
-		
-		while #queue > 0 and processed < QUEUE_PROCESS_RATE do
-			local queuedSpawn = table.remove(queue, 1)  -- Take oldest first (FIFO)
-			
-			-- Calculate velocity
-			local velocity = queuedSpawn.direction * queuedSpawn.balance.projectileSpeed
-			
-			-- Try to spawn projectile again
-			local projectileStats = {
-				damage = queuedSpawn.balance.damage,
-				speed = queuedSpawn.balance.projectileSpeed,
-				lifetime = queuedSpawn.balance.duration,
-				radius = 1.0,
-				gravity = 0
-			}
-			
-			local entity = ECSWorldService.CreateProjectile(
-				queuedSpawn.abilityId,
-				queuedSpawn.spawnPosition,
-				velocity,
-				owner,
-				projectileStats
-			)
-			
-			if entity then
-				-- Successfully spawned from queue - configure it like normal spawn
-				local balance = queuedSpawn.balance
-				local explosionScale = balance.explosionScale or 1.0
-				local projectileScale = balance.scale or 1.0
-				if explosionScale <= projectileScale * 2 then
-					explosionScale = explosionScale * projectileScale
-				end
-				
-				DirtyService.setIfChanged(world, entity, Components.ProjectileData, {
-					type = queuedSpawn.abilityId,
-					speed = balance.projectileSpeed,
-					owner = owner,
-					damage = balance.damage,
-					gravity = 0,
-					hasHit = false,
-					stayHorizontal = balance.StayHorizontal or false,
-					alwaysStayHorizontal = balance.AlwaysStayHorizontal or false,
-					stickToPlayer = balance.StickToPlayer or false,
-					explosionScale = explosionScale,
-					explosionDamage = balance.explosionDamage or nil,
-					startPosition = {
-						x = queuedSpawn.spawnPosition.X,
-						y = queuedSpawn.spawnPosition.Y,
-						z = queuedSpawn.spawnPosition.Z,
-					},
-					targetPosition = {
-						x = queuedSpawn.targetPosition.X,
-						y = queuedSpawn.targetPosition.Y,
-						z = queuedSpawn.targetPosition.Z,
-					},
-					travelTime = 0,  -- Queue spawns don't have travel time
-				}, "ProjectileData")
-				
-				DirtyService.setIfChanged(world, entity, Components.Damage, {
-					amount = balance.damage,
-					type = "magic"
-				}, "Damage")
-				
-				DirtyService.setIfChanged(world, entity, Components.Piercing, {
-					remaining = 1 + (balance.penetration or 0),
-					max = 1 + (balance.penetration or 0)
-				}, "Piercing")
-				
-				if balance.modelPath then
-					local visualData = {
-						modelPath = balance.modelPath,
-						visible = true,
-						scale = balance.scale or 1
-					}
-					DirtyService.setIfChanged(world, entity, Components.Visual, visualData, "Visual")
-				end
-				
-				processed += 1
-			else
-				-- Still can't spawn, put it back at the front of queue
-				table.insert(queue, 1, queuedSpawn)
-				break  -- Stop processing this player's queue
-			end
-		end
-		
-		-- Clean up empty queues
-		if #queue == 0 then
-			projectileSpawnQueue[owner] = nil
-		end
-	end
+	return
 end
 
 -- Get spawn queue statistics (for debugging/monitoring)
 function AbilitySystemBase.getSpawnQueueStats(): {total: number, perPlayer: {[string]: number}}
-	local total = 0
-	local perPlayer = {}
-	
-	for owner, queue in pairs(projectileSpawnQueue) do
-		local count = #queue
-		total += count
-		perPlayer[owner.Name] = count
-	end
-	
 	return {
-		total = total,
-		perPlayer = perPlayer
+		total = 0,
+		perPlayer = {},
 	}
 end
 

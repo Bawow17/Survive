@@ -109,6 +109,8 @@ type RenderRecord = {
 	lastRenderTick: number?,
 	isFadedOut: boolean?,  -- Track if entity is faded out due to distance
 	isSpawning: boolean?,  -- Track if entity is still fading in from spawn
+	lastCullToggleTime: number?, -- Cooldown for cull toggles (prevents churn)
+	currentFadeToken: number?, -- Latest fade request token for this model (prevents stale queued ops)
 	fadeParts: {BasePart}?,
 	fadeDecals: {Decal}?,
 	fadeTextures: {Texture}?,
@@ -332,6 +334,13 @@ local deathAnimations: {[Model]: {
 -- Maximum render distance for projectiles
 local MAX_RENDER_DISTANCE = 500 -- Cull projectiles beyond this distance
 
+-- Enemy culling stabilization
+local CULL_OUT_DIST = MAX_RENDER_DISTANCE
+local CULL_IN_DIST = MAX_RENDER_DISTANCE - 10 -- Small hysteresis window (keeps visuals effectively identical)
+local CULL_TOGGLE_COOLDOWN = 0.75
+local CULL_OUT_DIST_SQ = CULL_OUT_DIST * CULL_OUT_DIST
+local CULL_IN_DIST_SQ = CULL_IN_DIST * CULL_IN_DIST
+
 -- TweenService for smooth enemy movement
 local activeEnemyTweens: {[Model]: Tween} = {}
 
@@ -355,6 +364,13 @@ local SPAWN_BUDGET_PER_FRAME = 15
 local FADE_OP_BUDGET_PER_FRAME = 750
 local ENABLE_CLIENT_GROUND_SNAP = false -- Raycasting per update is extremely expensive; server already aligns enemies to ground.
 
+-- Fade token invalidation: prevents older queued per-descendant ops from fighting newer fades
+local nextFadeToken = 0
+local fadeTokenByModel = setmetatable({}, { __mode = "k" }) :: {[Model]: number}
+
+-- Per-frame counters for peak gauges (reset each render step)
+local descendantOpsThisFrame = 0
+
 -- Active fades being processed with chunked updates
 local activeFades: {[Model]: {
 	targetTrans: number,
@@ -362,6 +378,7 @@ local activeFades: {[Model]: {
 	startTime: number,
 	duration: number,
 	lastUpdate: number,
+	token: number,
 	pendingOpsCount: number?,
 	done: boolean?,
 	model: Model?,
@@ -372,7 +389,15 @@ local activeFades: {[Model]: {
 	onComplete: (() -> ())?
 }} = {}
 
-local fadeOpQueue: {{list: {any}, index: number, target: number, kind: string, fade: any}} = {}
+local fadeOpQueue: {{
+	list: {any},
+	index: number,
+	target: number,
+	kind: string,
+	fade: any,
+	model: Model?,
+	token: number,
+}} = {}
 local fadeOpQueueHead = 1
 local fadeQueuedOps = 0
 
@@ -476,6 +501,7 @@ local function setModelTransparency(model: Model, targetTransparency: number, ca
 
 	if descendantOps > 0 then
 		Prof.incCounter("ClientEntityRenderer.DescendantOps", descendantOps)
+		descendantOpsThisFrame += descendantOps
 	end
 end
 
@@ -575,6 +601,8 @@ local function enqueueFadeList(fade: any, list: {any}?, kind: string, targetTran
 		target = targetTransparency,
 		kind = kind,
 		fade = fade,
+		model = fade.model,
+		token = fade.token,
 	})
 	fade.pendingOpsCount = (fade.pendingOpsCount or 0) + 1
 	fadeQueuedOps += #list
@@ -591,6 +619,11 @@ local function finishFadeIfReady(fade: any)
 	if fade.pendingOpsCount and fade.pendingOpsCount <= 0 then
 		fade.pendingOpsCount = 0
 		if fade.done and fade.model then
+			-- Fade was superseded; don't let stale tasks remove or complete the current fade.
+			if activeFades[fade.model] ~= fade then
+				return
+			end
+
 			activeFades[fade.model] = nil
 			if fade.onComplete then
 				local callback = fade.onComplete
@@ -603,19 +636,36 @@ end
 
 local function processFadeOps()
 	local opsThisFrame = 0
+	local staleDroppedThisFrame = 0
 	local budget = FADE_OP_BUDGET_PER_FRAME
 	while budget > 0 and fadeOpQueueHead <= #fadeOpQueue do
 		local task = fadeOpQueue[fadeOpQueueHead]
 		local list = task.list
-		while budget > 0 and task.index <= #list do
-			local instance = list[task.index]
-			task.index += 1
-			if applyFadeInstance(instance, task.target, task.kind) then
-				opsThisFrame += 1
-				Prof.incCounter("ClientEntityRenderer.DescendantOps", 1)
+		local model = task.model
+		local currentToken = model and fadeTokenByModel[model]
+		local isStale = (not model) or (currentToken ~= task.token)
+		if isStale then
+			-- Drop stale tasks quickly (but still respect the per-frame budget).
+			local remaining = #list - task.index + 1
+			if remaining > 0 then
+				local toDrop = math.min(remaining, budget)
+				task.index += toDrop
+				fadeQueuedOps = math.max(fadeQueuedOps - toDrop, 0)
+				budget -= toDrop
+				staleDroppedThisFrame += toDrop
 			end
-			fadeQueuedOps = math.max(fadeQueuedOps - 1, 0)
-			budget -= 1
+		else
+			while budget > 0 and task.index <= #list do
+				local instance = list[task.index]
+				task.index += 1
+				if applyFadeInstance(instance, task.target, task.kind) then
+					opsThisFrame += 1
+					Prof.incCounter("ClientEntityRenderer.DescendantOps", 1)
+					descendantOpsThisFrame += 1
+				end
+				fadeQueuedOps = math.max(fadeQueuedOps - 1, 0)
+				budget -= 1
+			end
 		end
 		if task.index > #list then
 			fadeOpQueueHead += 1
@@ -638,7 +688,11 @@ local function processFadeOps()
 	if opsThisFrame > 0 then
 		Prof.incCounter("fadeOpsThisFrame", opsThisFrame)
 	end
+	if staleDroppedThisFrame > 0 then
+		Prof.incCounter("staleFadeOpsDropped", staleDroppedThisFrame)
+	end
 	Prof.gauge("fadeQueueDepth", fadeQueuedOps)
+	Prof.gauge("fadeQueueDepthPeak", fadeQueuedOps)
 end
 
 -- Queue a fade operation (non-blocking, processed in chunks)
@@ -649,9 +703,23 @@ local function fadeModel(model: Model, targetTransparency: number, duration: num
 		end
 		return
 	end
+
+	Prof.incCounter("fadeRequestsPer2s", 1)
+	nextFadeToken += 1
+	local token = nextFadeToken
+	fadeTokenByModel[model] = token
+	local recordForToken = recordByModel[model]
+	if recordForToken then
+		recordForToken.currentFadeToken = token
+	end
 	
 	-- If immediate (0 duration), just set transparency now
 	if duration <= 0 then
+		-- Cancel any active fade; token invalidation drops queued ops.
+		if activeFades[model] then
+			activeFades[model] = nil
+		end
+
 		local record = recordByModel[model]
 		local cache = record and {
 			fadeParts = record.fadeParts,
@@ -684,6 +752,7 @@ local function fadeModel(model: Model, targetTransparency: number, duration: num
 		startTime = currentTime,
 		duration = duration,
 		lastUpdate = currentTime,
+		token = token,
 		pendingOpsCount = 0,
 		done = false,
 		fadeParts = cache and cache.fadeParts or nil,
@@ -940,6 +1009,10 @@ local function cleanupStaleProjectiles(now: number)
 
 	for _, projectileModel in ipairs(projectilesFolder:GetChildren()) do
 		if projectileModel:IsA("Model") then
+			local isRecordProjectile = projectileModel:GetAttribute("RecordProjectile")
+			if isRecordProjectile then
+				continue
+			end
 			local entityIdAttr = projectileModel:GetAttribute("ECS_EntityId")
 			local lastUpdateAttr = projectileModel:GetAttribute("ECS_LastUpdate")
 			local keyFromAttr = nil
@@ -1820,7 +1893,7 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		entitySubtype = entityData.visualTypeId or (entityData.ProjectileData and entityData.ProjectileData.type)
 	end
 
-	if entityTypeName == "Player" or entityTypeName == "Unknown" then
+	if entityTypeName == "Player" or entityTypeName == "Unknown" or entityTypeName == "Projectile" then
 		return
 	end
 
@@ -2804,6 +2877,7 @@ end)
 	RunService:BindToRenderStep("ECS.EntityLerp", Enum.RenderPriority.Camera.Value, function()
 		Prof.beginTimer("ClientEntityRenderer.Render")
 		local now = tick()
+		descendantOpsThisFrame = 0
 		
 		-- CRITICAL: Death animations must process even during pause
 		-- Otherwise enemies that die during pause freeze
@@ -2817,6 +2891,12 @@ end)
 		processSpawnQueue()
 		processFades()
 		processFadeOps()
+		local modelsWithFade = 0
+		for _ in pairs(activeFades) do
+			modelsWithFade += 1
+		end
+		Prof.gauge("modelsWithActiveFade", modelsWithFade)
+		Prof.gauge("descendantOpsPeak", descendantOpsThisFrame)
 		cleanupStaleProjectiles(now)
 		cleanupStaleExpOrbs(now)
 		-- Diagnostic toggle for invisible enemy detection
@@ -3037,17 +3117,23 @@ end)
 		
 		-- OPTIMIZED: Handle distance-based fade out/in for enemies (not projectiles)
 		if record.entityType == "Enemy" then
-			if distSq > MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE then
-				-- Enemy is beyond culling distance, fade out if not already faded
-				if not record.isFadedOut and not record.isSpawning then
-					record.isFadedOut = true
-					fadeModel(model, 1, CULL_FADE_DURATION)  -- Fade out over 0.3s
+			local lastToggle = record.lastCullToggleTime or 0
+			local canToggle = (now - lastToggle) >= CULL_TOGGLE_COOLDOWN
+
+			if not record.isFadedOut then
+				-- Fade out at OUT distance
+				if distSq > CULL_OUT_DIST_SQ then
+					if not record.isSpawning and canToggle then
+						record.isFadedOut = true
+						record.lastCullToggleTime = now
+						fadeModel(model, 1, CULL_FADE_DURATION)  -- Fade out over 0.3s
+					end
 				end
-				-- Still continue to process updates (just invisible)
 			else
-				-- Enemy is within render distance, fade in if currently faded
-				if record.isFadedOut then
+				-- Fade in only once comfortably back inside IN distance (hysteresis)
+				if distSq < CULL_IN_DIST_SQ and canToggle then
 					record.isFadedOut = false
+					record.lastCullToggleTime = now
 					fadeModel(model, 0, CULL_FADE_DURATION)  -- Fade in over 0.3s
 				end
 			end

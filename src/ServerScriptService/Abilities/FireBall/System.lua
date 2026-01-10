@@ -31,7 +31,6 @@ local FIREBALL_ID = "FireBall"
 local FIREBALL_NAME = Balance.Name
 
 local playerQuery: any
-local projectileFacingQuery: any
 
 -- Apply "The Big One" attribute scaling (combines all projectiles into one massive shot)
 local function applyTheBigOneScaling(stats: any, playerEntity: number): any
@@ -74,6 +73,7 @@ end
 
 -- Spawn a burst of FireBall projectiles (handles shotgun spread)
 local function spawnFireBallBurst(
+	playerEntity: number,
 	player: Player,
 	position: Vector3,
 	baseDirection: Vector3,
@@ -125,7 +125,8 @@ local function spawnFireBallBurst(
 			position,
 			direction,
 			player,
-			targetPoint
+			targetPoint,
+			playerEntity
 		)
 		
 		if projectileEntity then
@@ -206,7 +207,7 @@ local function performFireBallBurst(playerEntity: number, player: Player): boole
 		targetEntity  -- NEW: Pass selected target entity
 	)
 
-	local created = spawnFireBallBurst(player, position, baseDirection, targetPosition, targetDistance, stats)
+	local created = spawnFireBallBurst(playerEntity, player, position, baseDirection, targetPosition, targetDistance, stats)
 	return created > 0
 end
 
@@ -246,35 +247,24 @@ local function spawnFireStormProjectile(playerEntity: number, player: Player, st
 	
 	-- Create projectile with orbit behavior
 	-- Note: stats already contains attributeColor from Fire Storm attribute
+	local orbitSpeed = (fireStormData and fireStormData.special and fireStormData.special.orbitSpeed) or 120
 	local projectileEntity = AbilitySystemBase.createProjectile(
 		FIREBALL_ID,
 		stats,
 		spawnPosition,
 		direction,
 		player,
-		targetPoint
+		targetPoint,
+		playerEntity,
+		{
+			orbit = {
+				ownerEntity = playerEntity,
+				radius = orbitRadius,
+				speedDeg = orbitSpeed,
+				angle = angleRadians,
+			},
+		}
 	)
-	
-	if projectileEntity then
-		-- Get orbit speed from Fire Storm attributes
-		local orbitSpeed = (fireStormData and fireStormData.special and fireStormData.special.orbitSpeed) or 120
-		
-		-- Add orbit component to make projectile actively orbit around player
-		DirtyService.setIfChanged(world, projectileEntity, Components.ProjectileOrbit, {
-			ownerEntity = playerEntity,
-			orbitRadius = orbitRadius,
-			orbitSpeed = orbitSpeed,
-			currentAngle = angleRadians,
-		}, "ProjectileOrbit")
-		
-		-- CRITICAL: Set velocity to zero so MovementSystem doesn't move the projectile
-		-- ProjectileOrbitSystem will handle all position updates
-		DirtyService.setIfChanged(world, projectileEntity, Components.Velocity, {
-			x = 0,
-			y = 0,
-			z = 0,
-		}, "Velocity")
-	end
 	
 	return projectileEntity ~= nil
 end
@@ -356,7 +346,6 @@ function FireBallSystem.init(worldRef: any, components: any, dirtyService: any, 
 	AttributeSelections = Components.AttributeSelections
 
 	playerQuery = world:query(Components.EntityType, Components.Position, Components.Ability):cached()
-	projectileFacingQuery = world:query(Components.Projectile, Components.Velocity, Components.ProjectileData):cached()
 end
 
 -- Step function (called every frame)
@@ -520,16 +509,6 @@ function FireBallSystem.step(dt: number)
 		end
 	end
 
-	-- Update facing direction for FireBall projectiles
-	for projectileEntity, projectile, velocity, projectileData in projectileFacingQuery do
-		if projectileData.type == FIREBALL_ID then
-			DirtyService.setIfChanged(world, projectileEntity, Components.FacingDirection, {
-				x = velocity.x,
-				y = velocity.y,
-				z = velocity.z
-			}, "FacingDirection")
-		end
-	end
 end
 
 return FireBallSystem

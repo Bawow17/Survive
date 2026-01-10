@@ -15,6 +15,12 @@ local function profInc(name: string, amount: number?)
 	end
 end
 
+local function profGauge(name: string, value: number)
+	if PROFILING_ENABLED then
+		Prof.gauge(name, value)
+	end
+end
+
 local ECS = require(game.ServerScriptService.ECS.ECSFacade)
 local DirtyService = require(game.ServerScriptService.ECS.DirtyService)
 local ProjectilePool = require(game.ServerScriptService.ECS.ProjectilePool)
@@ -30,9 +36,6 @@ local ChargerAISystem = require(game.ServerScriptService.ECS.Systems.ChargerAISy
 local EnemyRepulsionSystem = require(game.ServerScriptService.ECS.Systems.EnemyRepulsionSystem)
 local EnemySpawner = require(game.ServerScriptService.ECS.Systems.EnemySpawner)
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
-local ProjectileCollisionSystem = require(game.ServerScriptService.ECS.Systems.ProjectileCollisionSystem)
-local HomingSystem = require(game.ServerScriptService.ECS.Systems.HomingSystem)
-local ProjectileOrbitSystem = require(game.ServerScriptService.ECS.Systems.ProjectileOrbitSystem)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
 local HitFlashSystem = require(game.ServerScriptService.ECS.Systems.HitFlashSystem)
@@ -62,6 +65,7 @@ local EnemyExpDropSystem = require(game.ServerScriptService.ECS.Systems.EnemyExp
 local PauseSystem = require(game.ServerScriptService.ECS.Systems.PauseSystem)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local PickupService = require(game.ServerScriptService.Services.PickupService)
+local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
 
 -- Upgrade Systems
 local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
@@ -138,7 +142,10 @@ local StatusEffects = Components.StatusEffects
 local ECSWorldService = {}
 
 local entityCount = 0
+local warnedProjectileEntity = false
+local warnedActiveEcsProjectiles = false
 local activeEntities: {[number]: boolean} = {}
+local projectileEntityQuery = world:query(Components.Projectile):cached()
 local playerEntities: {[Player]: number} = {}
 local entityToPlayer: {[number]: Player} = {}
 
@@ -384,13 +391,12 @@ function ECSWorldService.Initialize()
 	DamageSystem.init(world, Components, DirtyService)
 	DamageSystem.setEnemyExpDropSystem(EnemyExpDropSystem)  -- Set reference for enemy death drops
 	DamageSystem.setStatusEffectSystem(StatusEffectSystem)  -- Set reference for invincibility checks
+	ProjectileService.init(world, Components, function(entityId)
+		return entityToPlayer[entityId]
+	end)
 	HitFlashSystem.init(world, Components)
 	DeathAnimationSystem.init(world, Components, ECSWorldService)
 	KnockbackSystem.init(world, Components, DirtyService)
-	
-	ProjectileCollisionSystem.init(world, Components, DirtyService, ECSWorldService)
-	HomingSystem.init(world, Components, DirtyService)
-	ProjectileOrbitSystem.init(world, Components, DirtyService)
 	
 end
 
@@ -399,13 +405,11 @@ function ECSWorldService.CreateEntity(entityTypeName: string, position: Vector3,
 	
 	-- Route entity creation through appropriate object pools for performance
 	if entityTypeName == "Projectile" then
-		-- Use projectile pool (includes explosions as subtype)
-		entity = ProjectilePool.acquire(position, owner, "Generic")
-		-- Caller will set ProjectileData, Damage, etc.
-		markNewEntity(entity)
-		entityCount += 1
-		activeEntities[entity] = true
-		return entity
+		if not warnedProjectileEntity then
+			warnedProjectileEntity = true
+			warn("[ECSWorldService] Projectile ECS entities are disabled; use ProjectileService records instead.")
+		end
+		return nil
 	elseif entityTypeName == "ExpOrb" then
 		-- Use exp orb pool
 		entity = ExpOrbPool.acquire(position, owner)
@@ -830,53 +834,11 @@ function ECSWorldService.CreatePowerup(powerupType: string, position: Vector3, o
 end
 
 function ECSWorldService.CreateProjectile(projectileType: string, position: Vector3, velocity: Vector3, owner: any?, customStats: any?): any
-	local entity = ECSWorldService.CreateEntity("Projectile", position, owner)
-	if not entity then
-		return nil
+	if not warnedProjectileEntity then
+		warnedProjectileEntity = true
+		warn("[ECSWorldService] CreateProjectile is disabled; use ProjectileService records instead.")
 	end
-
-	-- Use default stats for basic projectiles, but allow custom stats to override
-	local defaultStats = {
-		damage = 30, 
-		speed = 15, 
-		lifetime = 3.0, 
-		radius = 1.0, 
-		gravity = 0.2
-	}
-	local stats = customStats or defaultStats
-
-	setComponent(entity, Velocity, { x = velocity.X, y = velocity.Y, z = velocity.Z }, "Velocity")
-	
-	-- Set proper EntityType with subtype
-	local entityTypeData = {
-		type = "Projectile",
-		subtype = projectileType,
-		owner = owner
-	}
-	setComponent(entity, EntityType, entityTypeData, "EntityType")
-	
-	setComponent(entity, Projectile, {}, "Projectile")
-    setComponent(entity, ProjectileData, {
-		type = projectileType,
-		speed = stats.speed,
-        owner = owner,
-		damage = stats.damage,
-		gravity = stats.gravity,
-		hasHit = false,
-	}, "ProjectileData")
-    setComponent(entity, Collision, { radius = stats.radius, solid = false }, "Collision")
-    -- Store ownership data on dedicated component so other systems can resolve it
-    local ownerEntity = owner and playerEntities[owner]
-    if owner ~= nil or ownerEntity ~= nil then
-        setComponent(entity, Components.Owner, {
-            player = owner,
-            entity = ownerEntity,
-        }, "Owner")
-    end
-	setComponent(entity, Lifetime, { remaining = stats.lifetime, max = stats.lifetime }, "Lifetime")
-	setComponent(entity, Health, { current = 1, max = 1 }, "Health")
-
-	return entity
+	return nil
 end
 
 function ECSWorldService.CreateItem(itemType: string, position: Vector3, value: number?): any
@@ -1325,10 +1287,6 @@ local function stepWorld(dt: number)
 		AfterimageCloneSystem.step(abilityDt)
 		debug.profileend()
 		
-		-- Process projectile spawn queue (backpressure handling when pool is exhausted)
-		debug.profilebegin("ProjectileSpawnQueue")
-		AbilitySystemBase.processSpawnQueue(abilityDt)
-		debug.profileend()
 	end
 	
 	-- Enemy repulsion system (after AI but before movement)
@@ -1340,31 +1298,31 @@ local function stepWorld(dt: number)
 	end
 	debug.profileend()
 
-	-- Projectile homing system (BEFORE movement so velocity updates apply immediately)
-	debug.profilebegin("HomingSystem")
-	HomingSystem.step(dt)
-	debug.profileend()
-	
-	-- Projectile orbit system (for Fire Storm fireballs that orbit around player)
-	debug.profilebegin("ProjectileOrbitSystem")
-	ProjectileOrbitSystem.step(dt)
-	debug.profileend()
-	
 	-- Magnet pull system (before movement)
 	debug.profilebegin("MagnetPull")
 	MagnetPullSystem.step(dt)
 	debug.profileend()
+
+	-- Record-based projectile simulation (no ECS entities)
+	debug.profilebegin("ProjectileService")
+	ProjectileService.step(dt)
+	debug.profileend()
+
+	local ecsProjectileCount = 0
+	for _ in projectileEntityQuery do
+		ecsProjectileCount += 1
+	end
+	profGauge("ActiveEcsProjectiles", ecsProjectileCount)
+	if ecsProjectileCount > 0 and not warnedActiveEcsProjectiles then
+		warnedActiveEcsProjectiles = true
+		warn("[Bootstrap] ECS projectiles detected after record migration; check for legacy spawns.")
+	end
 
 	-- Core simulation systems (after homing/magnet so movement uses updated velocities)
 	debug.profilebegin("Movement")
 	MovementSystem.step(dt)
 	debug.profileend()
 
-	-- Projectile collision system (must run AFTER movement, BEFORE lifetime)
-	debug.profilebegin("ProjectileCollision")
-	ProjectileCollisionSystem.step(dt)
-	debug.profileend()
-	
 	-- Combat systems (hit feedback, knockback, death animations)
 	debug.profilebegin("HitFlash")
 	HitFlashSystem.step(dt)
@@ -1388,30 +1346,6 @@ local function stepWorld(dt: number)
 			print(string.format("[Bootstrap] Lifetime expired: Enemy entity %d", entity))
 		end
 		
-		-- Check if this is a FireBall projectile - trigger explosion before destroying
-		-- ONLY if it expired naturally (not from hitting something)
-		local projectileData = world:get(entity, Components.ProjectileData)
-		if projectileData and projectileData.type == "FireBall" and not projectileData.hasHit then
-			local position = world:get(entity, Components.Position)
-			local owner = world:get(entity, Components.Owner)
-			if position then
-				local explosionPos = Vector3.new(position.x, position.y, position.z)
-				local ownerPlayer = owner and owner.player or nil
-				local ownerEntityId = owner and owner.entity or nil
-				
-				-- Get explosion scale (prioritize explosionScale from projectileData)
-				local explosionScale = projectileData.explosionScale
-				if not explosionScale then
-					local visual = world:get(entity, Components.Visual)
-					explosionScale = (visual and visual.scale) or 1.0
-				end
-				
-				-- Get explosion damage from projectileData
-				local explosionDamage = projectileData.explosionDamage
-				
-				ProjectileCollisionSystem.triggerFireBallExplosion(explosionPos, ownerPlayer, explosionScale, ownerEntityId, explosionDamage)
-			end
-		end
 		-- Return poolable entities to their pools instead of destroying
 		if typeStr == "Projectile" then
 			SyncSystem.queueDespawn(entity)  -- Notify clients to remove visual

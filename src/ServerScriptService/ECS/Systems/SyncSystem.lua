@@ -94,7 +94,6 @@ local NIL_HELPER_LOG_INTERVAL = 2
 
 local AOI_TRACKED_TYPES = {
 	Enemy = true,
-	Projectile = true,
 	Powerup = true,
 	AfterimageClone = true,
 }
@@ -302,6 +301,7 @@ local function isAoiTrackedType(entityType: any): boolean
 	end
 	return AOI_TRACKED_TYPES[entityType.type] == true
 end
+
 
 local function aoiWorldToCell(position: {x: number, y: number, z: number}): (number, number)
 	return math.floor(position.x / AOI_GRID_SIZE), math.floor(position.z / AOI_GRID_SIZE)
@@ -677,32 +677,7 @@ local function getLifetimeSeconds(value: any): number?
 end
 
 local function buildProjectileSpawn(entityId: number): {[string]: any}?
-	local pos = world:get(entityId, componentLookup.Position)
-	local vel = world:get(entityId, componentLookup.Velocity)
-	if not pos or not vel then
-		return nil
-	end
-	local entityTypeValue = world:get(entityId, componentLookup.EntityType)
-	local projectileData = world:get(entityId, componentLookup.ProjectileData)
-	local visual = world:get(entityId, componentLookup.Visual)
-	local owner = componentLookup.Owner and world:get(entityId, componentLookup.Owner) or nil
-	local ownerPlayer = owner and owner.player or nil
-	local ownerUserId = ownerPlayer and ownerPlayer.UserId or nil
-	local lifetime = world:get(entityId, componentLookup.Lifetime)
-	local visualTypeId = (entityTypeValue and entityTypeValue.subtype) or (projectileData and projectileData.type)
-
-	return {
-		id = entityId,
-		origin = getVectorTable(pos),
-		velocity = getVectorTable(vel),
-		spawnTime = tick(),
-		lifetime = getLifetimeSeconds(lifetime),
-		visualTypeId = visualTypeId,
-		visualColor = visual and visual.color or nil,
-		visualScale = visual and visual.scale or nil,
-		ownerUserId = ownerUserId,
-		ownerEntity = owner and owner.entity or nil,
-	}
+	return nil
 end
 
 local function buildExpOrbSpawn(entityId: number): {[string]: any}?
@@ -713,16 +688,6 @@ local function addSpawnForPlayer(player: Player, entry: {entities: {[number]: an
 	local entityTypeValue = world:get(entityId, componentLookup.EntityType)
 	local entityType = entityTypeValue and entityTypeValue.type
 	if entityType == "Projectile" then
-		local spawnData = buildProjectileSpawn(entityId)
-		if spawnData then
-			local list = entry.projectileSpawns
-			if not list then
-				list = {}
-				entry.projectileSpawns = list
-			end
-			table.insert(list, spawnData)
-			return true
-		end
 		return false
 	end
 	if entityType == "ExpOrb" then
@@ -904,6 +869,10 @@ function shouldIncludeEntityForPlayer(entity: number, player: Player?)
 	
 	-- ExpOrb entities are deprecated; never sync them.
 	if entityType.type == "ExpOrb" then
+		return false
+	end
+
+	if entityType.type == "Projectile" then
 		return false
 	end
 	

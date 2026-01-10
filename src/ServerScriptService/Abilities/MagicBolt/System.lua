@@ -34,6 +34,7 @@ local playerQuery: any
 
 -- Spawn a burst of Magic Bolt projectiles (handles shotgun spread)
 local function spawnMagicBoltBurst(
+	playerEntity: number,
 	player: Player,
 	position: Vector3,
 	baseDirection: Vector3,
@@ -84,7 +85,8 @@ local function spawnMagicBoltBurst(
 			position,
 			direction,
 			player,
-			targetPoint
+			targetPoint,
+			playerEntity
 		)
 		
 		if projectileEntity then
@@ -150,7 +152,7 @@ local function performMagicBoltBurstFromPosition(playerEntity: number, player: P
 		targetEntity
 	)
 
-	local created = spawnMagicBoltBurst(player, position, baseDirection, targetPosition, targetDistance, stats)
+	local created = spawnMagicBoltBurst(playerEntity, player, position, baseDirection, targetPosition, targetDistance, stats)
 	return created > 0
 end
 
@@ -579,16 +581,6 @@ function MagicBoltSystem.step(dt: number)
 	end
 
 	-- Update facing direction for Magic Bolt projectiles
-	local projectileQuery = world:query(Components.Projectile, Components.Velocity, Components.ProjectileData)
-	for projectileEntity, projectile, velocity, projectileData in projectileQuery do
-		if projectileData.type == MAGIC_BOLT_ID then
-			DirtyService.setIfChanged(world, projectileEntity, Components.FacingDirection, {
-				x = velocity.x,
-				y = velocity.y,
-				z = velocity.z
-			}, "FacingDirection")
-		end
-	end
 end
 
 return MagicBoltSystem
