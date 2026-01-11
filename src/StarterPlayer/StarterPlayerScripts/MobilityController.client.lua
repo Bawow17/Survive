@@ -611,6 +611,8 @@ local function isOnCooldown(config: any): boolean
 		else
 			currentTime = serverGameTime + math.max(0, tick() - lastGameTimeUpdate)
 		end
+	elseif isPaused then
+		currentTime = pauseStartTime
 	end
 	local effectiveCooldown = config.cooldown * cooldownMultiplier
 	local timeSinceLastUse = currentTime - lastUsedTime

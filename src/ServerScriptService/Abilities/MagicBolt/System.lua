@@ -100,20 +100,93 @@ end
 -- Perform a Magic Bolt burst from a given position (shared by player and clones)
 -- This ensures IDENTICAL targeting logic for both
 local function performMagicBoltBurstFromPosition(playerEntity: number, player: Player, position: Vector3, stats: any): boolean
-	-- Find target using smart targeting if mode 2, otherwise nearest
-	local targetEntity: number?
-	if stats.targetingMode == 2 then
-		targetEntity = AbilitySystemBase.findBestTarget(playerEntity, position, stats.targetingRange, stats.damage)
-		-- Record predicted damage for this burst
-		if targetEntity then
-			AbilitySystemBase.recordPredictedDamage(playerEntity, targetEntity, stats.damage)
-		end
-	else
-		targetEntity = AbilitySystemBase.findNearestEnemy(position, stats.targetingRange)
-	end
-	
-	local targetPosition: Vector3
+	local shots = math.max(stats.shotAmount, 1)
+	local totalSpread = math.min(math.abs(stats.targetingAngle) * 2, math.rad(10))
+	local step = shots > 1 and totalSpread / (shots - 1) or 0
+	local midpoint = (shots - 1) * 0.5
 
+	if stats.targetingMode == 2 then
+		local created = 0
+		for shotIndex = 1, shots do
+			local targetEntity = AbilitySystemBase.findBestTarget(playerEntity, position, stats.targetingRange, stats.damage)
+			if targetEntity then
+				AbilitySystemBase.recordPredictedDamage(playerEntity, targetEntity, stats.damage)
+			end
+
+			local targetPosition: Vector3
+			if targetEntity then
+				local enemyPos = AbilitySystemBase.getEnemyCenterPosition(targetEntity)
+				if enemyPos then
+					targetPosition = enemyPos
+				else
+					targetPosition = position + Vector3.new(Balance.targetingRange, 0, 0)
+				end
+			else
+				local character = player.Character
+				local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+				if humanoidRootPart and humanoidRootPart:IsA("BasePart") then
+					targetPosition = position + (humanoidRootPart :: BasePart).CFrame.LookVector * stats.targetingRange
+				else
+					targetPosition = position + Vector3.new(stats.targetingRange, 0, 0)
+				end
+			end
+
+			local targetDistance = (targetPosition - position).Magnitude
+			local baseDirection = AbilitySystemBase.calculateTargetingDirection(
+				position,
+				stats.targetingMode,
+				targetPosition,
+				stats,
+				stats.StayHorizontal,
+				player,
+				targetEntity
+			)
+
+			local direction = baseDirection
+			if shots > 1 then
+				local offsetIndex = (shotIndex - 1) - midpoint
+				local finalAngle = offsetIndex * step
+				local cos = math.cos(finalAngle)
+				local sin = math.sin(finalAngle)
+				direction = Vector3.new(
+					direction.X * cos - direction.Z * sin,
+					direction.Y,
+					direction.X * sin + direction.Z * cos
+				)
+			end
+
+			if direction.Magnitude == 0 then
+				direction = Vector3.new(0, 0, 1)
+			end
+			direction = direction.Unit
+
+			local targetPoint: Vector3
+			if targetDistance > 0 then
+				targetPoint = position + direction * targetDistance
+			else
+				targetPoint = position + direction * (stats.projectileSpeed * stats.duration)
+			end
+
+			local projectileEntity = AbilitySystemBase.createProjectile(
+				MAGIC_BOLT_ID,
+				stats,
+				position,
+				direction,
+				player,
+				targetPoint,
+				playerEntity
+			)
+			if projectileEntity then
+				created += 1
+			end
+		end
+
+		return created > 0
+	end
+
+	-- Non-targeting modes retain the shared burst logic
+	local targetEntity = AbilitySystemBase.findNearestEnemy(position, stats.targetingRange)
+	local targetPosition: Vector3
 	if targetEntity then
 		local enemyPos = AbilitySystemBase.getEnemyCenterPosition(targetEntity)
 		if enemyPos then
@@ -122,14 +195,11 @@ local function performMagicBoltBurstFromPosition(playerEntity: number, player: P
 			targetPosition = position + Vector3.new(Balance.targetingRange, 0, 0)
 		end
 	else
-		-- No target found - behavior depends on targeting mode
 		if stats.targetingMode < 2 then
-			-- Random targeting modes (0, 1): fire in a random direction
 			local angle = math.random() * math.pi * 2
 			local randomDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
 			targetPosition = position + randomDirection * stats.targetingRange
 		else
-			-- Direct targeting modes (2+): fire forward
 			local character = player.Character
 			local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
 			if humanoidRootPart and humanoidRootPart:IsA("BasePart") then
@@ -140,7 +210,6 @@ local function performMagicBoltBurstFromPosition(playerEntity: number, player: P
 		end
 	end
 
-	-- Calculate direction based on targeting mode
 	local targetDistance = (targetPosition - position).Magnitude
 	local baseDirection = AbilitySystemBase.calculateTargetingDirection(
 		position,
