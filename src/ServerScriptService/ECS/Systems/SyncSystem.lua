@@ -66,16 +66,23 @@ local MAX_UPDATES_PER_TICK_PER_PLAYER = 1500
 local AOI_BAND_HYSTERESIS = 20
 
 -- Transform update gating
-local TRANSFORM_POS_EPS = 0.05
-local TRANSFORM_VEL_EPS = 0.05
-local TRANSFORM_FACING_EPS = 0.02
-local NEAR_UPDATE_HZ = 12
-local MID_UPDATE_HZ = 5
+local TRANSFORM_POS_EPS = 0.12
+local TRANSFORM_VEL_EPS = 0.12
+local TRANSFORM_FACING_EPS = 0.05
+local NEAR_UPDATE_HZ = 10
+local MID_UPDATE_HZ = 3
 local FAR_UPDATE_HZ = 0
-local USE_UNRELIABLE_TRANSFORMS = false
-local ENEMY_POS_QUANTIZE = 0.1
-local ENEMY_VEL_QUANTIZE = 0.1
-local ENEMY_FACING_QUANTIZE = 0.05
+local USE_UNRELIABLE_TRANSFORMS = true
+local ENEMY_POS_QUANTIZE = 0.2
+local ENEMY_VEL_QUANTIZE = 0.2
+local ENEMY_FACING_QUANTIZE = 0.1
+
+-- Unreliable payload chunking (prevents oversized packets)
+local MAX_UNRELIABLE_UPDATES_PER_BATCH = 120
+local MAX_UNRELIABLE_COMPACT_PER_BATCH = 250
+
+-- Profiling sampling (avoid expensive JSONEncode every tick)
+local BYTES_BREAKDOWN_TICK_INTERVAL = 10
 
 local AOI_NEAR_RADIUS_SQ = AOI_NEAR_RADIUS * AOI_NEAR_RADIUS
 local AOI_MID_RADIUS_SQ = AOI_MID_RADIUS * AOI_MID_RADIUS
@@ -1064,6 +1071,21 @@ function SyncSystem.init(worldRef: any, components: any, dirtyService: any, remo
 			UnreliableUpdateRemote = candidate
 		end
 	end
+	if not UnreliableUpdateRemote then
+		local remoteRoot = ReplicatedStorage:FindFirstChild("RemoteEvents")
+		local ecsRemotes = remoteRoot and remoteRoot:FindFirstChild("ECS")
+		if ecsRemotes then
+			local ok, remote = pcall(function()
+				local newRemote = Instance.new("UnreliableRemoteEvent")
+				newRemote.Name = "EntityUpdateUnreliable"
+				newRemote.Parent = ecsRemotes
+				return newRemote
+			end)
+			if ok and remote and remote:IsA("UnreliableRemoteEvent") then
+				UnreliableUpdateRemote = remote
+			end
+		end
+	end
 	options = opts or {}
 
 	if options and options.getPlayerFromEntity then
@@ -1160,6 +1182,7 @@ function SyncSystem.step(dt: number)
 	end
 	accumulator -= syncInterval
 	tickCounter += 1
+	local shouldSampleBytesBreakdown = PROFILING_ENABLED and (tickCounter % BYTES_BREAKDOWN_TICK_INTERVAL == 0)
 	
 	-- Periodic garbage collection to prevent memory buildup
 	gcAccumulator += dt
@@ -1783,6 +1806,28 @@ function SyncSystem.step(dt: number)
 						end
 					end
 				end
+				if shouldSampleBytesBreakdown then
+					local updatesBytes = entry.updates and safeJsonSize(entry.updates)
+					if updatesBytes then
+						Prof.incCounter("bytesUpdUpdates", updatesBytes)
+					end
+					local resyncBytes = entry.resyncs and safeJsonSize(entry.resyncs)
+					if resyncBytes then
+						Prof.incCounter("bytesUpdResyncs", resyncBytes)
+					end
+					local enemiesBytes = entry.enemies and safeJsonSize(entry.enemies)
+					if enemiesBytes then
+						Prof.incCounter("bytesUpdEnemies", enemiesBytes)
+					end
+					local projectilesBytes = entry.projectiles and safeJsonSize(entry.projectiles)
+					if projectilesBytes then
+						Prof.incCounter("bytesUpdProjectiles", projectilesBytes)
+					end
+					local sharedBytes = entry.shared and safeJsonSize(entry.shared)
+					if sharedBytes then
+						Prof.incCounter("bytesUpdShared", sharedBytes)
+					end
+				end
 			end
 			profInc("SyncSystem.EntitiesPerTickPlayer", entitiesCount)
 			profInc("updatesSentCount", updatesCount)
@@ -1846,7 +1891,49 @@ function SyncSystem.step(dt: number)
 				profInc("updatesSentCount", updatesCount)
 				profInc("updatesSentUnreliable", updatesCount)
 
-				UnreliableUpdateRemote:FireClient(player, entry)
+				local sharedSent = false
+				local shared = entry.shared
+
+				local function sendBatch(kind: string, batch: {any})
+					local payload = {}
+					if shared and not sharedSent then
+						payload.shared = shared
+						sharedSent = true
+					end
+					if kind == "updates" then
+						payload.updates = batch
+					elseif kind == "projectiles" then
+						payload.projectiles = batch
+					elseif kind == "enemies" then
+						payload.enemies = batch
+					end
+					UnreliableUpdateRemote:FireClient(player, payload)
+				end
+
+				local function sendBatches(kind: string, list: {any}, maxPerBatch: number)
+					if not list or #list == 0 then
+						return
+					end
+					local index = 1
+					local count = #list
+					while index <= count do
+						local batch = {}
+						local limit = math.min(index + maxPerBatch - 1, count)
+						for i = index, limit do
+							batch[#batch + 1] = list[i]
+						end
+						sendBatch(kind, batch)
+						index = limit + 1
+					end
+				end
+
+				sendBatches("updates", entry.updates, MAX_UNRELIABLE_UPDATES_PER_BATCH)
+				sendBatches("projectiles", entry.projectiles, MAX_UNRELIABLE_COMPACT_PER_BATCH)
+				sendBatches("enemies", entry.enemies, MAX_UNRELIABLE_COMPACT_PER_BATCH)
+
+				if shared and not sharedSent then
+					UnreliableUpdateRemote:FireClient(player, { shared = shared })
+				end
 			end
 		end
 	end

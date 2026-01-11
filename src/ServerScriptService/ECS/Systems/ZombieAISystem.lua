@@ -9,6 +9,7 @@ local GameTimeSystem = require(script.Parent.GameTimeSystem)
 local EasingUtils = require(game.ServerScriptService.Balance.EasingUtils)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local ObstacleRaycastCache = require(game.ServerScriptService.ECS.Systems.ObstacleRaycastCache)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -41,6 +42,9 @@ local enemyLogAccumulator = 0
 -- Obstacle detection and pathfinding settings
 local OBSTACLE_CHECK_INTERVAL = 0.2  -- Check obstacles at 5 FPS
 local OBSTACLE_RAYCAST_DISTANCE = 3.5  -- Detect obstacles 3.5 studs ahead
+local OBSTACLE_CHECK_MAX_DISTANCE = 160  -- Skip obstacle checks beyond this range
+local OBSTACLE_CHECK_MIN_SPEED = 0.1
+local OBSTACLE_CHECK_BUDGET_PER_STEP = 120
 local WALL_CLIMB_THRESHOLD = 5  -- Player must be 5 studs above to trigger climbing
 local STEERING_BLEND_FACTOR = 0.7  -- 70% steering, 30% direct to player
 local CLIMB_SPEED_MULTIPLIER = 0.4  -- Climb at 40% of horizontal speed
@@ -63,16 +67,16 @@ local zombieQuery: any
 local playerQueryCached: any
 local targetAIQuery: any  -- Cached query for Target + AI (pause handling)
 local inactiveCleanupQuery: any
+local OBSTACLE_CHECK_MAX_DISTANCE_SQ = OBSTACLE_CHECK_MAX_DISTANCE * OBSTACLE_CHECK_MAX_DISTANCE
 
--- Raycast params for obstacle detection
-local obstacleRaycastParams = RaycastParams.new()
-obstacleRaycastParams.FilterType = Enum.RaycastFilterType.Exclude
-obstacleRaycastParams.IgnoreWater = true
-
--- Cache for transparent/non-collidable parts (for obstacle detection)
-local obstacleExclusionCache = {}
-local lastObstacleExclusionRebuild = 0
-local OBSTACLE_EXCLUSION_REBUILD_INTERVAL = 5.0  -- Rebuild every 5 seconds
+-- Profiling accumulators (reset per step)
+local aiRaycastTime = 0
+local obstacleParamsTime = 0
+local obstacleParamsRebuilds = 0
+local obstacleExclusionSize = 0
+local obstacleCheckTime = 0
+local steeringTime = 0
+local lastObstacleRebuildId = 0
 
 -- Object pooling with proper limits and safety
 local enemyDataPool = {}
@@ -194,108 +198,16 @@ local function applyDamageToPlayer(targetEntity: number, damageAmount: number, s
 	DamageSystem.applyDamage(targetEntity, damageAmount, "physical", sourceEntity)
 end
 
--- Update obstacle raycast params with transparent/non-collidable parts
-local function updateObstacleRaycastParams()
-	local currentTime = tick()
-	
-	-- Only rebuild every 5 seconds
-	if currentTime - lastObstacleExclusionRebuild < OBSTACLE_EXCLUSION_REBUILD_INTERVAL and #obstacleExclusionCache > 0 then
-		obstacleRaycastParams.FilterDescendantsInstances = obstacleExclusionCache
-		return
-	end
-	
-	-- Rebuild exclusion list
-	table.clear(obstacleExclusionCache)
-	lastObstacleExclusionRebuild = currentTime
-	
-	local Players = game:GetService("Players")
-	
-	-- Exclude player characters
-	for _, player in pairs(Players:GetPlayers()) do
-		if player.Character then
-			for _, part in pairs(player.Character:GetDescendants()) do
-				if part:IsA("BasePart") then
-					table.insert(obstacleExclusionCache, part)
-				end
-			end
-		end
-	end
-	
-	-- Exclude exp orbs
-	local expOrbsFolder = Workspace:FindFirstChild("ExpOrbs")
-	if expOrbsFolder then
-		for _, orbModel in pairs(expOrbsFolder:GetChildren()) do
-			if orbModel:IsA("Model") then
-				for _, part in pairs(orbModel:GetDescendants()) do
-					if part:IsA("BasePart") then
-						table.insert(obstacleExclusionCache, part)
-					end
-				end
-			end
-		end
-	end
-	
-	-- Exclude powerups
-	local powerupsFolder = Workspace:FindFirstChild("Powerups")
-	if powerupsFolder then
-		for _, powerupModel in pairs(powerupsFolder:GetChildren()) do
-			if powerupModel:IsA("Model") then
-				for _, part in pairs(powerupModel:GetDescendants()) do
-					if part:IsA("BasePart") then
-						table.insert(obstacleExclusionCache, part)
-					end
-				end
-			end
-		end
-	end
-	
-	-- Exclude projectiles
-	local projectilesFolder = Workspace:FindFirstChild("Projectiles")
-	if projectilesFolder then
-		for _, projectileModel in pairs(projectilesFolder:GetChildren()) do
-			if projectileModel:IsA("Model") then
-				for _, part in pairs(projectileModel:GetDescendants()) do
-					if part:IsA("BasePart") then
-						table.insert(obstacleExclusionCache, part)
-					end
-				end
-			end
-		end
-	end
-	
-	-- Exclude afterimage clones (visual-only, not solid)
-	local afterimageClonesFolder = Workspace:FindFirstChild("AfterimageClones")
-	if afterimageClonesFolder then
-		for _, cloneModel in pairs(afterimageClonesFolder:GetChildren()) do
-			if cloneModel:IsA("Model") then
-				for _, part in pairs(cloneModel:GetDescendants()) do
-					if part:IsA("BasePart") then
-						table.insert(obstacleExclusionCache, part)
-					end
-				end
-			end
-		end
-	end
-	
-	-- Exclude transparent and non-collidable parts
-	for _, descendant in pairs(Workspace:GetDescendants()) do
-		if descendant:IsA("BasePart") or descendant:IsA("MeshPart") then
-			if descendant.Transparency >= 1 or not descendant.CanCollide then
-				table.insert(obstacleExclusionCache, descendant)
-			end
-		end
-	end
-	
-	obstacleRaycastParams.FilterDescendantsInstances = obstacleExclusionCache
-end
-
 local function aiRaycast(origin: Vector3, direction: Vector3, params: RaycastParams): RaycastResult?
 	Prof.incCounter("AI.Raycasts", 1)
-	return Workspace:Raycast(origin, direction, params)
+	local startTime = os.clock()
+	local result = Workspace:Raycast(origin, direction, params)
+	aiRaycastTime += os.clock() - startTime
+	return result
 end
 
 -- Detect obstacle in front of enemy (including overhangs and steep slopes)
-local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direction: {x: number, z: number}): boolean
+local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direction: {x: number, z: number}, params: RaycastParams): boolean
 	if not direction or (direction.x == 0 and direction.z == 0) then
 		return false
 	end
@@ -309,14 +221,12 @@ local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direc
 		z = direction.z / mag
 	}
 	
-	-- Update raycast params
-	updateObstacleRaycastParams()
 	
 	-- FORWARD OBSTACLE CHECK: Cast forward from 1 stud above ground
 	local origin = Vector3.new(enemyPos.x, enemyPos.y + 1, enemyPos.z)
 	local rayDirection = Vector3.new(normDir.x, 0, normDir.z) * OBSTACLE_RAYCAST_DISTANCE
 	
-	local result = aiRaycast(origin, rayDirection, obstacleRaycastParams)
+	local result = aiRaycast(origin, rayDirection, params)
 	
 	-- If we hit something solid, it's an obstacle
 	if result and result.Instance then
@@ -337,7 +247,7 @@ local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direc
 	local upOrigin = Vector3.new(enemyPos.x, enemyPos.y + 1, enemyPos.z)
 	local upDirection = Vector3.new(0, 4, 0)  -- Check 4 studs up
 	
-	local upResult = aiRaycast(upOrigin, upDirection, obstacleRaycastParams)
+	local upResult = aiRaycast(upOrigin, upDirection, params)
 	
 	if upResult and upResult.Instance then
 		local hitPart = upResult.Instance
@@ -358,7 +268,7 @@ local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direc
 	)
 	local downDirection = Vector3.new(0, -5, 0)
 	
-	local downResult = aiRaycast(aheadOrigin, downDirection, obstacleRaycastParams)
+	local downResult = aiRaycast(aheadOrigin, downDirection, params)
 	
 	if downResult and downResult.Instance then
 		local hitPart = downResult.Instance
@@ -376,7 +286,7 @@ local function detectObstacle(enemyPos: {x: number, y: number, z: number}, direc
 end
 
 -- Calculate steering direction to avoid obstacle
-local function calculateSteering(enemyPos: {x: number, y: number, z: number}, currentDir: {x: number, z: number}, targetDir: {x: number, z: number}): {x: number, z: number}
+local function calculateSteering(enemyPos: {x: number, y: number, z: number}, currentDir: {x: number, z: number}, targetDir: {x: number, z: number}, params: RaycastParams): {x: number, z: number}
 	-- Normalize current direction
 	local mag = math.sqrt(currentDir.x * currentDir.x + currentDir.z * currentDir.z)
 	if mag == 0 then
@@ -388,20 +298,18 @@ local function calculateSteering(enemyPos: {x: number, y: number, z: number}, cu
 		z = currentDir.z / mag
 	}
 	
-	-- Update raycast params
-	updateObstacleRaycastParams()
 	
 	local origin = Vector3.new(enemyPos.x, enemyPos.y + 1, enemyPos.z)
 	
 	-- Cast left (rotate 90 degrees counter-clockwise)
 	local leftDir = {x = -normCurrent.z, z = normCurrent.x}
 	local leftRayDir = Vector3.new(leftDir.x, 0, leftDir.z) * OBSTACLE_RAYCAST_DISTANCE
-	local leftResult = aiRaycast(origin, leftRayDir, obstacleRaycastParams)
+	local leftResult = aiRaycast(origin, leftRayDir, params)
 	
 	-- Cast right (rotate 90 degrees clockwise)
 	local rightDir = {x = normCurrent.z, z = -normCurrent.x}
 	local rightRayDir = Vector3.new(rightDir.x, 0, rightDir.z) * OBSTACLE_RAYCAST_DISTANCE
-	local rightResult = aiRaycast(origin, rightRayDir, obstacleRaycastParams)
+	local rightResult = aiRaycast(origin, rightRayDir, params)
 	
 	-- Choose the clearer direction
 	local steerDir
@@ -685,6 +593,29 @@ function ZombieAISystem.step(dt: number)
 	end
 
 	Prof.beginTimer("AI.Time")
+	aiRaycastTime = 0
+	obstacleParamsTime = 0
+	obstacleParamsRebuilds = 0
+	obstacleCheckTime = 0
+	steeringTime = 0
+	local obstacleChecksRemaining = OBSTACLE_CHECK_BUDGET_PER_STEP
+	local obstacleParams: RaycastParams? = nil
+
+	local function getObstacleParams(): RaycastParams
+		if obstacleParams then
+			return obstacleParams
+		end
+		local startTime = os.clock()
+		obstacleParams = ObstacleRaycastCache.getParams()
+		obstacleParamsTime += os.clock() - startTime
+		local stats = ObstacleRaycastCache.getStats()
+		obstacleExclusionSize = stats.exclusionSize
+		if stats.rebuildId ~= lastObstacleRebuildId then
+			obstacleParamsRebuilds += 1
+			lastObstacleRebuildId = stats.rebuildId
+		end
+		return obstacleParams
+	end
 	
 	-- Handle paused player enemy transitions (individual pause mode only)
 	if not GameOptions.GlobalPause then
@@ -981,7 +912,7 @@ function ZombieAISystem.step(dt: number)
 			if not pathfindingState then
 				pathfindingState = {
 					mode = "simple",
-					lastObstacleCheck = 0,
+					lastObstacleCheck = tick() + math.random() * OBSTACLE_CHECK_INTERVAL,
 					obstacleDetected = false,
 					steeringDirection = nil,
 					clearCheckCount = 0,
@@ -1001,31 +932,43 @@ function ZombieAISystem.step(dt: number)
 			-- Check if time to update obstacle detection (5 FPS)
 			local currentTime = tick()
 			if currentTime - pathfindingState.lastObstacleCheck >= OBSTACLE_CHECK_INTERVAL then
-				pathfindingState.lastObstacleCheck = currentTime
-				
-				-- Detect obstacle in movement direction
-				local hasObstacle = detectObstacle(enemyPosition, {x = baseDirectionX, z = baseDirectionZ})
-				
-				if hasObstacle then
-					-- Obstacle detected - switch to Advanced Mode
-					pathfindingState.mode = "advanced"
-					pathfindingState.obstacleDetected = true
-					pathfindingState.clearCheckCount = 0
-				else
-					-- No obstacle - if in Advanced Mode, count consecutive clear checks
-					if pathfindingState.mode == "advanced" then
-						pathfindingState.clearCheckCount = (pathfindingState.clearCheckCount or 0) + 1
-						-- Switch back to Simple Mode after 2 consecutive clear checks (0.4s)
-						if pathfindingState.clearCheckCount >= 2 then
-							pathfindingState.mode = "simple"
-							pathfindingState.obstacleDetected = false
-							pathfindingState.steeringDirection = nil
+				local shouldCheck = distSq <= OBSTACLE_CHECK_MAX_DISTANCE_SQ and finalSpeed > OBSTACLE_CHECK_MIN_SPEED
+				if shouldCheck then
+					if obstacleChecksRemaining > 0 then
+						obstacleChecksRemaining -= 1
+						pathfindingState.lastObstacleCheck = currentTime
+						
+						-- Detect obstacle in movement direction
+						local params = getObstacleParams()
+						local obstacleStart = os.clock()
+						local hasObstacle = detectObstacle(enemyPosition, {x = baseDirectionX, z = baseDirectionZ}, params)
+						obstacleCheckTime += os.clock() - obstacleStart
+						
+						if hasObstacle then
+							-- Obstacle detected - switch to Advanced Mode
+							pathfindingState.mode = "advanced"
+							pathfindingState.obstacleDetected = true
+							pathfindingState.clearCheckCount = 0
+						else
+							-- No obstacle - if in Advanced Mode, count consecutive clear checks
+							if pathfindingState.mode == "advanced" then
+								pathfindingState.clearCheckCount = (pathfindingState.clearCheckCount or 0) + 1
+								-- Switch back to Simple Mode after 2 consecutive clear checks (0.4s)
+								if pathfindingState.clearCheckCount >= 2 then
+									pathfindingState.mode = "simple"
+									pathfindingState.obstacleDetected = false
+									pathfindingState.steeringDirection = nil
+								end
+							end
 						end
+						
+						-- Update PathfindingState component
+						setPathfindingState(enemyEntity, pathfindingState)
 					end
+				else
+					-- Skip checks when too far or not moving; update timestamp to prevent churn.
+					pathfindingState.lastObstacleCheck = currentTime
 				end
-				
-				-- Update PathfindingState component
-				setPathfindingState(enemyEntity, pathfindingState)
 			end
 			
 			-- Apply pathfinding based on mode
@@ -1062,11 +1005,19 @@ function ZombieAISystem.step(dt: number)
 					-- Player is on same level - STEER AROUND
 					pathfindingState.targetYVelocity = 0  -- No vertical movement
 					
-					local steeringDir = calculateSteering(
+				local steeringDir = {x = baseDirectionX, z = baseDirectionZ}
+				if distSq <= OBSTACLE_CHECK_MAX_DISTANCE_SQ and obstacleChecksRemaining > 0 then
+					obstacleChecksRemaining -= 1
+					local params = getObstacleParams()
+					local steeringStart = os.clock()
+					steeringDir = calculateSteering(
 						enemyPosition,
 						{x = baseDirectionX, z = baseDirectionZ},
-						{x = baseDirectionX, z = baseDirectionZ}
+						{x = baseDirectionX, z = baseDirectionZ},
+						params
 					)
+					steeringTime += os.clock() - steeringStart
+				end
 					
 					-- Apply steering to velocity
 					newVelocity.x = steeringDir.x * finalSpeed
@@ -1125,6 +1076,25 @@ function ZombieAISystem.step(dt: number)
 		end
 
 		setVelocity(enemyEntity, newVelocity)
+	end
+
+	if aiRaycastTime > 0 then
+		Prof.incCounter("AI.RaycastMs", math.floor(aiRaycastTime * 1000 + 0.5))
+	end
+	if obstacleParamsTime > 0 then
+		Prof.incCounter("AI.ObstacleParamsMs", math.floor(obstacleParamsTime * 1000 + 0.5))
+	end
+	if obstacleParamsRebuilds > 0 then
+		Prof.incCounter("AI.ObstacleParamsRebuilds", obstacleParamsRebuilds)
+	end
+	if obstacleExclusionSize > 0 then
+		Prof.gauge("AI.ObstacleExclusionSize", obstacleExclusionSize)
+	end
+	if obstacleCheckTime > 0 then
+		Prof.incCounter("AI.ObstacleCheckMs", math.floor(obstacleCheckTime * 1000 + 0.5))
+	end
+	if steeringTime > 0 then
+		Prof.incCounter("AI.SteeringMs", math.floor(steeringTime * 1000 + 0.5))
 	end
 
 	Prof.endTimer("AI.Time")

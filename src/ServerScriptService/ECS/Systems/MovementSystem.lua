@@ -38,6 +38,12 @@ local entityCurrentGroundHeight: {[number]: number} = {}  -- Current smoothed gr
 local GROUND_HEIGHT_SMOOTHING = 0.35  -- Lerp factor for ground height transitions (35% per frame - more aggressive)
 local GROUND_HEIGHT_DEADZONE = 0.1  -- Don't update if change is less than this (prevents micro-jitter)
 
+-- Profiling accumulators (reset per step)
+local groundRaycastTime = 0
+local exclusionBuildTime = 0
+local exclusionRebuilds = 0
+local exclusionCacheSize = 0
+
 -- Cache cleanup to prevent unbounded growth (MEMORY LEAK FIX 1.3)
 local CACHE_CLEANUP_INTERVAL = 60.0  -- Clean every 60 seconds
 local cacheCleanupAccumulator = 0
@@ -68,6 +74,8 @@ local function getPartsToExcludeFromGround()
 		return playerPartsCache
 	end
 	
+	local rebuildStart = os.clock()
+
 	-- Clear and rebuild cache
 	table.clear(playerPartsCache)
 	local Players = game:GetService("Players")
@@ -164,6 +172,9 @@ local function getPartsToExcludeFromGround()
 	end
 	
 	lastPlayerPartsUpdate = currentTime
+	exclusionBuildTime += os.clock() - rebuildStart
+	exclusionRebuilds += 1
+	exclusionCacheSize = #playerPartsCache
 	return playerPartsCache
 end
 
@@ -218,7 +229,9 @@ local function getGroundHeight(position: {x: number, y: number, z: number}): num
 	updateRaycastParams() -- Update to exclude players, enemies, projectiles
 	local origin = Vector3.new(position.x, (position.y or 0) + 25, position.z)
 	Prof.incCounter("Movement.Raycasts", 1)
+	local raycastStart = os.clock()
 	local result = Workspace:Raycast(origin, Vector3.new(0, -250, 0), raycastParams)
+	groundRaycastTime += os.clock() - raycastStart
 	
 	local height = nil
 	if result and result.Instance then
@@ -273,6 +286,9 @@ function MovementSystem.step(dt: number)
 	end
 
 	Prof.beginTimer("Movement.Time")
+	groundRaycastTime = 0
+	exclusionBuildTime = 0
+	exclusionRebuilds = 0
 
 	-- Periodic cache cleanup (MEMORY LEAK FIX 1.3)
 	cacheCleanupAccumulator = cacheCleanupAccumulator + dt
@@ -570,6 +586,19 @@ function MovementSystem.step(dt: number)
 		if newPosition.x ~= position.x or newPosition.y ~= position.y or newPosition.z ~= position.z then
 			DirtyService.setIfChanged(world, entity, Position, newPosition, "Position")
 		end
+	end
+
+	if groundRaycastTime > 0 then
+		Prof.incCounter("Movement.RaycastMs", math.floor(groundRaycastTime * 1000 + 0.5))
+	end
+	if exclusionBuildTime > 0 then
+		Prof.incCounter("Movement.ExclusionBuildMs", math.floor(exclusionBuildTime * 1000 + 0.5))
+	end
+	if exclusionRebuilds > 0 then
+		Prof.incCounter("Movement.ExclusionRebuilds", exclusionRebuilds)
+	end
+	if exclusionCacheSize > 0 then
+		Prof.gauge("Movement.ExclusionCacheSize", exclusionCacheSize)
 	end
 
 	Prof.endTimer("Movement.Time")
