@@ -5,13 +5,16 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
-local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
 local PROFILING_ENABLED = ProfilingConfig.ENABLED
+
+local function getSimTime(): number
+	return tick()
+end
 
 local function profInc(name: string, amount: number?)
 	if PROFILING_ENABLED then
@@ -484,7 +487,7 @@ function ProjectileService.spawnProjectile(payload: {
 	local ownerPlayer = payload.ownerEntity and getPlayerFromEntity and getPlayerFromEntity(payload.ownerEntity) or nil
 	if ownerPlayer then
 		local entry = spawnCounts[ownerPlayer]
-		local now = GameTimeSystem.getGameTime()
+		local now = getSimTime()
 		if not entry or now >= entry.resetAt then
 			entry = { count = 0, resetAt = now + 1 }
 			spawnCounts[ownerPlayer] = entry
@@ -498,7 +501,7 @@ function ProjectileService.spawnProjectile(payload: {
 
 	projectileIdCounter += 1
 	local id = projectileIdCounter
-	local now = GameTimeSystem.getGameTime()
+	local now = getSimTime()
 	local lifetime = math.max(payload.lifetime, 0.05)
 	local direction = payload.direction.Magnitude > 0 and payload.direction.Unit or Vector3.new(0, 0, 1)
 	if payload.alwaysStayHorizontal then
@@ -572,7 +575,7 @@ local function startExplosion(record: ProjectileRecord, center: Vector3, reason:
 	end
 	local aoe = record.aoe
 	local duration = aoe.duration or 0.5
-	local now = GameTimeSystem.getGameTime()
+	local now = getSimTime()
 
 	activeExplosions[#activeExplosions + 1] = {
 		position = center,
@@ -648,7 +651,7 @@ local function despawnProjectile(record: ProjectileRecord, reason: string, impac
 end
 
 function ProjectileService.step(dt: number)
-	local now = GameTimeSystem.getGameTime()
+	local now = getSimTime()
 	if #projectileList == 0 and #activeExplosions == 0 then
 		if next(pendingSpawns) or next(pendingDespawns) or next(pendingImpacts) then
 			for player, payloads in pairs(pendingSpawns) do

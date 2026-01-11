@@ -78,8 +78,9 @@ local ENEMY_VEL_QUANTIZE = 0.2
 local ENEMY_FACING_QUANTIZE = 0.1
 
 -- Unreliable payload chunking (prevents oversized packets)
-local MAX_UNRELIABLE_UPDATES_PER_BATCH = 120
-local MAX_UNRELIABLE_COMPACT_PER_BATCH = 250
+local MAX_UNRELIABLE_UPDATES_PER_BATCH = 20
+local MAX_UNRELIABLE_COMPACT_PER_BATCH = 60
+local MAX_UNRELIABLE_PAYLOAD_BYTES = 700
 
 -- Profiling sampling (avoid expensive JSONEncode every tick)
 local BYTES_BREAKDOWN_TICK_INTERVAL = 10
@@ -495,6 +496,16 @@ local function filterFlagsForEntity(entityType: string?, flags: {[string]: boole
 	if entityType == "ExpOrb" then
 		return nil, false
 	end
+	if entityType == "Enemy" then
+		-- Server-only enemy state; dropping these reduces update size and reliability pressure.
+		flags.AI = nil
+		flags.Target = nil
+		flags.PathfindingState = nil
+		flags.AttackCooldown = nil
+		if next(flags) == nil then
+			return nil, false
+		end
+	end
 	return flags, true
 end
 
@@ -761,11 +772,29 @@ local function emitUpdateForPlayer(
 				vy = roundToStep(vy, ENEMY_VEL_QUANTIZE)
 				vz = roundToStep(vz, ENEMY_VEL_QUANTIZE)
 			end
-			local compactData = {
-				entity,
-				px, py, pz,
-				vx, vy, vz,
-			}
+			local compactData
+			if isEnemy then
+				local facing = world:get(entity, componentLookup.FacingDirection)
+				local fx, fy, fz = getVectorComponents(facing)
+				if fx ~= nil and fy ~= nil and fz ~= nil then
+					fx = roundToStep(fx, ENEMY_FACING_QUANTIZE)
+					fy = roundToStep(fy, ENEMY_FACING_QUANTIZE)
+					fz = roundToStep(fz, ENEMY_FACING_QUANTIZE)
+					compactData = {
+						entity,
+						px, py, pz,
+						vx, vy, vz,
+						fx, fy, fz,
+					}
+				end
+			end
+			if not compactData then
+				compactData = {
+					entity,
+					px, py, pz,
+					vx, vy, vz,
+				}
+			end
 			if isProjectile then
 				local list = projectileUpdates[player]
 				if not list then
@@ -1891,15 +1920,8 @@ function SyncSystem.step(dt: number)
 				profInc("updatesSentCount", updatesCount)
 				profInc("updatesSentUnreliable", updatesCount)
 
-				local sharedSent = false
-				local shared = entry.shared
-
 				local function sendBatch(kind: string, batch: {any})
 					local payload = {}
-					if shared and not sharedSent then
-						payload.shared = shared
-						sharedSent = true
-					end
 					if kind == "updates" then
 						payload.updates = batch
 					elseif kind == "projectiles" then
@@ -1910,30 +1932,59 @@ function SyncSystem.step(dt: number)
 					UnreliableUpdateRemote:FireClient(player, payload)
 				end
 
-				local function sendBatches(kind: string, list: {any}, maxPerBatch: number)
+				local function sendBatchesBySize(kind: string, list: {any}, maxPerBatch: number)
 					if not list or #list == 0 then
 						return
 					end
-					local index = 1
-					local count = #list
-					while index <= count do
-						local batch = {}
-						local limit = math.min(index + maxPerBatch - 1, count)
-						for i = index, limit do
-							batch[#batch + 1] = list[i]
+
+					local batch = {}
+					local batchCount = 0
+					for i = 1, #list do
+						batchCount += 1
+						batch[batchCount] = list[i]
+
+						local payload = {}
+						if kind == "updates" then
+							payload.updates = batch
+						elseif kind == "projectiles" then
+							payload.projectiles = batch
+						elseif kind == "enemies" then
+							payload.enemies = batch
 						end
+						local size = safeJsonSize(payload)
+						if size and size > MAX_UNRELIABLE_PAYLOAD_BYTES then
+							if batchCount > 1 then
+								-- Remove last, send prior batch, then start new batch with the last item.
+								batch[batchCount] = nil
+								sendBatch(kind, batch)
+								batch = { list[i] }
+								batchCount = 1
+							else
+								-- Single payload too large for unreliable; fall back to reliable.
+								if Remotes and Remotes.EntityUpdate then
+									Remotes.EntityUpdate:FireClient(player, payload)
+									profInc("unreliableFallbackReliable", 1)
+								else
+									sendBatch(kind, batch)
+								end
+								batch = {}
+								batchCount = 0
+							end
+						elseif batchCount >= maxPerBatch then
+							sendBatch(kind, batch)
+							batch = {}
+							batchCount = 0
+						end
+					end
+
+					if batchCount > 0 then
 						sendBatch(kind, batch)
-						index = limit + 1
 					end
 				end
 
-				sendBatches("updates", entry.updates, MAX_UNRELIABLE_UPDATES_PER_BATCH)
-				sendBatches("projectiles", entry.projectiles, MAX_UNRELIABLE_COMPACT_PER_BATCH)
-				sendBatches("enemies", entry.enemies, MAX_UNRELIABLE_COMPACT_PER_BATCH)
-
-				if shared and not sharedSent then
-					UnreliableUpdateRemote:FireClient(player, { shared = shared })
-				end
+				sendBatchesBySize("updates", entry.updates, MAX_UNRELIABLE_UPDATES_PER_BATCH)
+				sendBatchesBySize("projectiles", entry.projectiles, MAX_UNRELIABLE_COMPACT_PER_BATCH)
+				sendBatchesBySize("enemies", entry.enemies, MAX_UNRELIABLE_COMPACT_PER_BATCH)
 			end
 		end
 	end

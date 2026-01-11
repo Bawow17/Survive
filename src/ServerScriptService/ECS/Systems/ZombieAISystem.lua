@@ -40,11 +40,12 @@ local FacingDirection: any
 local enemyLogAccumulator = 0
 
 -- Obstacle detection and pathfinding settings
-local OBSTACLE_CHECK_INTERVAL = 0.2  -- Check obstacles at 5 FPS
+local OBSTACLE_CHECK_INTERVAL = 0.4  -- Check obstacles at ~2.5 FPS
 local OBSTACLE_RAYCAST_DISTANCE = 3.5  -- Detect obstacles 3.5 studs ahead
-local OBSTACLE_CHECK_MAX_DISTANCE = 160  -- Skip obstacle checks beyond this range
+local OBSTACLE_CHECK_MAX_DISTANCE = 120  -- Skip obstacle checks beyond this range
 local OBSTACLE_CHECK_MIN_SPEED = 0.1
 local OBSTACLE_CHECK_BUDGET_PER_STEP = 120
+local STEERING_CHECK_INTERVAL = 0.3  -- Throttle steering raycasts in advanced mode
 local WALL_CLIMB_THRESHOLD = 5  -- Player must be 5 studs above to trigger climbing
 local STEERING_BLEND_FACTOR = 0.7  -- 70% steering, 30% direct to player
 local CLIMB_SPEED_MULTIPLIER = 0.4  -- Climb at 40% of horizontal speed
@@ -915,6 +916,7 @@ function ZombieAISystem.step(dt: number)
 					lastObstacleCheck = tick() + math.random() * OBSTACLE_CHECK_INTERVAL,
 					obstacleDetected = false,
 					steeringDirection = nil,
+					lastSteeringCheck = 0,
 					clearCheckCount = 0,
 					currentYVelocity = 0,  -- For smooth Y transitions
 					targetYVelocity = 0,
@@ -1006,17 +1008,25 @@ function ZombieAISystem.step(dt: number)
 					pathfindingState.targetYVelocity = 0  -- No vertical movement
 					
 				local steeringDir = {x = baseDirectionX, z = baseDirectionZ}
+				if pathfindingState.steeringDirection then
+					steeringDir = pathfindingState.steeringDirection
+				end
 				if distSq <= OBSTACLE_CHECK_MAX_DISTANCE_SQ and obstacleChecksRemaining > 0 then
-					obstacleChecksRemaining -= 1
-					local params = getObstacleParams()
-					local steeringStart = os.clock()
-					steeringDir = calculateSteering(
-						enemyPosition,
-						{x = baseDirectionX, z = baseDirectionZ},
-						{x = baseDirectionX, z = baseDirectionZ},
-						params
-					)
-					steeringTime += os.clock() - steeringStart
+					local lastSteer = pathfindingState.lastSteeringCheck or 0
+					if currentTime - lastSteer >= STEERING_CHECK_INTERVAL then
+						obstacleChecksRemaining -= 1
+						pathfindingState.lastSteeringCheck = currentTime
+						local params = getObstacleParams()
+						local steeringStart = os.clock()
+						steeringDir = calculateSteering(
+							enemyPosition,
+							{x = baseDirectionX, z = baseDirectionZ},
+							{x = baseDirectionX, z = baseDirectionZ},
+							params
+						)
+						steeringTime += os.clock() - steeringStart
+						pathfindingState.steeringDirection = steeringDir
+					end
 				end
 					
 					-- Apply steering to velocity

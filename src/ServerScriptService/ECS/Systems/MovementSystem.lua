@@ -24,11 +24,12 @@ local _AI: any  -- AI component for enemy speed data
 
 -- Cached query for performance
 local movingQuery: any
+local playerPositionQuery: any
 
 -- Ground height caching (CRITICAL FIX - raycasting every frame is expensive!)
 local groundHeightCache: {[string]: {height: number, time: number}} = {}
 local GROUND_CACHE_DURATION = 5.0 -- Increased from 2.0 to 5.0 (ground rarely changes)
-local GROUND_CHECK_INTERVAL = 0.5 -- Increased from 0.2 to 0.5 (check every 0.5s per entity)
+local GROUND_CHECK_INTERVAL = 0.8 -- Check ground every 0.8s per entity
 local entityGroundCheckTimers: {[number]: number} = {}
 local entityLastPosition: {[number]: {x: number, z: number}} = {}  -- Track horizontal movement
 
@@ -37,6 +38,10 @@ local entityTargetGroundHeight: {[number]: number} = {}  -- Target ground height
 local entityCurrentGroundHeight: {[number]: number} = {}  -- Current smoothed ground height
 local GROUND_HEIGHT_SMOOTHING = 0.35  -- Lerp factor for ground height transitions (35% per frame - more aggressive)
 local GROUND_HEIGHT_DEADZONE = 0.1  -- Don't update if change is less than this (prevents micro-jitter)
+local FAR_GROUND_SNAP_DISTANCE = 220
+local FAR_GROUND_SNAP_DISTANCE_SQ = FAR_GROUND_SNAP_DISTANCE * FAR_GROUND_SNAP_DISTANCE
+local FAR_GROUND_CHECK_INTERVAL = 2.5
+local MAX_GROUND_RAYCASTS_PER_STEP = 220
 
 -- Profiling accumulators (reset per step)
 local groundRaycastTime = 0
@@ -215,14 +220,14 @@ local function getGroundCacheKey(x: number, z: number): string
 	return string.format("%d,%d", gridX, gridZ)
 end
 
-local function getGroundHeight(position: {x: number, y: number, z: number}): number?
+local function getGroundHeight(position: {x: number, y: number, z: number}): (number?, boolean)
 	local cacheKey = getGroundCacheKey(position.x, position.z)
 	local cached = groundHeightCache[cacheKey]
 	local currentTime = tick()
 	
 	-- Use cached result if recent enough
 	if cached and (currentTime - cached.time) < GROUND_CACHE_DURATION and cached.height then
-		return cached.height
+		return cached.height, false
 	end
 	
 	-- Perform raycast
@@ -261,7 +266,7 @@ local function getGroundHeight(position: {x: number, y: number, z: number}): num
 		}
 	end
 	
-	return height
+	return height, true
 end
 
 function MovementSystem.init(worldRef: any, components: any, dirtyService: any)
@@ -278,6 +283,20 @@ function MovementSystem.init(worldRef: any, components: any, dirtyService: any)
 	
 	-- Create cached query for performance
 	movingQuery = world:query(Components.Position, Components.Velocity, Components.EntityType):cached()
+	playerPositionQuery = world:query(Components.Position, Components.PlayerStats):cached()
+end
+
+local function getNearestPlayerDistSq(pos: Vector3, players: {Vector3}): number
+	local best = math.huge
+	for _, playerPos in ipairs(players) do
+		local dx = playerPos.X - pos.X
+		local dz = playerPos.Z - pos.Z
+		local distSq = dx * dx + dz * dz
+		if distSq < best then
+			best = distSq
+		end
+	end
+	return best
 end
 
 function MovementSystem.step(dt: number)
@@ -289,6 +308,14 @@ function MovementSystem.step(dt: number)
 	groundRaycastTime = 0
 	exclusionBuildTime = 0
 	exclusionRebuilds = 0
+	local groundChecksRemaining = MAX_GROUND_RAYCASTS_PER_STEP
+
+	local playerPositions: {Vector3} = {}
+	for _, playerPos, playerStats in playerPositionQuery do
+		if playerStats and playerStats.player and playerStats.player.Parent then
+			playerPositions[#playerPositions + 1] = Vector3.new(playerPos.x, playerPos.y, playerPos.z)
+		end
+	end
 
 	-- Periodic cache cleanup (MEMORY LEAK FIX 1.3)
 	cacheCleanupAccumulator = cacheCleanupAccumulator + dt
@@ -497,35 +524,45 @@ function MovementSystem.step(dt: number)
 			local currentTime = tick()
 			local lastCheck = entityGroundCheckTimers[entity] or 0
 			local lastPos = entityLastPosition[entity]
+			local isFar = true
+			if #playerPositions > 0 then
+				local distSq = getNearestPlayerDistSq(Vector3.new(newPosition.x, newPosition.y, newPosition.z), playerPositions)
+				isFar = distSq > FAR_GROUND_SNAP_DISTANCE_SQ
+			end
+			local groundInterval = isFar and FAR_GROUND_CHECK_INTERVAL or GROUND_CHECK_INTERVAL
 			
 			-- Check if entity moved horizontally (optimization)
 			local movedHorizontally = false
 			if lastPos then
 				local dx = math.abs(newPosition.x - lastPos.x)
 				local dz = math.abs(newPosition.z - lastPos.z)
-				movedHorizontally = (dx + dz) > 1.0  -- Moved more than 1 stud horizontally
+				movedHorizontally = (dx + dz) > 2.0  -- Moved more than 2 studs horizontally
 			else
 				movedHorizontally = true  -- First check
 			end
 			
 			-- Only check ground at intervals AND if moved significantly AND not climbing/falling
-			if not isClimbing and not isFalling and movedHorizontally and currentTime - lastCheck >= GROUND_CHECK_INTERVAL then
+			if not isClimbing and not isFalling and movedHorizontally and currentTime - lastCheck >= groundInterval then
 				entityGroundCheckTimers[entity] = currentTime
 				entityLastPosition[entity] = {x = newPosition.x, z = newPosition.z}
-				
-				-- Use cached raycast to find target ground level
-				local groundHeight = getGroundHeight(newPosition)
-				if groundHeight then
-					-- PHYSICS BUG FIX 2.2: Prevent unreasonably low ground (map floor is usually > -50)
-					if groundHeight < -50 then
-						groundHeight = -50  -- Set floor limit
+				if groundChecksRemaining > 0 then
+					-- Use cached raycast to find target ground level
+					local groundHeight, didRaycast = getGroundHeight(newPosition)
+					if didRaycast then
+						groundChecksRemaining -= 1
 					end
-					
-					-- Set target ground height for smooth lerping
-					entityTargetGroundHeight[entity] = groundHeight
-				else
-					-- If no ground found, target current Y position
-					entityTargetGroundHeight[entity] = position.y
+					if groundHeight then
+						-- PHYSICS BUG FIX 2.2: Prevent unreasonably low ground (map floor is usually > -50)
+						if groundHeight < -50 then
+							groundHeight = -50  -- Set floor limit
+						end
+						
+						-- Set target ground height for smooth lerping
+						entityTargetGroundHeight[entity] = groundHeight
+					else
+						-- If no ground found, target current Y position
+						entityTargetGroundHeight[entity] = position.y
+					end
 				end
 			end
 			

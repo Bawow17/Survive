@@ -1142,6 +1142,10 @@ local function stepWorld(dt: number)
 	
 	-- Check if game is paused - skip all ECS updates if so
 	if PauseSystem.isPaused() then
+		-- Keep record-based projectiles moving during pause.
+		debug.profilebegin("ProjectileService")
+		ProjectileService.step(dt)
+		debug.profileend()
 		return
 	end
 	

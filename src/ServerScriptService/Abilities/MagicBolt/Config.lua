@@ -21,7 +21,7 @@ return {
 	projectileSpeed = 100, -- studs per second
 	penetration = 3, -- amount of enemies it can hit before destroying (0 = destroy on first hit)
 	duration = 1.5, -- lifetime of the projectile in seconds
-	cooldown = 0.1, -- cooldown in seconds between casts
+	cooldown = 0.9, -- cooldown in seconds between casts
 	
 	-- Targeting configuration
 	-- 0 = random direction
@@ -46,7 +46,7 @@ return {
 	
 	-- Multi-shot configuration
 	projectileCount = 1, -- amount of projectiles shot in one cast (after one another)
-	shotAmount = 5, -- amount of projectiles shot PER projectile (shotgun spread)
+	shotAmount = 1, -- amount of projectiles shot PER projectile (shotgun spread)
 	pulseInterval = 0.08, -- interval between each projectile count
 	spreadAngleEven = math.rad(15), -- spread angle when shotAmount is even
 	spreadAngleOdd = math.rad(30), -- spread angle when shotAmount is odd

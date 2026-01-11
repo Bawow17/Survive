@@ -586,26 +586,24 @@ ProjectilesImpactBatch.OnClientEvent:Connect(function(payloads: any)
 	end
 end)
 
-local isPaused = false
+local pauseProjectiles = false -- Projectiles keep moving during pause unless explicitly frozen.
 local pauseStartTime = 0
-local isIndividuallyPaused = false
 
 local GamePaused = remotesFolder:WaitForChild("GamePaused") :: RemoteEvent
 local GameUnpaused = remotesFolder:WaitForChild("GameUnpaused") :: RemoteEvent
 
 GamePaused.OnClientEvent:Connect(function(data: any)
-	local showTimer = data and data.showTimer
-	if not showTimer then
-		isPaused = true
+	if data and data.freezeProjectiles then
+		pauseProjectiles = true
 		pauseStartTime = tick()
-	else
-		isIndividuallyPaused = true
 	end
 end)
 
 GameUnpaused.OnClientEvent:Connect(function()
-	isPaused = false
-	isIndividuallyPaused = false
+	if not pauseProjectiles then
+		return
+	end
+	pauseProjectiles = false
 	local pauseDuration = tick() - pauseStartTime
 
 	for _, record in pairs(activeProjectiles) do
@@ -625,7 +623,7 @@ GameUnpaused.OnClientEvent:Connect(function()
 end)
 
 RunService.Heartbeat:Connect(function(dt: number)
-	if isPaused and not isIndividuallyPaused then
+	if pauseProjectiles then
 		return
 	end
 

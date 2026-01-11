@@ -115,7 +115,11 @@ type RenderRecord = {
 	fadeDecals: {Decal}?,
 	fadeTextures: {Texture}?,
 	fadeSurfaceGuis: {SurfaceGui}?,
+	fadePartOriginals: {[BasePart]: number}?,
+	fadeDecalOriginals: {[Decal]: number}?,
+	fadeTextureOriginals: {[Texture]: number}?,
 	anchoredParts: {BasePart}?,
+	poolKey: string?,
 	spawnToken: number?,
 	simType: string?,
 	simOrigin: Vector3?,
@@ -127,8 +131,13 @@ type RenderRecord = {
 
 local renderedEntities: {[string]: RenderRecord} = {}
 local recordByModel: {[Model]: RenderRecord} = {}
-local modelCache: {[string]: Model} = {}
-local MAX_CACHE_SIZE = 50 -- Limit model cache size to prevent memory bloat (increased to prevent clearing)
+local pooledVisualsFolder: Instance = ReplicatedStorage:FindFirstChild("PooledVisuals") or Instance.new("Folder")
+pooledVisualsFolder.Name = "PooledVisuals"
+pooledVisualsFolder.Parent = ReplicatedStorage
+
+local VISUAL_POOL_MAX_PER_KEY = 120
+local visualPool: {[string]: {Model}} = {}
+local modelCachesByModel = setmetatable({}, { __mode = "k" }) :: {[Model]: any}
 local hasInitialSync = false
 local knownEntityIds: {[string]: boolean} = {}
 local bufferedUpdates: {[string]: {data: {[string]: any}, expiresAt: number}} = {}
@@ -200,42 +209,161 @@ local function cleanupExpiredBufferedUpdates(now: number)
 	end
 end
 
-local function buildModelCaches(model: Model): {fadeParts: {BasePart}, fadeDecals: {Decal}, fadeTextures: {Texture}, fadeSurfaceGuis: {SurfaceGui}, anchoredParts: {BasePart}}
+local function getOrStoreOriginalTransparency(instance: Instance, currentValue: number): number
+	local original = instance:GetAttribute("OriginalTransparency")
+	if typeof(original) ~= "number" then
+		original = currentValue
+		instance:SetAttribute("OriginalTransparency", original)
+	end
+	return original
+end
+
+local function buildModelCaches(model: Model): {fadeParts: {BasePart}, fadeDecals: {Decal}, fadeTextures: {Texture}, fadeSurfaceGuis: {SurfaceGui}, anchoredParts: {BasePart}, fadePartOriginals: {[BasePart]: number}, fadeDecalOriginals: {[Decal]: number}, fadeTextureOriginals: {[Texture]: number}}
+	local cached = modelCachesByModel[model]
+	if cached then
+		return cached
+	end
+
 	local fadeParts = {}
 	local fadeDecals = {}
 	local fadeTextures = {}
 	local fadeSurfaceGuis = {}
 	local anchoredParts = {}
+	local fadePartOriginals = {}
+	local fadeDecalOriginals = {}
+	local fadeTextureOriginals = {}
 
 	for _, descendant in ipairs(model:GetDescendants()) do
 		if descendant:IsA("BasePart") then
 			if descendant.Name ~= "Hitbox" and descendant.Name ~= "Attackbox" then
 				table.insert(fadeParts, descendant)
+				fadePartOriginals[descendant] = getOrStoreOriginalTransparency(descendant, descendant.Transparency)
 			end
 			if descendant.Anchored then
 				table.insert(anchoredParts, descendant)
 			end
 		elseif descendant:IsA("Decal") then
 			table.insert(fadeDecals, descendant)
+			fadeDecalOriginals[descendant] = getOrStoreOriginalTransparency(descendant, descendant.Transparency)
 		elseif descendant:IsA("Texture") then
 			table.insert(fadeTextures, descendant)
+			fadeTextureOriginals[descendant] = getOrStoreOriginalTransparency(descendant, descendant.Transparency)
 		elseif descendant:IsA("SurfaceGui") then
 			table.insert(fadeSurfaceGuis, descendant)
 		end
 	end
 
-	return {
+	local cache = {
 		fadeParts = fadeParts,
 		fadeDecals = fadeDecals,
 		fadeTextures = fadeTextures,
 		fadeSurfaceGuis = fadeSurfaceGuis,
 		anchoredParts = anchoredParts,
+		fadePartOriginals = fadePartOriginals,
+		fadeDecalOriginals = fadeDecalOriginals,
+		fadeTextureOriginals = fadeTextureOriginals,
 	}
+	modelCachesByModel[model] = cache
+	return cache
 end
 
 local function destroyVisualModel(model: Model)
 	profInc("visualsDestroyed", 1)
+	modelCachesByModel[model] = nil
 	model:Destroy()
+end
+
+local function getPoolKey(entityType: string, entitySubtype: string?): string?
+	if entityType == "Enemy" then
+		return entitySubtype or "Enemy"
+	end
+	return nil
+end
+
+local function acquirePooledModel(poolKey: string?): Model?
+	if not poolKey then
+		return nil
+	end
+	local list = visualPool[poolKey]
+	if list and #list > 0 then
+		local model = list[#list]
+		list[#list] = nil
+		profInc("visualsReusedFromPool", 1)
+		return model
+	end
+	return nil
+end
+
+local function restoreModelTransparency(record: RenderRecord)
+	if not record then
+		return
+	end
+	if record.fadeParts then
+		for _, part in ipairs(record.fadeParts) do
+			if part and part.Parent then
+				local original = record.fadePartOriginals and record.fadePartOriginals[part]
+				part.Transparency = typeof(original) == "number" and original or 0
+			end
+		end
+	end
+	if record.fadeDecals then
+		for _, decal in ipairs(record.fadeDecals) do
+			if decal and decal.Parent then
+				local original = record.fadeDecalOriginals and record.fadeDecalOriginals[decal]
+				decal.Transparency = typeof(original) == "number" and original or 0
+			end
+		end
+	end
+	if record.fadeTextures then
+		for _, texture in ipairs(record.fadeTextures) do
+			if texture and texture.Parent then
+				local original = record.fadeTextureOriginals and record.fadeTextureOriginals[texture]
+				texture.Transparency = typeof(original) == "number" and original or 0
+			end
+		end
+	end
+	if record.fadeSurfaceGuis then
+		for _, surfaceGui in ipairs(record.fadeSurfaceGuis) do
+			if surfaceGui and surfaceGui.Parent then
+				surfaceGui.Enabled = true
+			end
+		end
+	end
+end
+
+local function resetModelForPool(record: RenderRecord, model: Model)
+	restoreModelTransparency(record)
+	local highlight = model:FindFirstChild("HitFlash")
+	if highlight and highlight:IsA("Highlight") then
+		highlight:Destroy()
+	end
+	model:SetAttribute("ECS_EntityId", nil)
+	model:SetAttribute("ECS_LastUpdate", nil)
+	model:SetAttribute("HitFlashLogged", nil)
+	model:SetAttribute("DeathAnimLogged", nil)
+end
+
+local function releasePooledModel(record: RenderRecord?, model: Model?)
+	if not model or not model.Parent then
+		return
+	end
+	local poolKey = record and record.poolKey
+	if not poolKey then
+		destroyVisualModel(model)
+		return
+	end
+	resetModelForPool(record :: RenderRecord, model)
+	local list = visualPool[poolKey]
+	if not list then
+		list = {}
+		visualPool[poolKey] = list
+	end
+	if #list >= VISUAL_POOL_MAX_PER_KEY then
+		destroyVisualModel(model)
+		return
+	end
+	model.Parent = pooledVisualsFolder
+	list[#list + 1] = model
 end
 
 local function shallowCopy(original: {[any]: any}): {[any]: any}
@@ -353,6 +481,7 @@ local SPAWN_FADE_DURATION = 0.5  -- Total fade duration in seconds
 local CULL_FADE_DURATION = 0.3   -- Total fade duration for culling
 local DEATH_FADE_DURATION = 0.2  -- Death fade duration
 local FADE_CHUNK_INTERVAL = 0.05 -- Update transparency every 0.05s (20 FPS fade rate)
+local FADE_MAX_STEPS = 5 -- Max transparency steps per fade (cheap, still visible)
 local EXPLOSION_STEPS = 10
 local EXPLOSION_EXPAND_DURATION = 0.25
 local EXPLOSION_FADE_DURATION = 0.25
@@ -379,6 +508,7 @@ local activeFades: {[Model]: {
 	duration: number,
 	lastUpdate: number,
 	token: number,
+	lastStepIndex: number?,
 	pendingOpsCount: number?,
 	done: boolean?,
 	model: Model?,
@@ -386,6 +516,9 @@ local activeFades: {[Model]: {
 	fadeDecals: {Decal}?,
 	fadeTextures: {Texture}?,
 	fadeSurfaceGuis: {SurfaceGui}?,
+	fadePartOriginals: {[BasePart]: number}?,
+	fadeDecalOriginals: {[Decal]: number}?,
+	fadeTextureOriginals: {[Texture]: number}?,
 	onComplete: (() -> ())?
 }} = {}
 
@@ -397,6 +530,7 @@ local fadeOpQueue: {{
 	fade: any,
 	model: Model?,
 	token: number,
+	originals: {[Instance]: number}?,
 }} = {}
 local fadeOpQueueHead = 1
 local fadeQueuedOps = 0
@@ -406,7 +540,7 @@ local spawnQueueHead = 1
 local spawnQueueSet: {[string]: boolean} = {}
 
 -- Optimized fade function - sets transparency immediately without tweens
-local function setModelTransparency(model: Model, targetTransparency: number, cache: {fadeParts: {BasePart}?, fadeDecals: {Decal}?, fadeTextures: {Texture}?, fadeSurfaceGuis: {SurfaceGui}?}?)
+local function setModelTransparency(model: Model, targetTransparency: number, cache: {fadeParts: {BasePart}?, fadeDecals: {Decal}?, fadeTextures: {Texture}?, fadeSurfaceGuis: {SurfaceGui}?, fadePartOriginals: {[BasePart]: number}?, fadeDecalOriginals: {[Decal]: number}?, fadeTextureOriginals: {[Texture]: number}?}?)
 	if not model or not model.Parent then
 		return
 	end
@@ -417,6 +551,9 @@ local function setModelTransparency(model: Model, targetTransparency: number, ca
 	local fadeDecals = cache and cache.fadeDecals
 	local fadeTextures = cache and cache.fadeTextures
 	local fadeSurfaceGuis = cache and cache.fadeSurfaceGuis
+	local fadePartOriginals = cache and cache.fadePartOriginals
+	local fadeDecalOriginals = cache and cache.fadeDecalOriginals
+	local fadeTextureOriginals = cache and cache.fadeTextureOriginals
 
 	if not fadeParts then
 		local record = recordByModel[model]
@@ -425,6 +562,9 @@ local function setModelTransparency(model: Model, targetTransparency: number, ca
 			fadeDecals = record.fadeDecals
 			fadeTextures = record.fadeTextures
 			fadeSurfaceGuis = record.fadeSurfaceGuis
+			fadePartOriginals = record.fadePartOriginals
+			fadeDecalOriginals = record.fadeDecalOriginals
+			fadeTextureOriginals = record.fadeTextureOriginals
 		end
 	end
 
@@ -432,10 +572,12 @@ local function setModelTransparency(model: Model, targetTransparency: number, ca
 		for _, part in ipairs(fadeParts) do
 			if part and part.Parent then
 				descendantOps += 1
-				local originalTrans = part:GetAttribute("OriginalTransparency")
+				local originalTrans = fadePartOriginals and fadePartOriginals[part]
 				if not originalTrans or typeof(originalTrans) ~= "number" then
-					part:SetAttribute("OriginalTransparency", part.Transparency)
-					originalTrans = part.Transparency
+					originalTrans = getOrStoreOriginalTransparency(part, part.Transparency)
+					if fadePartOriginals then
+						fadePartOriginals[part] = originalTrans
+					end
 				end
 
 				local actualTarget = targetTransparency
@@ -451,10 +593,12 @@ local function setModelTransparency(model: Model, targetTransparency: number, ca
 			for _, decal in ipairs(fadeDecals) do
 				if decal and decal.Parent then
 					descendantOps += 1
-					local originalDecalTrans = decal:GetAttribute("OriginalTransparency")
+					local originalDecalTrans = fadeDecalOriginals and fadeDecalOriginals[decal]
 					if not originalDecalTrans or typeof(originalDecalTrans) ~= "number" then
-						decal:SetAttribute("OriginalTransparency", decal.Transparency)
-						originalDecalTrans = decal.Transparency
+						originalDecalTrans = getOrStoreOriginalTransparency(decal, decal.Transparency)
+						if fadeDecalOriginals then
+							fadeDecalOriginals[decal] = originalDecalTrans
+						end
 					end
 
 					local actualDecalTarget = targetTransparency
@@ -471,10 +615,12 @@ local function setModelTransparency(model: Model, targetTransparency: number, ca
 			for _, texture in ipairs(fadeTextures) do
 				if texture and texture.Parent then
 					descendantOps += 1
-					local originalTextureTrans = texture:GetAttribute("OriginalTransparency")
+					local originalTextureTrans = fadeTextureOriginals and fadeTextureOriginals[texture]
 					if not originalTextureTrans or typeof(originalTextureTrans) ~= "number" then
-						texture:SetAttribute("OriginalTransparency", texture.Transparency)
-						originalTextureTrans = texture.Transparency
+						originalTextureTrans = getOrStoreOriginalTransparency(texture, texture.Transparency)
+						if fadeTextureOriginals then
+							fadeTextureOriginals[texture] = originalTextureTrans
+						end
 					end
 
 					local actualTextureTarget = targetTransparency
@@ -534,14 +680,16 @@ local function getCurrentModelTransparency(model: Model, cache: {fadeParts: {Bas
 	return count > 0 and (totalTrans / count) or 0
 end
 
-local function applyFadeInstance(instance: Instance, targetTransparency: number, kind: string)
+local function applyFadeInstance(instance: Instance, targetTransparency: number, kind: string, originals: {[Instance]: number}?)
 	if kind == "part" then
 		local part = instance :: BasePart
 		if part and part.Parent then
-			local originalTrans = part:GetAttribute("OriginalTransparency")
+			local originalTrans = originals and originals[part]
 			if not originalTrans or typeof(originalTrans) ~= "number" then
-				part:SetAttribute("OriginalTransparency", part.Transparency)
-				originalTrans = part.Transparency
+				originalTrans = getOrStoreOriginalTransparency(part, part.Transparency)
+				if originals then
+					originals[part] = originalTrans
+				end
 			end
 			local actualTarget = targetTransparency
 			if targetTransparency == 0 and typeof(originalTrans) == "number" then
@@ -553,10 +701,12 @@ local function applyFadeInstance(instance: Instance, targetTransparency: number,
 	elseif kind == "decal" then
 		local decal = instance :: Decal
 		if decal and decal.Parent then
-			local originalDecalTrans = decal:GetAttribute("OriginalTransparency")
+			local originalDecalTrans = originals and originals[decal]
 			if not originalDecalTrans or typeof(originalDecalTrans) ~= "number" then
-				decal:SetAttribute("OriginalTransparency", decal.Transparency)
-				originalDecalTrans = decal.Transparency
+				originalDecalTrans = getOrStoreOriginalTransparency(decal, decal.Transparency)
+				if originals then
+					originals[decal] = originalDecalTrans
+				end
 			end
 			local actualDecalTarget = targetTransparency
 			if targetTransparency == 0 and typeof(originalDecalTrans) == "number" then
@@ -568,10 +718,12 @@ local function applyFadeInstance(instance: Instance, targetTransparency: number,
 	elseif kind == "texture" then
 		local texture = instance :: Texture
 		if texture and texture.Parent then
-			local originalTextureTrans = texture:GetAttribute("OriginalTransparency")
+			local originalTextureTrans = originals and originals[texture]
 			if not originalTextureTrans or typeof(originalTextureTrans) ~= "number" then
-				texture:SetAttribute("OriginalTransparency", texture.Transparency)
-				originalTextureTrans = texture.Transparency
+				originalTextureTrans = getOrStoreOriginalTransparency(texture, texture.Transparency)
+				if originals then
+					originals[texture] = originalTextureTrans
+				end
 			end
 			local actualTextureTarget = targetTransparency
 			if targetTransparency == 0 and typeof(originalTextureTrans) == "number" then
@@ -591,7 +743,7 @@ local function applyFadeInstance(instance: Instance, targetTransparency: number,
 	return false
 end
 
-local function enqueueFadeList(fade: any, list: {any}?, kind: string, targetTransparency: number)
+local function enqueueFadeList(fade: any, list: {any}?, kind: string, targetTransparency: number, originals: {[Instance]: number}?)
 	if not list or #list == 0 then
 		return
 	end
@@ -603,15 +755,16 @@ local function enqueueFadeList(fade: any, list: {any}?, kind: string, targetTran
 		fade = fade,
 		model = fade.model,
 		token = fade.token,
+		originals = originals,
 	})
 	fade.pendingOpsCount = (fade.pendingOpsCount or 0) + 1
 	fadeQueuedOps += #list
 end
 
 local function enqueueFadeOps(fade: any, targetTransparency: number)
-	enqueueFadeList(fade, fade.fadeParts, "part", targetTransparency)
-	enqueueFadeList(fade, fade.fadeDecals, "decal", targetTransparency)
-	enqueueFadeList(fade, fade.fadeTextures, "texture", targetTransparency)
+	enqueueFadeList(fade, fade.fadeParts, "part", targetTransparency, fade.fadePartOriginals)
+	enqueueFadeList(fade, fade.fadeDecals, "decal", targetTransparency, fade.fadeDecalOriginals)
+	enqueueFadeList(fade, fade.fadeTextures, "texture", targetTransparency, fade.fadeTextureOriginals)
 	enqueueFadeList(fade, fade.fadeSurfaceGuis, "surface", targetTransparency)
 end
 
@@ -658,7 +811,7 @@ local function processFadeOps()
 			while budget > 0 and task.index <= #list do
 				local instance = list[task.index]
 				task.index += 1
-				if applyFadeInstance(instance, task.target, task.kind) then
+				if applyFadeInstance(instance, task.target, task.kind, task.originals) then
 					opsThisFrame += 1
 					Prof.incCounter("ClientEntityRenderer.DescendantOps", 1)
 					descendantOpsThisFrame += 1
@@ -726,6 +879,9 @@ local function fadeModel(model: Model, targetTransparency: number, duration: num
 			fadeDecals = record.fadeDecals,
 			fadeTextures = record.fadeTextures,
 			fadeSurfaceGuis = record.fadeSurfaceGuis,
+			fadePartOriginals = record.fadePartOriginals,
+			fadeDecalOriginals = record.fadeDecalOriginals,
+			fadeTextureOriginals = record.fadeTextureOriginals,
 		} or buildModelCaches(model)
 		setModelTransparency(model, targetTransparency, cache)
 		if onComplete then
@@ -740,6 +896,9 @@ local function fadeModel(model: Model, targetTransparency: number, duration: num
 		fadeDecals = record.fadeDecals,
 		fadeTextures = record.fadeTextures,
 		fadeSurfaceGuis = record.fadeSurfaceGuis,
+		fadePartOriginals = record.fadePartOriginals,
+		fadeDecalOriginals = record.fadeDecalOriginals,
+		fadeTextureOriginals = record.fadeTextureOriginals,
 	} or buildModelCaches(model)
 	local startTrans = getCurrentModelTransparency(model, cache)
 	local currentTime = tick()
@@ -753,12 +912,16 @@ local function fadeModel(model: Model, targetTransparency: number, duration: num
 		duration = duration,
 		lastUpdate = currentTime,
 		token = token,
+		lastStepIndex = 0,
 		pendingOpsCount = 0,
 		done = false,
 		fadeParts = cache and cache.fadeParts or nil,
 		fadeDecals = cache and cache.fadeDecals or nil,
 		fadeTextures = cache and cache.fadeTextures or nil,
 		fadeSurfaceGuis = cache and cache.fadeSurfaceGuis or nil,
+		fadePartOriginals = cache and cache.fadePartOriginals or nil,
+		fadeDecalOriginals = cache and cache.fadeDecalOriginals or nil,
+		fadeTextureOriginals = cache and cache.fadeTextureOriginals or nil,
 		onComplete = onComplete
 	}
 end
@@ -787,11 +950,11 @@ local function processFades()
 		
 		-- Check if fade is complete
 		if elapsed >= fade.duration then
-			if fade.pendingOpsCount and fade.pendingOpsCount > 0 then
-				fade.done = true
-			else
-				fade.done = true
-				enqueueFadeOps(fade, fade.targetTrans)
+			fade.done = true
+			if not fade.pendingOpsCount or fade.pendingOpsCount <= 0 then
+				if fade.lastStepIndex ~= (math.max(FADE_MAX_STEPS, 2) - 1) then
+					enqueueFadeOps(fade, fade.targetTrans)
+				end
 				finishFadeIfReady(fade)
 			end
 			continue
@@ -804,11 +967,14 @@ local function processFades()
 			
 			-- Calculate progress (0 to 1)
 			local progress = math.clamp(elapsed / fade.duration, 0, 1)
-			
-			-- Linear interpolation from start to target transparency
-			local currentTrans = fade.startTrans + (fade.targetTrans - fade.startTrans) * progress
-			
-			enqueueFadeOps(fade, currentTrans)
+			local stepCount = math.max(FADE_MAX_STEPS, 2)
+			local stepIndex = math.floor(progress * (stepCount - 1) + 0.5)
+			if stepIndex ~= (fade.lastStepIndex or -1) then
+				fade.lastStepIndex = stepIndex
+				local stepAlpha = stepIndex / (stepCount - 1)
+				local currentTrans = fade.startTrans + (fade.targetTrans - fade.startTrans) * stepAlpha
+				enqueueFadeOps(fade, currentTrans)
+			end
 		end
 	end
 
@@ -938,8 +1104,13 @@ local function updateDeathAnimations()
 			hitFlashHighlights[model] = nil
 			-- Ensure model is destroyed if it still exists
 			if model and model.Parent then
+				local pooledRecord = recordByModel[model]
 				recordByModel[model] = nil
-				destroyVisualModel(model)
+				if pooledRecord and pooledRecord.poolKey then
+					releasePooledModel(pooledRecord, model)
+				else
+					destroyVisualModel(model)
+				end
 			end
 		else
 			local startTime = info.startTime or now
@@ -957,8 +1128,13 @@ local function updateDeathAnimations()
 						if activeFades[model] then
 							activeFades[model] = nil
 						end
+						local pooledRecord = recordByModel[model]
 						recordByModel[model] = nil
-						destroyVisualModel(model)
+						if pooledRecord and pooledRecord.poolKey then
+							releasePooledModel(pooledRecord, model)
+						else
+							destroyVisualModel(model)
+						end
 					end
 					deathAnimations[model] = nil
 					-- Explicitly destroy highlight before clearing reference
@@ -980,8 +1156,13 @@ local function updateDeathAnimations()
 						if activeFades[model] then
 							activeFades[model] = nil
 						end
+						local pooledRecord = recordByModel[model]
 						recordByModel[model] = nil
-						destroyVisualModel(model)
+						if pooledRecord and pooledRecord.poolKey then
+							releasePooledModel(pooledRecord, model)
+						else
+							destroyVisualModel(model)
+						end
 					end
 					deathAnimations[model] = nil
 					-- Explicitly destroy highlight before clearing reference
@@ -1430,14 +1611,12 @@ local function createVisualModel(entityType: string, entitySubtype: string?, vis
 	
 	debug.profilebegin("CreateVisualModel")
 
-	local cacheKey = entitySubtype or entityType
-	local cached = modelCache[cacheKey]
-	if cached then
-		profInc("visualsReusedFromPool", 1)
-		local cloned = cached:Clone()
-		-- Apply color to cloned models (exp orbs and projectiles with attribute colors)
+	local poolKey = getPoolKey(entityType, entitySubtype)
+	local pooled = acquirePooledModel(poolKey)
+	if pooled then
+		-- Apply color to pooled models when needed (exp orbs and projectiles with attribute colors)
 		if visualColor then
-			for _, part in ipairs(cloned:GetDescendants()) do
+			for _, part in ipairs(pooled:GetDescendants()) do
 				if part:IsA("BasePart") then
 					part.Color = visualColor
 					if entityType == "ExpOrb" or entityType == "Projectile" then
@@ -1446,7 +1625,8 @@ local function createVisualModel(entityType: string, entitySubtype: string?, vis
 				end
 			end
 		end
-		return cloned
+		debug.profileend()
+		return pooled
 	end
 
 	local model: Model?
@@ -1567,20 +1747,34 @@ local function createVisualModel(entityType: string, entitySubtype: string?, vis
 	-- Configure existing Hitbox and Attackbox parts from the model
 	local hitbox = model:FindFirstChild("Hitbox")
 	local attackbox = model:FindFirstChild("Attackbox")
+	local existingPrimary = model.PrimaryPart
+	local allowPrimaryFallback = entityType ~= "Enemy"
 	
 	-- Set Hitbox as PrimaryPart if it exists
 	if hitbox and hitbox:IsA("BasePart") then
 		hitbox.Anchored = true
 		hitbox.CanCollide = false -- Hitbox handles projectile collision but not physics collision
-		model.PrimaryPart = hitbox
+		if not existingPrimary and allowPrimaryFallback then
+			model.PrimaryPart = hitbox
+			existingPrimary = hitbox
+		end
 	else
 		-- Fallback to any BasePart if no Hitbox found
 		local primary = model:FindFirstChildWhichIsA("BasePart")
 		if primary then
 			primary.Anchored = true
 			primary.CanCollide = false
-			model.PrimaryPart = primary
+			if not existingPrimary and allowPrimaryFallback then
+				model.PrimaryPart = primary
+				existingPrimary = primary
+			end
 		end
+	end
+	
+	-- Preserve any PrimaryPart already defined in the model to keep pivot alignment consistent with the server
+	if existingPrimary then
+		existingPrimary.Anchored = true
+		existingPrimary.CanCollide = false
 	end
 	
 	-- Configure Attackbox if it exists
@@ -1617,27 +1811,6 @@ local function createVisualModel(entityType: string, entitySubtype: string?, vis
 			end
 		end
 	end
-
-	-- Manage cache size to prevent memory bloat
-	if next(modelCache) then
-		local cacheCount = 0
-		for _ in pairs(modelCache) do
-			cacheCount = cacheCount + 1
-		end
-		
-		if cacheCount >= MAX_CACHE_SIZE then
-			-- Clear oldest entries (simple approach: clear all and rebuild)
-			for key in pairs(modelCache) do
-				modelCache[key]:Destroy()
-				modelCache[key] = nil
-			end
-		end
-	end
-	
-	-- Cache a clone of the template model to avoid issues with parenting
-	-- The original model will be parented, but the cached version stays unparented
-	local templateClone = model:Clone()
-	modelCache[cacheKey] = templateClone
 
 	debug.profileend()
 	return model
@@ -1977,7 +2150,8 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	-- Validate model structure after parenting
 	if entityTypeName == "Enemy" then
 		local primaryPart = model.PrimaryPart
-		if not primaryPart then
+		local hasHitbox = model:FindFirstChild("Hitbox") ~= nil
+		if not primaryPart and not hasHitbox then
 			warn(string.format("[ClientRenderer] WARNING: Enemy model %d has no PrimaryPart! Checking for parts...", entityId))
 			local parts = {}
 			for _, child in ipairs(model:GetChildren()) do
@@ -2042,12 +2216,13 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		positionVector = originVector + velocityVector * age
 	end
 
+		local poolKey = getPoolKey(entityTypeName, entitySubtype)
 	    local record: RenderRecord = {
 			model = model,
 			spawnTime = tick(),  -- NEW: Track when model was created
 			entityType = entityTypeName,
 			velocity = velocityComponent or entityData.Velocity,
-		facingDirection = entityData.FacingDirection,
+			facingDirection = entityData.FacingDirection,
 			lastUpdate = tick(),
 			isFadedOut = false,
 			isSpawning = entityTypeName == "Enemy",  -- Enemies start fading in
@@ -2059,7 +2234,11 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			fadeDecals = caches.fadeDecals,
 			fadeTextures = caches.fadeTextures,
 			fadeSurfaceGuis = caches.fadeSurfaceGuis,
+			fadePartOriginals = caches.fadePartOriginals,
+			fadeDecalOriginals = caches.fadeDecalOriginals,
+			fadeTextureOriginals = caches.fadeTextureOriginals,
 			anchoredParts = caches.anchoredParts,
+			poolKey = poolKey,
 			spawnToken = 0,
 			simType = nil,
 			simOrigin = originVector or positionVector,
@@ -2540,8 +2719,7 @@ local function performDespawn(key: string, record: RenderRecord)
 			recordByModel[model] = nil
 			destroyVisualModel(model)
 		else
-			-- For non-projectiles (enemies), force immediate destroy in published games
-			-- Don't wait for tween, just destroy
+			-- For non-projectiles (enemies), recycle visuals when possible
 			if activeEnemyTweens[model] then
 				activeEnemyTweens[model]:Cancel()
 				activeEnemyTweens[model] = nil
@@ -2550,7 +2728,11 @@ local function performDespawn(key: string, record: RenderRecord)
 				activeFades[model] = nil
 			end
 			recordByModel[model] = nil
-			destroyVisualModel(model)
+			if record.poolKey then
+				releasePooledModel(record, model)
+			else
+				destroyVisualModel(model)
+			end
 		end
 	end
 
@@ -2786,12 +2968,15 @@ local function processUpdates(message: any)
 		for _, compactData in ipairs(enemies) do
 			if typeof(compactData) == "table" and #compactData >= 7 then
 				local entityId = compactData[1]
-				-- Decode compact format: {id, px, py, pz, vx, vy, vz}
+				-- Decode compact format: {id, px, py, pz, vx, vy, vz, fx, fy, fz}
 				local updateData = {
 					id = entityId,
 					Position = {x = compactData[2], y = compactData[3], z = compactData[4]},
 					Velocity = {x = compactData[5], y = compactData[6], z = compactData[7]},
 				}
+				if #compactData >= 10 then
+					updateData.FacingDirection = {x = compactData[8], y = compactData[9], z = compactData[10]}
+				end
 				updateCount += 1
 				handleUpdate(entityId, updateData)
 			end
