@@ -61,6 +61,10 @@ local serverDuration: number? = nil
 local serverVerticalHeight: number? = nil
 local serverPlatformModelPath: string? = nil
 local serverShieldModelPath: string? = nil
+local serverGameTime: number? = nil
+local lastGameTimeUpdate: number = 0
+local usingServerTime = false
+local pendingServerLastUsedTime: number? = nil
 
 -- Shield Bash config values from server
 local serverDamage: number? = nil
@@ -129,6 +133,10 @@ local function createDashAfterimages(direction: Vector3, distance: number, durat
 				if part:IsA("BasePart") then
 					part.Anchored = true
 					part.CanCollide = false
+					part.CanQuery = false
+					part.CanTouch = false
+					part.Massless = true
+					part.CastShadow = false
 					part.Transparency = DASH_CONFIG.afterimageTransparency
 				end
 			end
@@ -461,6 +469,25 @@ local function initRemotes()
 	local ecsRemotes = remotes:WaitForChild("ECS")
 	EntityUpdate = ecsRemotes:WaitForChild("EntityUpdate")
 	local EntitySync = ecsRemotes:WaitForChild("EntitySync")
+	local GameTimeUpdate = remotes:FindFirstChild("GameTimeUpdate")
+	if GameTimeUpdate and GameTimeUpdate:IsA("RemoteEvent") then
+		GameTimeUpdate.OnClientEvent:Connect(function(gameTime: any)
+			if typeof(gameTime) == "number" then
+				serverGameTime = gameTime
+				lastGameTimeUpdate = tick()
+				if not usingServerTime then
+					usingServerTime = true
+					if pendingServerLastUsedTime then
+						lastUsedTime = pendingServerLastUsedTime
+						pendingServerLastUsedTime = nil
+					else
+						local offset = serverGameTime - tick()
+						lastUsedTime = lastUsedTime + offset
+					end
+				end
+			end
+		end)
+	end
 	
 	-- Helper function to process mobility data from server
 	local function processMobilityUpdate(updateData)
@@ -510,7 +537,12 @@ local function initRemotes()
 		if updateData.MobilityCooldown then
 			local data = updateData.MobilityCooldown
 			if typeof(data) == "table" and typeof(data.lastUsedTime) == "number" then
-				lastUsedTime = data.lastUsedTime
+				if usingServerTime then
+					lastUsedTime = data.lastUsedTime
+				else
+					pendingServerLastUsedTime = data.lastUsedTime
+					lastUsedTime = tick()
+				end
 			end
 		end
 		
@@ -573,6 +605,13 @@ end
 -- Check if on cooldown
 local function isOnCooldown(config: any): boolean
 	local currentTime = tick()
+	if usingServerTime and serverGameTime then
+		if isPaused then
+			currentTime = serverGameTime
+		else
+			currentTime = serverGameTime + math.max(0, tick() - lastGameTimeUpdate)
+		end
+	end
 	local effectiveCooldown = config.cooldown * cooldownMultiplier
 	local timeSinceLastUse = currentTime - lastUsedTime
 	return timeSinceLastUse < effectiveCooldown
@@ -999,7 +1038,12 @@ local function executeDash()
 	activeDashConnection = dashConnection
 	
 	-- Update local cooldown
-	lastUsedTime = tick()
+	if usingServerTime and serverGameTime then
+		local estimate = serverGameTime + math.max(0, tick() - lastGameTimeUpdate)
+		lastUsedTime = estimate
+	else
+		lastUsedTime = tick()
+	end
 	
 	-- Create afterimages
 	createDashAfterimages(dashDirection, effectiveDistance, effectiveConfig.duration)
@@ -1061,7 +1105,12 @@ local function executeDoubleJump()
 	applyLowGravity()
 	
 	-- Update local cooldown
-	lastUsedTime = tick()
+	if usingServerTime and serverGameTime then
+		local estimate = serverGameTime + math.max(0, tick() - lastGameTimeUpdate)
+		lastUsedTime = estimate
+	else
+		lastUsedTime = tick()
+	end
 	
 	-- Create visual effects
 	createDoubleJumpEffects(rootPart.Position)
@@ -1173,9 +1222,10 @@ local function setupPauseListeners()
 		local pauseDuration = tick() - pauseStartTime
 		totalPausedTime = totalPausedTime + pauseDuration
 		
-		-- Adjust cooldown by adding paused time to lastUsedTime
-		-- This effectively "freezes" the cooldown during pause
-		lastUsedTime = lastUsedTime + pauseDuration
+		-- Adjust cooldown only when using local time (server game time is already pause-aware)
+		if not usingServerTime then
+			lastUsedTime = lastUsedTime + pauseDuration
+		end
 		
 		-- Unfreeze player and restore velocity
 		if rootPart and rootPart.Parent then

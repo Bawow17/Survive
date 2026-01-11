@@ -80,7 +80,7 @@ local ENEMY_FACING_QUANTIZE = 0.1
 -- Unreliable payload chunking (prevents oversized packets)
 local MAX_UNRELIABLE_UPDATES_PER_BATCH = 20
 local MAX_UNRELIABLE_COMPACT_PER_BATCH = 60
-local MAX_UNRELIABLE_PAYLOAD_BYTES = 700
+local MAX_UNRELIABLE_PAYLOAD_BYTES = 600
 
 -- Profiling sampling (avoid expensive JSONEncode every tick)
 local BYTES_BREAKDOWN_TICK_INTERVAL = 10
@@ -1928,6 +1928,16 @@ function SyncSystem.step(dt: number)
 						payload.projectiles = batch
 					elseif kind == "enemies" then
 						payload.enemies = batch
+					end
+					local size = safeJsonSize(payload)
+					if size and size > MAX_UNRELIABLE_PAYLOAD_BYTES then
+						if Remotes and Remotes.EntityUpdate then
+							Remotes.EntityUpdate:FireClient(player, payload)
+							profInc("unreliableFallbackReliable", 1)
+						else
+							UnreliableUpdateRemote:FireClient(player, payload)
+						end
+						return
 					end
 					UnreliableUpdateRemote:FireClient(player, payload)
 				end

@@ -280,16 +280,40 @@ local function getPoolKey(entityType: string, entitySubtype: string?): string?
 	return nil
 end
 
+local function isModelUsable(model: any): boolean
+	if typeof(model) ~= "Instance" or not model:IsA("Model") then
+		return false
+	end
+	local ok, parent = pcall(function()
+		return model.Parent
+	end)
+	if not ok then
+		return false
+	end
+	if parent == nil then
+		return false
+	end
+	local okDesc, isDescendant = pcall(function()
+		return model:IsDescendantOf(game)
+	end)
+	return okDesc == true and isDescendant == true
+end
+
 local function acquirePooledModel(poolKey: string?): Model?
 	if not poolKey then
 		return nil
 	end
 	local list = visualPool[poolKey]
-	if list and #list > 0 then
+	while list and #list > 0 do
 		local model = list[#list]
 		list[#list] = nil
-		profInc("visualsReusedFromPool", 1)
-		return model
+		if isModelUsable(model) then
+			profInc("visualsReusedFromPool", 1)
+			return model
+		end
+		pcall(function()
+			(model :: Model):Destroy()
+		end)
 	end
 	return nil
 end
@@ -344,7 +368,13 @@ local function resetModelForPool(record: RenderRecord, model: Model)
 end
 
 local function releasePooledModel(record: RenderRecord?, model: Model?)
-	if not model or not model.Parent then
+	if not model then
+		return
+	end
+	local ok, parent = pcall(function()
+		return model.Parent
+	end)
+	if not ok or parent == nil then
 		return
 	end
 	local poolKey = record and record.poolKey
@@ -1596,8 +1626,11 @@ local function clonePlayerCharacter(sourcePlayer: Player, transparency: number):
 		-- Ensure ALL parts are non-collidable, anchored, and don't cast shadows
 		if descendant:IsA("BasePart") then
 			descendant.CanCollide = false
+			descendant.CanQuery = false
+			descendant.CanTouch = false
 			descendant.Anchored = true
 			descendant.CastShadow = false
+			descendant.Massless = true
 		end
 	end
 	

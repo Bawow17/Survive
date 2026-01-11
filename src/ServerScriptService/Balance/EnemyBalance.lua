@@ -4,7 +4,7 @@
 local EnemyBalance = {}
 
 EnemyBalance.HealthMultiplier = 0.9
-EnemyBalance.DamageMultiplier = 0.0001
+EnemyBalance.DamageMultiplier = 0.7
 
 -- Enemy spawning settings (with time-based scaling)
 EnemyBalance.MaxEnemies = 275 -- Maximum number of enemies allowed at once
@@ -17,8 +17,8 @@ EnemyBalance.SpawnWeights = {
 
 -- Enemy spawn rate scaling (over game time)
 EnemyBalance.EnemiesPerSecondScaling = {
-	StartValue = 50,
-	EndValue = 50,
+	StartValue = 2.5,
+	EndValue = 20,
 	Duration = 1200, -- 10 minutes to reach max
 	EasingStyle = "Linear"
 }
@@ -47,8 +47,8 @@ EnemyBalance.GlobalMoveSpeedScaling = {
 -- Global enemy health scaling (over game time)
 EnemyBalance.GlobalHealthScaling = {
 	StartValue = 1,
-	EndValue = 10,
-	Duration = 3500, -- 50 minutes to reach max
+	EndValue = 15,
+	Duration = 4500, -- 50 minutes to reach max
 	EasingStyle = "Linear"
 }
 
