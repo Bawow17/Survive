@@ -49,6 +49,8 @@ local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 raycastParams.IgnoreWater = true
 
+local SPAWN_GROUND_CLEARANCE = 0.15
+
 -- RNG for enemy type selection
 local enemyTypeRNG = Random.new()
 
@@ -254,6 +256,29 @@ local function getGroundedPosition(position: Vector3, heightOffset: number): Vec
 	
 	-- No ground found, reject spawn
 	return nil
+end
+
+local function adjustSpawnHeightForEnemy(groundedPos: Vector3, enemyType: string): Vector3
+	if not groundedPos then
+		return groundedPos
+	end
+	if not ModelReplicationService or not enemyType then
+		return Vector3.new(groundedPos.X, groundedPos.Y + SPAWN_GROUND_CLEARANCE, groundedPos.Z)
+	end
+
+	local hitbox = ModelReplicationService.getEnemyHitbox(enemyType)
+	if not hitbox then
+		ModelReplicationService.replicateEnemy(enemyType)
+		hitbox = ModelReplicationService.getEnemyHitbox(enemyType)
+	end
+
+	if hitbox and hitbox.size then
+		local offset = hitbox.offset or Vector3.new(0, 0, 0)
+		local baseY = groundedPos.Y + SPAWN_GROUND_CLEARANCE - offset.Y + (hitbox.size.Y * 0.5)
+		return Vector3.new(groundedPos.X, baseY, groundedPos.Z)
+	end
+
+	return Vector3.new(groundedPos.X, groundedPos.Y + SPAWN_GROUND_CLEARANCE, groundedPos.Z)
 end
 
 local function getRandomSpawnPosition(playerPos: {x: number, y: number, z: number}, sectorAngleMin: number?, sectorAngleMax: number?): Vector3
@@ -651,7 +676,8 @@ function EnemySpawner.step(dt: number)
 			-- Spawned successfully
 		end
 
-		local enemyEntity = ECSWorldService.CreateEnemy(enemyType, groundedPos, nil)
+		local finalSpawnPos = adjustSpawnHeightForEnemy(groundedPos, enemyType)
+		local enemyEntity = ECSWorldService.CreateEnemy(enemyType, finalSpawnPos, nil)
 
 		if enemyEntity then
 			enemyCount = enemyCount + 1

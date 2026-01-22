@@ -510,7 +510,7 @@ local activeTweenConnections: {[Instance]: {RBXScriptConnection}} = {}
 
 -- PERFORMANCE OPTIMIZED: Fade in/out management for spawning and culling
 -- Chunked transparency changes with proper timing (no expensive TweenService)
-local SPAWN_FADE_DURATION = 0.5  -- Total fade duration in seconds
+local SPAWN_FADE_DURATION = 0.25  -- Slower fade to smooth spawn without delaying visibility
 local CULL_FADE_DURATION = 0.3   -- Total fade duration for culling
 local DEATH_FADE_DURATION = 0.2  -- Death fade duration
 local FADE_CHUNK_INTERVAL = 0.05 -- Update transparency every 0.05s (20 FPS fade rate)
@@ -2381,10 +2381,7 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		else
 			-- Normal spawn - fade in over time
 			local spawnToken = record.spawnToken or 0
-			task.delay(0.05, function()  -- Small delay to ensure model is fully set up
-				if renderedEntities[key] ~= record or record.spawnToken ~= spawnToken then
-					return
-				end
+			if renderedEntities[key] == record and record.spawnToken == spawnToken then
 				if model and model.Parent then
 					fadeModel(model, 0, SPAWN_FADE_DURATION, function()
 						if renderedEntities[key] == record then
@@ -2392,7 +2389,7 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 						end
 					end)
 				end
-			end)
+			end
 		end
 	end
 	
@@ -2865,6 +2862,28 @@ local function enqueueSpawn(entityId: string | number, rawData: {[string]: any})
 	local key = entityKey(entityId)
 	if renderedEntities[key] or spawnQueueSet[key] then
 		profInc("duplicateSpawnForExistingEntityId", 1)
+		return
+	end
+	local resolvedData = resolveEntityData(rawData)
+	local entityTypeName = extractEntityType(resolvedData)
+	if entityTypeName == "Enemy" then
+		-- Enemies should appear immediately to match server-side combat.
+		knownEntityIds[key] = true
+		handleEntitySync(entityId, resolvedData)
+		if not renderedEntities[key] then
+			knownEntityIds[key] = nil
+		end
+		local buffered = bufferedUpdates[key]
+		if buffered then
+			bufferedUpdates[key] = nil
+			bufferedUpdateTotal = math.max(bufferedUpdateTotal - 1, 0)
+			if buffered.expiresAt > tick() then
+				handleEntityUpdate(entityId, buffered.data)
+				profInc("bufferedUnknownUpdatesApplied", 1)
+			else
+				profInc("bufferedUnknownUpdatesEvicted", 1)
+			end
+		end
 		return
 	end
 	-- Mark as network-known immediately so updates in the same packet don't get treated as "unknown".

@@ -7,6 +7,8 @@ local Workspace = game:GetService("Workspace")
 
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
+local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+local TargetingService = require(game.ServerScriptService.Abilities.TargetingService)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -253,6 +255,56 @@ local function distanceSq(a: Vector3, b: Vector3): number
 	return dx * dx + dy * dy + dz * dz
 end
 
+local function getEnemyAimPosition(enemyId: number): Vector3?
+	local aimPoint = TargetingService.getEnemyAimPoint(enemyId)
+	if aimPoint then
+		return aimPoint
+	end
+	local pos = world and world:get(enemyId, Position)
+	if pos then
+		return Vector3.new(pos.x, pos.y, pos.z)
+	end
+	return nil
+end
+
+local enemyHitboxCache: {[string]: {offset: Vector3, radius: number}} = {}
+
+local function getEnemyCollisionCenter(enemyId: number): (Vector3?, number?)
+	if not world then
+		return nil, nil
+	end
+	local pos = world:get(enemyId, Position)
+	if not pos then
+		return nil, nil
+	end
+	local basePos = Vector3.new(pos.x, pos.y, pos.z)
+	local entityType = world:get(enemyId, EntityType)
+	local subtype = entityType and entityType.subtype
+	if subtype then
+		local cached = enemyHitboxCache[subtype]
+		if not cached then
+			local hitbox = ModelReplicationService.getEnemyHitbox(subtype)
+			if not hitbox then
+				ModelReplicationService.replicateEnemy(subtype)
+				hitbox = ModelReplicationService.getEnemyHitbox(subtype)
+			end
+			if hitbox and hitbox.size then
+				local size = hitbox.size
+				local radius = math.max(size.X, size.Y, size.Z) * 0.5
+				cached = {
+					offset = hitbox.offset or Vector3.new(0, 0, 0),
+					radius = radius,
+				}
+				enemyHitboxCache[subtype] = cached
+			end
+		end
+		if cached then
+			return basePos + cached.offset, cached.radius
+		end
+	end
+	return basePos, nil
+end
+
 local function closestPointOnSegment(a: Vector3, b: Vector3, p: Vector3): Vector3
 	local ab = b - a
 	local t = 0
@@ -283,9 +335,8 @@ local function tryAcquireTarget(record: ProjectileRecord, radius: number): numbe
 		if health and health.current and health.current <= 0 then
 			continue
 		end
-		local pos = world:get(enemyId, Position)
-		if pos then
-			local enemyPos = Vector3.new(pos.x, pos.y, pos.z)
+		local enemyPos = getEnemyAimPosition(enemyId)
+		if enemyPos then
 			local distSq = distanceSq(origin, enemyPos)
 			if distSq <= closestDistSq then
 				if maxAngleRad < math.pi then
@@ -326,12 +377,12 @@ local function updateHoming(record: ProjectileRecord, now: number)
 		return
 	end
 
-	local targetPosComp = world:get(targetEntity, Position)
-	if not targetPosComp then
+	local targetPos = getEnemyAimPosition(targetEntity)
+	if not targetPos then
 		return
 	end
 
-	local desired = Vector3.new(targetPosComp.x, targetPosComp.y, targetPosComp.z) - record.lastPos
+	local desired = targetPos - record.lastPos
 	if homing.stayHorizontal or homing.alwaysStayHorizontal then
 		desired = Vector3.new(desired.X, 0, desired.Z)
 	end
@@ -613,10 +664,9 @@ local function processExplosions(now: number, hitBudget: number): number
 					break
 				end
 				if not explosion.hitSet[enemyId] then
-					local pos = world:get(enemyId, Position)
 					local health = world:get(enemyId, Health)
-					if pos and health and health.current and health.current > 0 then
-						local enemyPos = Vector3.new(pos.x, pos.y, pos.z)
+					local enemyPos = getEnemyCollisionCenter(enemyId)
+					if enemyPos and health and health.current and health.current > 0 then
 						if (enemyPos - explosion.position).Magnitude <= radius then
 							explosion.hitSet[enemyId] = true
 							hitBudget -= 1
@@ -816,14 +866,15 @@ function ProjectileService.step(dt: number)
 				if not entityType or entityType.type ~= "Enemy" then
 					continue
 				end
-				local enemyPosComp = world:get(enemyId, Position)
-				if not enemyPosComp then
+				local enemyPos, enemyRadiusOverride = getEnemyCollisionCenter(enemyId)
+				if not enemyPos then
 					continue
 				end
-				local enemyPos = Vector3.new(enemyPosComp.x, enemyPosComp.y, enemyPosComp.z)
 				local enemyRadius = 2.5
 				local collision = world:get(enemyId, Collision)
-				if collision and collision.radius then
+				if enemyRadiusOverride then
+					enemyRadius = enemyRadiusOverride
+				elseif collision and collision.radius then
 					enemyRadius = collision.radius
 				end
 				local closest = closestPointOnSegment(record.lastPos, newPos, enemyPos)

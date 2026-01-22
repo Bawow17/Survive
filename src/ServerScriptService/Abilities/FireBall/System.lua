@@ -5,6 +5,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local AbilitySystemBase = require(script.Parent.Parent.AbilitySystemBase)
+local TargetingService = require(script.Parent.Parent.TargetingService)
 local Config = require(script.Parent.Config)
 local Attributes = require(script.Parent.Attributes)
 local Balance = Config  -- Backward compatibility alias
@@ -151,69 +152,88 @@ local function performFireBallBurst(playerEntity: number, player: Player): boole
 	-- Apply "The Big One" attribute scaling (must be done after getting stats)
 	stats = applyTheBigOneScaling(stats, playerEntity)
 
-	-- Find target using smart targeting if mode 2, otherwise nearest
-	local targetEntity: number?
-	if stats.targetingMode == 2 then
-		targetEntity = AbilitySystemBase.findBestTarget(playerEntity, position, stats.targetingRange, stats.damage)
-		-- Record predicted damage for this burst (direct hit + explosion)
+	local shots = math.max(stats.shotAmount, 1)
+	local totalSpread = math.min(math.abs(stats.targetingAngle) * 2, math.rad(10))
+	local step = shots > 1 and totalSpread / (shots - 1) or 0
+	local midpoint = (shots - 1) * 0.5
+
+	local created = 0
+	for shotIndex = 1, shots do
+		local targetingResult = TargetingService.acquireTarget({
+			playerEntity = playerEntity,
+			player = player,
+			origin = position,
+			maxRange = stats.targetingRange,
+			mode = stats.targetingMode,
+			stayHorizontal = stats.StayHorizontal,
+			alwaysStayHorizontal = stats.AlwaysStayHorizontal,
+			stickToPlayer = stats.StickToPlayer,
+			enablePrediction = stats.enablePrediction,
+			projectileSpeed = stats.projectileSpeed,
+			lockDuration = stats.targetLockDuration,
+			reacquireDelay = stats.reacquireDelay,
+			minTargetableAge = stats.minTargetableAge,
+			fovAngle = stats.targetingFov,
+			damage = stats.damage,
+			abilityId = FIREBALL_ID,
+		})
+
+		local targetEntity = targetingResult.targetEntity
 		if targetEntity then
 			local totalDamage = stats.damage
 			if stats.hasExplosion then
 				totalDamage = totalDamage + stats.explosionDamage
 			end
-			AbilitySystemBase.recordPredictedDamage(playerEntity, targetEntity, totalDamage)
+			TargetingService.recordPredictedDamage(playerEntity, FIREBALL_ID, targetEntity, totalDamage)
 		end
-	else
-		targetEntity = AbilitySystemBase.findNearestEnemy(position, stats.targetingRange)
-	end
-	
-	local targetPosition: Vector3
 
-	if targetEntity then
-		local enemyPos = AbilitySystemBase.getEnemyCenterPosition(targetEntity)
-		if enemyPos then
-			targetPosition = enemyPos
+		local baseDirection = targetingResult.direction
+		if baseDirection.Magnitude == 0 then
+			baseDirection = Vector3.new(0, 0, 1)
+		end
+		baseDirection = baseDirection.Unit
+
+		local direction = baseDirection
+		if shots > 1 then
+			local offsetIndex = (shotIndex - 1) - midpoint
+			local finalAngle = offsetIndex * step
+			local cos = math.cos(finalAngle)
+			local sin = math.sin(finalAngle)
+			direction = Vector3.new(
+				direction.X * cos - direction.Z * sin,
+				direction.Y,
+				direction.X * sin + direction.Z * cos
+			)
+		end
+
+		if direction.Magnitude == 0 then
+			direction = Vector3.new(0, 0, 1)
+		end
+		direction = direction.Unit
+
+		local aimPoint = targetingResult.aimPoint or (position + baseDirection * stats.targetingRange)
+		local targetDistance = (aimPoint - position).Magnitude
+		local targetPoint: Vector3
+		if targetDistance > 0 then
+			targetPoint = position + direction * targetDistance
 		else
-			targetPosition = position + Vector3.new(stats.targetingRange, 0, 0)
+			targetPoint = position + direction * (stats.projectileSpeed * stats.duration)
 		end
-	else
-		-- No target found - behavior depends on targeting mode
-		if stats.targetingMode < 2 then
-			-- Random targeting modes (0, 1): fire in a random direction
-			local angle = math.random() * math.pi * 2
-			local randomDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
-			targetPosition = position + randomDirection * stats.targetingRange
-		else
-			-- Direct targeting modes (2+): fire forward
-			local character = player.Character
-			local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
-			if humanoidRootPart and humanoidRootPart:IsA("BasePart") then
-				targetPosition = position + (humanoidRootPart :: BasePart).CFrame.LookVector * stats.targetingRange
-			else
-				targetPosition = position + Vector3.new(stats.targetingRange, 0, 0)
-			end
+
+		local projectileEntity = AbilitySystemBase.createProjectile(
+			FIREBALL_ID,
+			stats,
+			position,
+			direction,
+			player,
+			targetPoint,
+			playerEntity
+		)
+		if projectileEntity then
+			created += 1
 		end
 	end
 
-	-- Calculate direction based on targeting mode
-	local targetDistance = AbilitySystemBase.getTargetDistance(
-		position,
-		targetPosition,
-		stats.StayHorizontal,
-		stats.AlwaysStayHorizontal,
-		player
-	)
-	local baseDirection = AbilitySystemBase.calculateTargetingDirection(
-		position,
-		stats.targetingMode,
-		targetPosition,
-		stats,
-		stats.StayHorizontal,
-		player,
-		targetEntity  -- NEW: Pass selected target entity
-	)
-
-	local created = spawnFireBallBurst(playerEntity, player, position, baseDirection, targetPosition, targetDistance, stats)
 	return created > 0
 end
 
@@ -288,7 +308,7 @@ local function castFireBall(playerEntity: number, player: Player): boolean
 	local hasFireStorm = attributeSelections and attributeSelections[FIREBALL_ID] == "FireStorm"
 	
 	-- Start prediction tracking for smart multi-targeting
-	AbilitySystemBase.startCastPrediction(playerEntity)
+	TargetingService.startCastPrediction(playerEntity, FIREBALL_ID)
 	
 	local success: boolean
 	
@@ -308,7 +328,7 @@ local function castFireBall(playerEntity: number, player: Player): boolean
 			}
 			DirtyService.setIfChanged(world, playerEntity, AbilityPulse, pulseData, "AbilityPulse")
 		else
-			AbilitySystemBase.endCastPrediction(playerEntity)
+			TargetingService.endCastPrediction(playerEntity, FIREBALL_ID)
 		end
 	else
 		-- Normal casting
@@ -326,7 +346,7 @@ local function castFireBall(playerEntity: number, player: Player): boolean
 			DirtyService.setIfChanged(world, playerEntity, AbilityPulse, pulseData, "AbilityPulse")
 		else
 			-- Single shot cast, end prediction immediately
-			AbilitySystemBase.endCastPrediction(playerEntity)
+			TargetingService.endCastPrediction(playerEntity, FIREBALL_ID)
 		end
 	end
 
@@ -436,7 +456,7 @@ function FireBallSystem.step(dt: number)
 						world:remove(entity, AbilityPulse)
 						pulseComponent = nil
 						-- End prediction tracking when cast completes
-						AbilitySystemBase.endCastPrediction(entity)
+						TargetingService.endCastPrediction(entity, FIREBALL_ID)
 					else
 						local newPulse = {
 							ability = FIREBALL_ID,

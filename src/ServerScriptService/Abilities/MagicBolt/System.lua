@@ -5,6 +5,7 @@
 local _Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local AbilitySystemBase = require(script.Parent.Parent.AbilitySystemBase)
+local TargetingService = require(script.Parent.Parent.TargetingService)
 local Config = require(script.Parent.Config)
 local Balance = Config  -- For backward compatibility
 
@@ -104,136 +105,79 @@ local function performMagicBoltBurstFromPosition(playerEntity: number, player: P
 	local totalSpread = math.min(math.abs(stats.targetingAngle) * 2, math.rad(10))
 	local step = shots > 1 and totalSpread / (shots - 1) or 0
 	local midpoint = (shots - 1) * 0.5
+	local created = 0
+	for shotIndex = 1, shots do
+		local targetingResult = TargetingService.acquireTarget({
+			playerEntity = playerEntity,
+			player = player,
+			origin = position,
+			maxRange = stats.targetingRange,
+			mode = stats.targetingMode,
+			stayHorizontal = stats.StayHorizontal,
+			alwaysStayHorizontal = stats.AlwaysStayHorizontal,
+			stickToPlayer = stats.StickToPlayer,
+			enablePrediction = stats.enablePrediction,
+			projectileSpeed = stats.projectileSpeed,
+			lockDuration = stats.targetLockDuration,
+			reacquireDelay = stats.reacquireDelay,
+			minTargetableAge = stats.minTargetableAge,
+			fovAngle = stats.targetingFov,
+			damage = stats.damage,
+			abilityId = MAGIC_BOLT_ID,
+		})
 
-	if stats.targetingMode == 2 then
-		local created = 0
-		for shotIndex = 1, shots do
-			local targetEntity = AbilitySystemBase.findBestTarget(playerEntity, position, stats.targetingRange, stats.damage)
-			if targetEntity then
-				AbilitySystemBase.recordPredictedDamage(playerEntity, targetEntity, stats.damage)
-			end
-
-			local targetPosition: Vector3
-			if targetEntity then
-				local enemyPos = AbilitySystemBase.getEnemyCenterPosition(targetEntity)
-				if enemyPos then
-					targetPosition = enemyPos
-				else
-					targetPosition = position + Vector3.new(Balance.targetingRange, 0, 0)
-				end
-			else
-				local character = player.Character
-				local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
-				if humanoidRootPart and humanoidRootPart:IsA("BasePart") then
-					targetPosition = position + (humanoidRootPart :: BasePart).CFrame.LookVector * stats.targetingRange
-				else
-					targetPosition = position + Vector3.new(stats.targetingRange, 0, 0)
-				end
-			end
-
-			local targetDistance = AbilitySystemBase.getTargetDistance(
-				position,
-				targetPosition,
-				stats.StayHorizontal,
-				stats.AlwaysStayHorizontal,
-				player
-			)
-			local baseDirection = AbilitySystemBase.calculateTargetingDirection(
-				position,
-				stats.targetingMode,
-				targetPosition,
-				stats,
-				stats.StayHorizontal,
-				player,
-				targetEntity
-			)
-
-			local direction = baseDirection
-			if shots > 1 then
-				local offsetIndex = (shotIndex - 1) - midpoint
-				local finalAngle = offsetIndex * step
-				local cos = math.cos(finalAngle)
-				local sin = math.sin(finalAngle)
-				direction = Vector3.new(
-					direction.X * cos - direction.Z * sin,
-					direction.Y,
-					direction.X * sin + direction.Z * cos
-				)
-			end
-
-			if direction.Magnitude == 0 then
-				direction = Vector3.new(0, 0, 1)
-			end
-			direction = direction.Unit
-
-			local targetPoint: Vector3
-			if targetDistance > 0 then
-				targetPoint = position + direction * targetDistance
-			else
-				targetPoint = position + direction * (stats.projectileSpeed * stats.duration)
-			end
-
-			local projectileEntity = AbilitySystemBase.createProjectile(
-				MAGIC_BOLT_ID,
-				stats,
-				position,
-				direction,
-				player,
-				targetPoint,
-				playerEntity
-			)
-			if projectileEntity then
-				created += 1
-			end
+		local targetEntity = targetingResult.targetEntity
+		if targetEntity then
+			TargetingService.recordPredictedDamage(playerEntity, MAGIC_BOLT_ID, targetEntity, stats.damage)
 		end
 
-		return created > 0
-	end
-
-	-- Non-targeting modes retain the shared burst logic
-	local targetEntity = AbilitySystemBase.findNearestEnemy(position, stats.targetingRange)
-	local targetPosition: Vector3
-	if targetEntity then
-		local enemyPos = AbilitySystemBase.getEnemyCenterPosition(targetEntity)
-		if enemyPos then
-			targetPosition = enemyPos
-		else
-			targetPosition = position + Vector3.new(Balance.targetingRange, 0, 0)
+		local baseDirection = targetingResult.direction
+		if baseDirection.Magnitude == 0 then
+			baseDirection = Vector3.new(0, 0, 1)
 		end
-	else
-		if stats.targetingMode < 2 then
-			local angle = math.random() * math.pi * 2
-			local randomDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
-			targetPosition = position + randomDirection * stats.targetingRange
+		baseDirection = baseDirection.Unit
+
+		local direction = baseDirection
+		if shots > 1 then
+			local offsetIndex = (shotIndex - 1) - midpoint
+			local finalAngle = offsetIndex * step
+			local cos = math.cos(finalAngle)
+			local sin = math.sin(finalAngle)
+			direction = Vector3.new(
+				direction.X * cos - direction.Z * sin,
+				direction.Y,
+				direction.X * sin + direction.Z * cos
+			)
+		end
+
+		if direction.Magnitude == 0 then
+			direction = Vector3.new(0, 0, 1)
+		end
+		direction = direction.Unit
+
+		local aimPoint = targetingResult.aimPoint or (position + baseDirection * stats.targetingRange)
+		local targetDistance = (aimPoint - position).Magnitude
+		local targetPoint: Vector3
+		if targetDistance > 0 then
+			targetPoint = position + direction * targetDistance
 		else
-			local character = player.Character
-			local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
-			if humanoidRootPart and humanoidRootPart:IsA("BasePart") then
-				targetPosition = position + (humanoidRootPart :: BasePart).CFrame.LookVector * stats.targetingRange
-			else
-				targetPosition = position + Vector3.new(stats.targetingRange, 0, 0)
-			end
+			targetPoint = position + direction * (stats.projectileSpeed * stats.duration)
+		end
+
+		local projectileEntity = AbilitySystemBase.createProjectile(
+			MAGIC_BOLT_ID,
+			stats,
+			position,
+			direction,
+			player,
+			targetPoint,
+			playerEntity
+		)
+		if projectileEntity then
+			created += 1
 		end
 	end
 
-	local targetDistance = AbilitySystemBase.getTargetDistance(
-		position,
-		targetPosition,
-		stats.StayHorizontal,
-		stats.AlwaysStayHorizontal,
-		player
-	)
-	local baseDirection = AbilitySystemBase.calculateTargetingDirection(
-		position,
-		stats.targetingMode,
-		targetPosition,
-		stats,
-		stats.StayHorizontal,
-		player,
-		targetEntity
-	)
-
-	local created = spawnMagicBoltBurst(playerEntity, player, position, baseDirection, targetPosition, targetDistance, stats)
 	return created > 0
 end
 
@@ -299,7 +243,7 @@ local function handleAfterimageCloneShooting(playerEntity: number, player: Playe
 					cloneInfo.pulseTimer = nil
 					cloneInfo.pulseInterval = nil
 					cloneInfo.pulsePredictionActive = false
-					AbilitySystemBase.endCastPrediction(playerEntity)
+					TargetingService.endCastPrediction(playerEntity, MAGIC_BOLT_ID)
 				end
 			end
 			
@@ -314,7 +258,7 @@ local function handleAfterimageCloneShooting(playerEntity: number, player: Playe
 					local clonePosVec = Vector3.new(clonePos.x, clonePos.y, clonePos.z)
 					
 					-- Start prediction tracking for this cast (same as player)
-					AbilitySystemBase.startCastPrediction(playerEntity)
+					TargetingService.startCastPrediction(playerEntity, MAGIC_BOLT_ID)
 					cloneInfo.pulsePredictionActive = true
 					
 					-- Spawn first burst immediately
@@ -333,26 +277,33 @@ local function handleAfterimageCloneShooting(playerEntity: number, player: Playe
 							cloneInfo.pulseInterval = stats.pulseInterval or 0.08
 						else
 							-- Single shot, end prediction immediately
-							AbilitySystemBase.endCastPrediction(playerEntity)
+							TargetingService.endCastPrediction(playerEntity, MAGIC_BOLT_ID)
 							cloneInfo.pulsePredictionActive = false
 						end
 						
 						-- Update clone facing direction
-						local facingTargetEntity = stats.targetingMode == 2 
-							and AbilitySystemBase.findBestTarget(playerEntity, clonePosVec, stats.targetingRange, stats.damage)
-							or AbilitySystemBase.findNearestEnemy(clonePosVec, stats.targetingRange)
-						
-						if facingTargetEntity then
-							local facingTargetPos = AbilitySystemBase.getEnemyCenterPosition(facingTargetEntity)
-							if facingTargetPos then
-								local facingDir = (facingTargetPos - clonePosVec).Unit
-								world:set(cloneInfo.entity, Components.FacingDirection, {
-									x = facingDir.X,
-									y = facingDir.Y,
-									z = facingDir.Z,
-								})
-								DirtyService.mark(cloneInfo.entity, "FacingDirection")
-							end
+						local facingResult = TargetingService.acquireTarget({
+							playerEntity = playerEntity,
+							player = player,
+							origin = clonePosVec,
+							maxRange = stats.targetingRange,
+							mode = 2,
+							stayHorizontal = true,
+							alwaysStayHorizontal = false,
+							enablePrediction = false,
+							projectileSpeed = stats.projectileSpeed,
+							damage = stats.damage,
+							abilityId = MAGIC_BOLT_ID,
+						})
+
+						if facingResult and facingResult.direction then
+							local facingDir = facingResult.direction
+							world:set(cloneInfo.entity, Components.FacingDirection, {
+								x = facingDir.X,
+								y = facingDir.Y,
+								z = facingDir.Z,
+							})
+							DirtyService.mark(cloneInfo.entity, "FacingDirection")
 						end
 					end
 				end
@@ -370,7 +321,7 @@ local function castMagicBolt(playerEntity: number, player: Player): boolean
 	local stats = AbilitySystemBase.getAbilityStats(playerEntity, MAGIC_BOLT_ID, Balance)
 	
 	-- Start prediction tracking for smart multi-targeting
-	AbilitySystemBase.startCastPrediction(playerEntity)
+	TargetingService.startCastPrediction(playerEntity, MAGIC_BOLT_ID)
 	
 	-- Get animation anticipation delay from Config
 	local anticipation = 0
@@ -413,11 +364,11 @@ local function castMagicBolt(playerEntity: number, player: Player): boolean
 		if anticipation > 0 then
 			task.delay(anticipation, function()
 				performMagicBoltBurst(playerEntity, player)
-				AbilitySystemBase.endCastPrediction(playerEntity)
+				TargetingService.endCastPrediction(playerEntity, MAGIC_BOLT_ID)
 			end)
 		else
 			performMagicBoltBurst(playerEntity, player)
-			AbilitySystemBase.endCastPrediction(playerEntity)
+			TargetingService.endCastPrediction(playerEntity, MAGIC_BOLT_ID)
 		end
 	end
 
@@ -579,7 +530,7 @@ function MagicBoltSystem.step(dt: number)
 						world:remove(entity, AbilityPulse)
 						pulseComponent = nil
 						-- End prediction tracking when cast completes
-						AbilitySystemBase.endCastPrediction(entity)
+						TargetingService.endCastPrediction(entity, MAGIC_BOLT_ID)
 					else
 						local newPulse = {
 							ability = MAGIC_BOLT_ID,

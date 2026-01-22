@@ -53,6 +53,8 @@ local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 -- Ability Registry - Auto-discovers and loads all abilities
 local AbilityRegistry = require(game.ServerScriptService.Abilities.AbilityRegistry)
 local AbilitySystemBase = require(game.ServerScriptService.Abilities.AbilitySystemBase)
+local TargetingService = require(game.ServerScriptService.Abilities.TargetingService)
+local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
 
 -- Enemy Registry - Auto-discovers and loads all enemy types
 local EnemyRegistry = require(game.ServerScriptService.Enemies.EnemyRegistry)
@@ -383,6 +385,9 @@ function ECSWorldService.Initialize()
 	for abilityId, ability in pairs(AbilityRegistry.getAll()) do
 		ability.init(world, Components, DirtyService, ECSWorldService)
 	end
+
+	-- Initialize centralized targeting (aim point + prediction)
+	TargetingService.init(world, Components, EnemyRegistry, ModelHitboxHelper)
 	
 	-- Initialize Afterimage Clone System (for Afterimages attribute)
 	AfterimageCloneSystem.init(world, Components, DirtyService, ECSWorldService)
