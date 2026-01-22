@@ -21,6 +21,7 @@ local DeathAnimation: any
 
 local damageAttemptCount = 0
 local damageAppliedCount = 0
+local DEBUG_DAMAGE_LOGS = false
 
 -- Configuration
 local HIT_FLASH_DURATION = 0.15  -- Increased from 0.2 to 0.15 for snappier response
@@ -234,30 +235,44 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 		-- Get player info
 		local playerStats = world:get(targetEntity, Components.PlayerStats)
 		local playerName = playerStats and playerStats.player and playerStats.player.Name or "Unknown"
-		
-		-- Enhanced logging for enemy damage to track invisible enemy bug
-		if sourceEntity and world:has(sourceEntity, Components.EntityType) then
-			local sourceEntityType = world:get(sourceEntity, Components.EntityType)
-			if sourceEntityType and sourceEntityType.type == "Enemy" then
-				local sourcePos = world:get(sourceEntity, Components.Position)
-				local targetPos = world:get(targetEntity, Components.Position)
-				local distance = 0
-				if sourcePos and targetPos then
-					distance = math.sqrt((sourcePos.x - targetPos.x)^2 + (sourcePos.y - targetPos.y)^2 + (sourcePos.z - targetPos.z)^2)
+
+		if DEBUG_DAMAGE_LOGS then
+			if sourceEntity and world:has(sourceEntity, Components.EntityType) then
+				local sourceEntityType = world:get(sourceEntity, Components.EntityType)
+				if sourceEntityType and sourceEntityType.type == "Enemy" then
+					local sourcePos = world:get(sourceEntity, Components.Position)
+					local targetPos = world:get(targetEntity, Components.Position)
+					local distance = 0
+					if sourcePos and targetPos then
+						distance = math.sqrt((sourcePos.x - targetPos.x)^2 + (sourcePos.y - targetPos.y)^2 + (sourcePos.z - targetPos.z)^2)
+					end
+					print(string.format(
+						"[DamageSystem] ENEMY ATTACK | %s took %.1f dmg | Enemy#%d | HP: %.1f->%.1f | Distance: %.1f studs | Enemy:(%.1f,%.1f,%.1f) Player:(%.1f,%.1f,%.1f)",
+						playerName,
+						remainingDamage,
+						sourceEntity,
+						health.current,
+						newHealth,
+						distance,
+						sourcePos and sourcePos.x or 0, sourcePos and sourcePos.y or 0, sourcePos and sourcePos.z or 0,
+						targetPos and targetPos.x or 0, targetPos and targetPos.y or 0, targetPos and targetPos.z or 0
+					))
+				else
+					print(string.format(
+						"[DamageSystem] %s took %.1f dmg from %s (%s) at %s | HP: %.1f | Type: %s | AbilityID: %s",
+						playerName,
+						remainingDamage,
+						sourceName,
+						sourceType,
+						sourcePosition,
+						newHealth,
+						damageType or "unknown",
+						abilityId or "none"
+					))
 				end
-				print(string.format("[DamageSystem] ENEMY ATTACK | %s took %.1f dmg | Enemy#%d | HP: %.1f→%.1f | Distance: %.1f studs | Enemy:(%.1f,%.1f,%.1f) Player:(%.1f,%.1f,%.1f)",
-					playerName,
-					remainingDamage,
-					sourceEntity,
-					health.current,
-					newHealth,
-					distance,
-					sourcePos and sourcePos.x or 0, sourcePos and sourcePos.y or 0, sourcePos and sourcePos.z or 0,
-					targetPos and targetPos.x or 0, targetPos and targetPos.y or 0, targetPos and targetPos.z or 0
-				))
 			else
-				-- Non-enemy damage (projectiles, etc.)
-				print(string.format("[DamageSystem] %s took %.1f dmg from %s (%s) at %s | HP: %.1f | Type: %s | AbilityID: %s", 
+				print(string.format(
+					"[DamageSystem] %s took %.1f dmg from %s (%s) at %s | HP: %.1f | Type: %s | AbilityID: %s",
 					playerName,
 					remainingDamage,
 					sourceName,
@@ -268,21 +283,8 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 					abilityId or "none"
 				))
 			end
-		else
-			-- No source entity
-			print(string.format("[DamageSystem] %s took %.1f dmg from %s (%s) at %s | HP: %.1f | Type: %s | AbilityID: %s", 
-				playerName,
-				remainingDamage,
-				sourceName,
-				sourceType,
-				sourcePosition,
-				newHealth,
-				damageType or "unknown",
-				abilityId or "none"
-			))
 		end
-		
-		local playerStats = world:get(targetEntity, Components.PlayerStats)
+
 		if playerStats and playerStats.player then
 			local player = playerStats.player
 			local character = player.Character

@@ -293,6 +293,14 @@ local function unpausePlayerIndividually(playerEntity: number, player: Player)
 			if StatusEffectSystem then
 				StatusEffectSystem.onPlayerPaused(playerEntity, pauseDuration)
 			end
+
+			-- Freeze mobility cooldowns during individual pause.
+			local mobilityCooldown = world:get(playerEntity, Components.MobilityCooldown)
+			if mobilityCooldown and typeof(mobilityCooldown.lastUsedTime) == "number" then
+				mobilityCooldown.lastUsedTime += pauseDuration
+				world:set(playerEntity, Components.MobilityCooldown, mobilityCooldown)
+				DirtyService.mark(playerEntity, "MobilityCooldown")
+			end
 		end
 		
 		-- Remove PlayerPauseState component

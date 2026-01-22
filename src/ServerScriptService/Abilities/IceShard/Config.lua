@@ -29,7 +29,7 @@ return {
 	-- 2 = direct targeting with prediction
 	-- 3 = homing (fallback to 2)
 	targetingMode = 3,
-	targetingRange = 500, -- maximum range for targeting enemies
+	targetingRange = 10000, -- maximum range for targeting enemies
 	targetingAngle = math.rad(45), -- maximum angle deviation for targeting
 	StayHorizontal = true, -- Keep projectiles horizontal when player is grounded
 	AlwaysStayHorizontal = false, -- Lock Y-axis to spawn height (works even when airborne, overrides StayHorizontal)
@@ -66,4 +66,3 @@ return {
 		anticipation = 0.2,  -- Delay before first projectile spawns (animation wind-up time)
 	},
 }
-

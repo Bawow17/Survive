@@ -137,7 +137,13 @@ local function performIceShardBurst(playerEntity: number, player: Player): boole
 				end
 			end
 
-			local targetDistance = (targetPosition - position).Magnitude
+			local targetDistance = AbilitySystemBase.getTargetDistance(
+				position,
+				targetPosition,
+				stats.StayHorizontal,
+				stats.AlwaysStayHorizontal,
+				player
+			)
 			local baseDirection = AbilitySystemBase.calculateTargetingDirection(
 				position,
 				stats.targetingMode,
@@ -215,7 +221,13 @@ local function performIceShardBurst(playerEntity: number, player: Player): boole
 		end
 	end
 
-	local targetDistance = (targetPosition - position).Magnitude
+	local targetDistance = AbilitySystemBase.getTargetDistance(
+		position,
+		targetPosition,
+		stats.StayHorizontal,
+		stats.AlwaysStayHorizontal,
+		player
+	)
 	local baseDirection = AbilitySystemBase.calculateTargetingDirection(
 		position,
 		stats.targetingMode,

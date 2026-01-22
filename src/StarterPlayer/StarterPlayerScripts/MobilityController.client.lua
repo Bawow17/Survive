@@ -65,6 +65,7 @@ local serverGameTime: number? = nil
 local lastGameTimeUpdate: number = 0
 local usingServerTime = false
 local pendingServerLastUsedTime: number? = nil
+local pausedServerGameTime: number? = nil
 
 -- Shield Bash config values from server
 local serverDamage: number? = nil
@@ -78,6 +79,16 @@ local activeDashConnection: RBXScriptConnection? = nil
 local isPaused = false
 local pauseStartTime: number = 0
 local totalPausedTime: number = 0
+
+local function getServerTimeForCooldown(): number?
+	if not (usingServerTime and serverGameTime) then
+		return nil
+	end
+	if isPaused and pausedServerGameTime then
+		return pausedServerGameTime
+	end
+	return serverGameTime + math.max(0, tick() - lastGameTimeUpdate)
+end
 
 -- Visual Effects Functions (defined early so they can be called)
 
@@ -475,6 +486,9 @@ local function initRemotes()
 			if typeof(gameTime) == "number" then
 				serverGameTime = gameTime
 				lastGameTimeUpdate = tick()
+				if isPaused and not pausedServerGameTime then
+					pausedServerGameTime = gameTime
+				end
 				if not usingServerTime then
 					usingServerTime = true
 					if pendingServerLastUsedTime then
@@ -607,9 +621,9 @@ local function isOnCooldown(config: any): boolean
 	local currentTime = tick()
 	if usingServerTime and serverGameTime then
 		if isPaused then
-			currentTime = serverGameTime
+			currentTime = getServerTimeForCooldown() or serverGameTime
 		else
-			currentTime = serverGameTime + math.max(0, tick() - lastGameTimeUpdate)
+			currentTime = getServerTimeForCooldown() or serverGameTime
 		end
 	elseif isPaused then
 		currentTime = pauseStartTime
@@ -1200,6 +1214,9 @@ local function setupPauseListeners()
 	GamePaused.OnClientEvent:Connect(function()
 		isPaused = true
 		pauseStartTime = tick()
+		if usingServerTime then
+			pausedServerGameTime = serverGameTime
+		end
 		
 		-- Completely freeze player by anchoring
 		if rootPart and rootPart.Parent then
@@ -1224,8 +1241,12 @@ local function setupPauseListeners()
 		local pauseDuration = tick() - pauseStartTime
 		totalPausedTime = totalPausedTime + pauseDuration
 		
-		-- Adjust cooldown only when using local time (server game time is already pause-aware)
-		if not usingServerTime then
+		if usingServerTime and pausedServerGameTime then
+			local resumeServerTime = serverGameTime or pausedServerGameTime
+			local pauseDurationServer = math.max(0, resumeServerTime - pausedServerGameTime)
+			lastUsedTime = lastUsedTime + pauseDurationServer
+			pausedServerGameTime = nil
+		elseif not usingServerTime then
 			lastUsedTime = lastUsedTime + pauseDuration
 		end
 		

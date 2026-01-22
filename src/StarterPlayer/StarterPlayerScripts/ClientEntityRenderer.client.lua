@@ -491,10 +491,13 @@ local deathAnimations: {[Model]: {
 
 -- Maximum render distance for projectiles
 local MAX_RENDER_DISTANCE = 500 -- Cull projectiles beyond this distance
+-- Enemy visuals should only cull when quite far away.
+local ENEMY_CULL_OUT_DIST = 300
+local ENEMY_CULL_IN_DIST = 280
 
 -- Enemy culling stabilization
-local CULL_OUT_DIST = MAX_RENDER_DISTANCE
-local CULL_IN_DIST = MAX_RENDER_DISTANCE - 10 -- Small hysteresis window (keeps visuals effectively identical)
+local CULL_OUT_DIST = ENEMY_CULL_OUT_DIST
+local CULL_IN_DIST = ENEMY_CULL_IN_DIST -- Small hysteresis window (keeps visuals effectively identical)
 local CULL_TOGGLE_COOLDOWN = 0.75
 local CULL_OUT_DIST_SQ = CULL_OUT_DIST * CULL_OUT_DIST
 local CULL_IN_DIST_SQ = CULL_IN_DIST * CULL_IN_DIST
@@ -519,6 +522,9 @@ local PROJECTILE_CLEAN_INTERVAL = 5
 local PROJECTILE_STALE_THRESHOLD = 1.5
 local EXP_ORB_STALE_THRESHOLD = 5.0  -- Exp orbs without updates for 5s are stale
 local INVISIBLE_ENEMY_DIAGNOSTIC_INTERVAL = 5.0  -- Check for invisible enemies every 5s
+local ORPHAN_MODEL_TTL = 1.5 -- Seconds before we clean up an enemy model with no entity record
+local NO_ID_MODEL_TTL = 1.5 -- Seconds before we clean up an enemy model missing ECS_EntityId
+local DEBUG_ENEMY_ENTITY_MODEL_COUNTS = true
 local SPAWN_BUDGET_PER_FRAME = 15
 local FADE_OP_BUDGET_PER_FRAME = 750
 local ENABLE_CLIENT_GROUND_SNAP = false -- Raycasting per update is extremely expensive; server already aligns enemies to ground.
@@ -1122,85 +1128,80 @@ local function updateDeathAnimations()
 		return
 	end
 
+	local function finalizeDeathModel(model: Model)
+		if not model then
+			return
+		end
+		local entityId = model:GetAttribute("ECS_EntityId")
+		local record: RenderRecord? = nil
+		if entityId ~= nil then
+			local key = entityKey(entityId)
+			record = renderedEntities[key]
+		end
+		deathAnimations[model] = nil
+
+		if record and entityId ~= nil then
+			handleEntityDespawn(entityId, true)
+			return
+		end
+
+		-- Fallback cleanup when record is missing.
+		local flashData = hitFlashHighlights[model]
+		if flashData and flashData.highlight then
+			flashData.highlight:Destroy()
+		end
+		hitFlashHighlights[model] = nil
+
+		local pooledRecord = recordByModel[model]
+		recordByModel[model] = nil
+		if pooledRecord and pooledRecord.poolKey then
+			releasePooledModel(pooledRecord, model)
+		else
+			destroyVisualModel(model)
+		end
+	end
+
 	local now = tick()
 	for model, info in pairs(deathAnimations) do
 		if not model or not model.Parent then
-			deathAnimations[model] = nil
-			-- Explicitly destroy highlight before clearing reference
-			local flashData = hitFlashHighlights[model]
-			if flashData and flashData.highlight then
-				flashData.highlight:Destroy()
-			end
-			hitFlashHighlights[model] = nil
-			-- Ensure model is destroyed if it still exists
-			if model and model.Parent then
-				local pooledRecord = recordByModel[model]
-				recordByModel[model] = nil
-				if pooledRecord and pooledRecord.poolKey then
-					releasePooledModel(pooledRecord, model)
-				else
-					destroyVisualModel(model)
-				end
+			if model then
+				finalizeDeathModel(model)
+			else
+				deathAnimations[model] = nil
 			end
 		else
 			local startTime = info.startTime or now
 			local duration = math.max(0, info.duration or DEATH_FADE_DURATION)
 			if not info.fadeStarted and now >= startTime then
 				info.fadeStarted = true
-				fadeModel(model, 1, duration, function()
-					if model and model.Parent then
-						if activeEnemyTweens[model] then
-							pcall(function()
-								activeEnemyTweens[model]:Cancel()
-							end)
-							activeEnemyTweens[model] = nil
-						end
-						if activeFades[model] then
-							activeFades[model] = nil
-						end
-						local pooledRecord = recordByModel[model]
-						recordByModel[model] = nil
-						if pooledRecord and pooledRecord.poolKey then
-							releasePooledModel(pooledRecord, model)
-						else
-							destroyVisualModel(model)
-						end
-					end
-					deathAnimations[model] = nil
-					-- Explicitly destroy highlight before clearing reference
-					local flashData = hitFlashHighlights[model]
-					if flashData and flashData.highlight then
-						flashData.highlight:Destroy()
-					end
-					hitFlashHighlights[model] = nil
-				end)
+				info.stepIndex = 0
+				info.stepTime = startTime + (duration * 0.5)
+				info.endTime = startTime + duration
+
+				-- Cancel any pending fade ops for this model and use a cheap 2-step fade.
+				if activeFades[model] then
+					activeFades[model] = nil
+				end
+				fadeTokenByModel[model] = (fadeTokenByModel[model] or 0) + 1
+				local record = recordByModel[model]
+				setModelTransparency(model, 0.6, record)
 			elseif info.fadeStarted then
-				if now >= (startTime + duration + 0.25) then
-					if model and model.Parent then
-						if activeEnemyTweens[model] then
-							pcall(function()
-								activeEnemyTweens[model]:Cancel()
-							end)
-							activeEnemyTweens[model] = nil
-						end
-						if activeFades[model] then
-							activeFades[model] = nil
-						end
-						local pooledRecord = recordByModel[model]
-						recordByModel[model] = nil
-						if pooledRecord and pooledRecord.poolKey then
-							releasePooledModel(pooledRecord, model)
-						else
-							destroyVisualModel(model)
-						end
+				if info.stepIndex == 0 and info.stepTime and now >= info.stepTime then
+					info.stepIndex = 1
+					local record = recordByModel[model]
+					setModelTransparency(model, 1, record)
+				end
+				if info.endTime and now >= info.endTime then
+					if activeEnemyTweens[model] then
+						pcall(function()
+							activeEnemyTweens[model]:Cancel()
+						end)
+						activeEnemyTweens[model] = nil
 					end
-					deathAnimations[model] = nil
-					-- Explicitly destroy highlight before clearing reference
-					local flashData = hitFlashHighlights[model]
-					if flashData and flashData.highlight then
-						flashData.highlight:Destroy()
+					if activeFades[model] then
+						activeFades[model] = nil
 					end
-					hitFlashHighlights[model] = nil
+					finalizeDeathModel(model)
 				end
 			elseif now >= info.expireTime then
 				-- Failsafe: trigger immediate fade if we missed the window
@@ -1320,11 +1321,24 @@ local function checkForInvisibleEnemies(now: number)
 	-- Check for entity records without workspace models
 	local invisibleCount = 0
 	local enemyRecordCount = 0
+	local wrongParentCount = 0
+	local pooledParentCount = 0
+	local otherParentCount = 0
+	local fadedOutCount = 0
 	for key, record in pairs(renderedEntities) do
 		if record.entityType == "Enemy" then
 			enemyRecordCount = enemyRecordCount + 1
 			if not record.model or not record.model.Parent then
 				invisibleCount = invisibleCount + 1
+			elseif record.model.Parent ~= enemiesFolder then
+				wrongParentCount += 1
+				if record.model.Parent == pooledVisualsFolder then
+					pooledParentCount += 1
+				else
+					otherParentCount += 1
+				end
+			elseif record.isFadedOut then
+				fadedOutCount += 1
 			end
 		end
 	end
@@ -1332,17 +1346,60 @@ local function checkForInvisibleEnemies(now: number)
 	-- Check for workspace enemy models without entity records
 	local orphanCount = 0
 	local workspaceEnemyCount = 0
+	local orphanCleanupCount = 0
+	local missingIdCount = 0
+	local missingIdCleanupCount = 0
 	for _, enemyModel in ipairs(enemiesFolder:GetChildren()) do
 		if enemyModel:IsA("Model") then
 			workspaceEnemyCount = workspaceEnemyCount + 1
 			local entityIdAttr = enemyModel:GetAttribute("ECS_EntityId")
 			if entityIdAttr then
+				if enemyModel:GetAttribute("ECS_NoIdSince") ~= nil then
+					enemyModel:SetAttribute("ECS_NoIdSince", nil)
+				end
 				local key = entityKey(entityIdAttr)
 				if not renderedEntities[key] then
 					orphanCount = orphanCount + 1
+					local orphanSince = enemyModel:GetAttribute("ECS_OrphanSince")
+					if typeof(orphanSince) ~= "number" then
+						enemyModel:SetAttribute("ECS_OrphanSince", now)
+					elseif now - orphanSince >= ORPHAN_MODEL_TTL then
+						destroyVisualModel(enemyModel)
+						orphanCleanupCount += 1
+					end
+				else
+					if enemyModel:GetAttribute("ECS_OrphanSince") ~= nil then
+						enemyModel:SetAttribute("ECS_OrphanSince", nil)
+					end
+				end
+			else
+				missingIdCount += 1
+				local missingSince = enemyModel:GetAttribute("ECS_NoIdSince")
+				if typeof(missingSince) ~= "number" then
+					enemyModel:SetAttribute("ECS_NoIdSince", now)
+				elseif now - missingSince >= NO_ID_MODEL_TTL then
+					destroyVisualModel(enemyModel)
+					missingIdCleanupCount += 1
 				end
 			end
 		end
+	end
+
+	if DEBUG_ENEMY_ENTITY_MODEL_COUNTS then
+		print(string.format(
+			"[ClientRenderer] EnemyCounts entities=%d models=%d invisible=%d orphanModels=%d cleanedOrphans=%d missingId=%d cleanedMissingId=%d wrongParent=%d pooledParent=%d otherParent=%d fadedOut=%d",
+			enemyRecordCount,
+			workspaceEnemyCount,
+			invisibleCount,
+			orphanCount,
+			orphanCleanupCount,
+			missingIdCount,
+			missingIdCleanupCount,
+			wrongParentCount,
+			pooledParentCount,
+			otherParentCount,
+			fadedOutCount
+		))
 	end
 end
 
@@ -2311,8 +2368,8 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			spawnDistance = math.sqrt(dx * dx + dy * dy + dz * dz)
 		end
 		
-		-- PERFORMANCE FIX: If spawning near culling distance (>280 studs), start already faded
-		local nearCullingEdge = spawnDistance > 280
+		-- PERFORMANCE FIX: If spawning beyond culling distance, start already faded
+		local nearCullingEdge = spawnDistance > CULL_OUT_DIST
 		
 		-- Set initial transparency
 		setModelTransparency(model, 1, record)
@@ -3118,7 +3175,7 @@ end)
 		cleanupStaleProjectiles(now)
 		cleanupStaleExpOrbs(now)
 		-- Diagnostic toggle for invisible enemy detection
-		if enableInvisibleEnemyDiagnostics and enableInvisibleEnemyDiagnostics.Value then
+		if DEBUG_ENEMY_ENTITY_MODEL_COUNTS or (enableInvisibleEnemyDiagnostics and enableInvisibleEnemyDiagnostics.Value) then
 			checkForInvisibleEnemies(now)
 		end
 	
@@ -3359,7 +3416,7 @@ end)
 		
 		-- Skip projectiles/explosions beyond render distance (they move fast, full cull is fine)
 		if record.entityType ~= "Enemy" and distSq > MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE then
-			continue  -- Don't render projectiles >300 studs away
+			continue  -- Don't render projectiles beyond MAX_RENDER_DISTANCE
 		end
 
 		if simPosition then

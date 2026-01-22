@@ -7,11 +7,14 @@ local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplic
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
+local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 
 -- Targeting prediction tuning
-local PREDICTION_FACTOR = 0.6  -- 60% of predicted position (conservative)
+local PREDICTION_FACTOR = 0.6  -- Used only when targetingStats.enablePrediction is true.
 local MOVING_SPEED_THRESHOLD = 5  -- studs/sec - below this, aim at center
 local MAX_PREDICTION_OFFSET = 10  -- studs - cap prediction lead distance
+local TARGETABLE_SPAWN_DELAY = 0.6 -- seconds after spawn before enemies are eligible to target (matches fade-in)
+local HORIZONTAL_AIM_Y_DIFF = 1.5 -- allow vertical aim if target is significantly above/below player
 
 local AbilitySystemBase = {}
 
@@ -31,6 +34,8 @@ local activeCastPredictions: {[number]: {[number]: number}} = {}
 -- Current target tracking for target stickiness
 -- Structure: {playerEntity: enemyEntity}
 local currentCastTargets: {[number]: number} = {}
+local pendingTargetSwitchUntil: {[number]: number} = {}
+local pendingTargetId: {[number]: number} = {}
 
 -- Prediction start times for timeout cleanup (memory leak prevention)
 -- Structure: {playerEntity: startTime}
@@ -75,6 +80,17 @@ local function gatherEnemyCandidates(center: Vector3, maxRange: number): {number
 	end
 
 	return candidates
+end
+
+local function isEnemyTargetable(enemyEntity: number, currentTime: number): boolean
+	if not world or not Components then
+		return true
+	end
+	local spawnTime = world:get(enemyEntity, Components.SpawnTime)
+	if not spawnTime or typeof(spawnTime.time) ~= "number" then
+		return true
+	end
+	return (currentTime - spawnTime.time) >= TARGETABLE_SPAWN_DELAY
 end
 
 -- Initialize base with ECS references
@@ -271,24 +287,28 @@ function AbilitySystemBase.getPredictedDamage(playerEntity: number, enemyEntity:
 end
 
 	-- Helper function to get the first enemy within range
-	function AbilitySystemBase.findNearestEnemy(playerPosition: Vector3, maxRange: number): number?
-		if not world or not Components then
-			warn("[AbilitySystemBase] Not initialized")
-			return nil
-		end
-		
-		local nearestEntity: number? = nil
-		local nearestDistance = math.huge
-		local candidates = gatherEnemyCandidates(playerPosition, maxRange)
+function AbilitySystemBase.findNearestEnemy(playerPosition: Vector3, maxRange: number): number?
+	if not world or not Components then
+		warn("[AbilitySystemBase] Not initialized")
+		return nil
+	end
+	
+	local nearestEntity: number? = nil
+	local nearestDistance = math.huge
+	local candidates = gatherEnemyCandidates(playerPosition, maxRange)
+	local currentTime = GameTimeSystem.getGameTime()
 
-		for _, entity in ipairs(candidates) do
-			local entityType = world:get(entity, Components.EntityType)
-			if entityType and entityType.type == "Enemy" then
-				local position = world:get(entity, Components.Position)
-				if position then
-					local ecsPosition = Vector3.new(position.x, position.y, position.z)
-					local distance = (ecsPosition - playerPosition).Magnitude
-					if distance <= maxRange and distance < nearestDistance then
+	for _, entity in ipairs(candidates) do
+		local entityType = world:get(entity, Components.EntityType)
+		if entityType and entityType.type == "Enemy" then
+			if not isEnemyTargetable(entity, currentTime) then
+				continue
+			end
+			local position = world:get(entity, Components.Position)
+			if position then
+				local ecsPosition = Vector3.new(position.x, position.y, position.z)
+				local distance = (ecsPosition - playerPosition).Magnitude
+				if distance <= maxRange and distance < nearestDistance then
 						nearestEntity = entity
 						nearestDistance = distance
 					end
@@ -300,60 +320,79 @@ end
 	end
 	
 	-- Smart target finding with kill prediction (for multi-target optimization)
-	function AbilitySystemBase.findBestTarget(
-		playerEntity: number,
-		playerPosition: Vector3,
-		maxRange: number,
-		damageAmount: number
+function AbilitySystemBase.findBestTarget(
+	playerEntity: number,
+	playerPosition: Vector3,
+	maxRange: number,
+	_damageAmount: number
 ): number?
 	if not world or not Components then
 		warn("[AbilitySystemBase] Not initialized")
 		return nil
 	end
-	
-	-- Check if we have a current target that's still valid (target stickiness)
+
+	-- Prefer current target when valid; delay switching briefly when a target is predicted to die.
+	local nearestValidTarget: number? = nil
+	local nearestDistance = math.huge
+	local candidates = gatherEnemyCandidates(playerPosition, maxRange)
+	local now = tick()
+	local currentTime = GameTimeSystem.getGameTime()
 	local currentTarget = currentCastTargets[playerEntity]
-	if currentTarget then
-		local health = world:get(currentTarget, Components.Health)
-		local predictedDamage = AbilitySystemBase.getPredictedDamage(playerEntity, currentTarget)
-		
-		-- Keep current target if it's still alive and won't die from this shot
-		if health and (health.current - predictedDamage) > damageAmount then
-			local position = world:get(currentTarget, Components.Position)
-			if position then
-				local ecsPosition = Vector3.new(position.x, position.y, position.z)
-				local distance = (ecsPosition - playerPosition).Magnitude
-				-- Keep target if still in range
-				if distance <= maxRange then
+
+	if currentTarget and world:contains(currentTarget) then
+		if not isEnemyTargetable(currentTarget, currentTime) then
+			currentTarget = nil
+			currentCastTargets[playerEntity] = nil
+			pendingTargetSwitchUntil[playerEntity] = nil
+			pendingTargetId[playerEntity] = nil
+		end
+	end
+
+	if currentTarget and world:contains(currentTarget) then
+		local position = world:get(currentTarget, Components.Position)
+		if position then
+			local ecsPosition = Vector3.new(position.x, position.y, position.z)
+			local distance = (ecsPosition - playerPosition).Magnitude
+			if distance <= maxRange then
+				local health = world:get(currentTarget, Components.Health)
+				local predictedDamage = AbilitySystemBase.getPredictedDamage(playerEntity, currentTarget)
+				if health and health.current > predictedDamage then
+					-- Keep current target while it's still alive and in range.
+					pendingTargetSwitchUntil[playerEntity] = nil
+					pendingTargetId[playerEntity] = nil
 					return currentTarget
+				elseif health and health.current <= predictedDamage then
+					local pendingId = pendingTargetId[playerEntity]
+					local pendingUntil = pendingTargetSwitchUntil[playerEntity]
+					if pendingId ~= currentTarget or not pendingUntil then
+						pendingTargetId[playerEntity] = currentTarget
+						pendingTargetSwitchUntil[playerEntity] = now + 0.08
+					end
+					if pendingTargetSwitchUntil[playerEntity] and now < pendingTargetSwitchUntil[playerEntity] then
+						return currentTarget
+					end
+				else
+					pendingTargetSwitchUntil[playerEntity] = nil
+					pendingTargetId[playerEntity] = nil
 				end
 			end
 		end
 	end
-	
-	-- NEW: When switching targets, prioritize reliability
-	-- Reset prediction for new target to ensure center-mass aiming initially
-	local previousTarget = currentCastTargets[playerEntity]
-	
-	-- Need to find new target
-	local nearestValidTarget: number? = nil
-	local nearestDistance = math.huge
-	local candidates = gatherEnemyCandidates(playerPosition, maxRange)
 
 	for _, entity in ipairs(candidates) do
 		local entityType = world:get(entity, Components.EntityType)
 		if entityType and entityType.type == "Enemy" then
+			if not isEnemyTargetable(entity, currentTime) then
+				continue
+			end
 			local health = world:get(entity, Components.Health)
 			local position = world:get(entity, Components.Position)
 			if health and position then
-				-- Get predicted damage for this enemy from current cast
 				local predictedDamage = AbilitySystemBase.getPredictedDamage(playerEntity, entity)
-				
-				-- Skip if enemy is predicted to die from already-fired projectiles
+				-- Skip enemies predicted to die from previously fired shots.
 				if health.current > predictedDamage then
 					local ecsPosition = Vector3.new(position.x, position.y, position.z)
 					local distance = (ecsPosition - playerPosition).Magnitude
-					
 					if distance <= maxRange and distance < nearestDistance then
 						nearestValidTarget = entity
 						nearestDistance = distance
@@ -362,25 +401,18 @@ end
 			end
 		end
 	end
-	
-	-- If all enemies are predicted to die, fall back to nearest enemy anyway
+
+	-- If all enemies are predicted to die, fall back to nearest enemy anyway.
 	if not nearestValidTarget then
 		nearestValidTarget = AbilitySystemBase.findNearestEnemy(playerPosition, maxRange)
 	end
-	
-	-- Store the new target for stickiness
+
 	if nearestValidTarget then
 		currentCastTargets[playerEntity] = nearestValidTarget
-		-- NEW: If this is a target switch, reset its prediction to start fresh
-		if previousTarget and previousTarget ~= nearestValidTarget then
-			local predictions = activeCastPredictions[playerEntity]
-			if predictions then
-				-- Clear any stale predictions for new target (ensures center-mass aim first)
-				predictions[nearestValidTarget] = 0
-			end
-		end
+		pendingTargetSwitchUntil[playerEntity] = nil
+		pendingTargetId[playerEntity] = nil
 	end
-	
+
 	return nearestValidTarget
 end
 
@@ -423,40 +455,8 @@ function AbilitySystemBase.getEnemyCenterPosition(enemyEntity: number): Vector3?
 		return basePosition
 	end
 
-	local subtype = entityType.subtype or "Enemy"
-
-	-- Prefer cached hitbox data from the replication service
-	local hitboxData = ModelReplicationService.getEnemyHitbox(subtype)
-	if hitboxData then
-		return basePosition + hitboxData.offset
-	end
-
-	-- Attempt to replicate the enemy model to populate hitbox cache
-	ModelReplicationService.replicateEnemy(subtype)
-	hitboxData = ModelReplicationService.getEnemyHitbox(subtype)
-	if hitboxData then
-		return basePosition + hitboxData.offset
-	end
-
-	-- Fallback to inspecting the model directly if we have a visual path
-	local visual = world:get(enemyEntity, Components.Visual)
-	if visual and visual.modelPath then
-		local model = findModelByPath(visual.modelPath)
-		if model then
-			local pivotPosition = model:GetPivot().Position
-			if model.PrimaryPart then
-				return basePosition + (model.PrimaryPart.Position - pivotPosition)
-			end
-
-			local hitboxPart = model:FindFirstChild("Hitbox")
-			if hitboxPart and hitboxPart:IsA("BasePart") then
-				return basePosition + (hitboxPart.Position - pivotPosition)
-			end
-		end
-	end
-
-	-- Final fallback: raise aim slightly above ground
-	return basePosition + Vector3.new(0, 2, 0)
+	-- Aim at the entity position used for collision to avoid lateral offsets.
+	return basePosition
 end
 
 -- Helper function to check if player is grounded
@@ -491,6 +491,21 @@ local function flattenDirection(direction: Vector3, playerY: number): Vector3
 	end
 	
 	return flatDirection.Unit
+end
+
+function AbilitySystemBase.getTargetDistance(
+	playerPosition: Vector3,
+	targetPosition: Vector3,
+	stayHorizontal: boolean?,
+	alwaysStayHorizontal: boolean?,
+	player: Player?
+): number
+	if alwaysStayHorizontal or (stayHorizontal and isPlayerGrounded(player)) then
+		local dx = targetPosition.X - playerPosition.X
+		local dz = targetPosition.Z - playerPosition.Z
+		return math.sqrt(dx * dx + dz * dz)
+	end
+	return (targetPosition - playerPosition).Magnitude
 end
 
 -- Calculate targeting direction based on mode
@@ -553,44 +568,33 @@ function AbilitySystemBase.calculateTargetingDirection(
 	elseif targetingMode == 2 then
 		-- Direct targeting with CONSERVATIVE prediction
 		if targetPosition then
-			local finalTargetPosition = targetPosition  -- Start with center position
-			
-			-- Only apply prediction if we have target entity and it's moving
-			if targetEntity and world and Components and targetingStats and targetingStats.projectileSpeed then
+			local finalTargetPosition = targetPosition
+
+			-- Prediction is opt-in to avoid overshooting fast or small targets.
+			if targetingStats and targetingStats.enablePrediction and targetEntity and world and Components and targetingStats.projectileSpeed then
 				local targetVelocity = world:get(targetEntity, Components.Velocity)
 				if targetVelocity then
-					-- Calculate target speed
 					local targetSpeed = math.sqrt(
-						targetVelocity.x * targetVelocity.x + 
-						targetVelocity.y * targetVelocity.y + 
+						targetVelocity.x * targetVelocity.x +
+						targetVelocity.y * targetVelocity.y +
 						targetVelocity.z * targetVelocity.z
 					)
-					
-					-- Only predict for moving targets (speed > threshold)
 					if targetSpeed > MOVING_SPEED_THRESHOLD then
 						local distance = (targetPosition - playerPosition).Magnitude
 						local timeToTarget = distance / targetingStats.projectileSpeed
-						
-						-- CONSERVATIVE PREDICTION: Use 60% of predicted position (shorter lead)
 						local predictedOffset = Vector3.new(
 							targetVelocity.x * timeToTarget * PREDICTION_FACTOR,
 							targetVelocity.y * timeToTarget * PREDICTION_FACTOR,
 							targetVelocity.z * timeToTarget * PREDICTION_FACTOR
 						)
-						
-						-- Limit prediction offset to reasonable bounds (max 10 studs lead)
 						if predictedOffset.Magnitude > MAX_PREDICTION_OFFSET then
 							predictedOffset = predictedOffset.Unit * MAX_PREDICTION_OFFSET
 						end
-						
 						finalTargetPosition = targetPosition + predictedOffset
-					else
-						-- Target is slow/stationary, aim at center (no prediction)
-						finalTargetPosition = targetPosition
 					end
 				end
 			end
-			
+
 			direction = (finalTargetPosition - playerPosition).Unit
 		else
 			-- No target: fallback to player facing direction
@@ -615,7 +619,16 @@ function AbilitySystemBase.calculateTargetingDirection(
 	
 	-- Apply horizontal flattening if requested and player is grounded
 	if stayHorizontal and isPlayerGrounded(player) then
-		direction = flattenDirection(direction, playerPosition.Y)
+		local shouldFlatten = true
+		if targetPosition then
+			local yDiff = math.abs(targetPosition.Y - playerPosition.Y)
+			if yDiff > HORIZONTAL_AIM_Y_DIFF then
+				shouldFlatten = false
+			end
+		end
+		if shouldFlatten then
+			direction = flattenDirection(direction, playerPosition.Y)
+		end
 	end
 	
 	return direction

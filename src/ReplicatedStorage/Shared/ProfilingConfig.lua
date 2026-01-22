@@ -1,5 +1,5 @@
 --!strict
 
 return {
-	ENABLED = true,
+	ENABLED = false,
 }

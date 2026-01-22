@@ -196,7 +196,13 @@ local function performFireBallBurst(playerEntity: number, player: Player): boole
 	end
 
 	-- Calculate direction based on targeting mode
-	local targetDistance = (targetPosition - position).Magnitude
+	local targetDistance = AbilitySystemBase.getTargetDistance(
+		position,
+		targetPosition,
+		stats.StayHorizontal,
+		stats.AlwaysStayHorizontal,
+		player
+	)
 	local baseDirection = AbilitySystemBase.calculateTargetingDirection(
 		position,
 		stats.targetingMode,
