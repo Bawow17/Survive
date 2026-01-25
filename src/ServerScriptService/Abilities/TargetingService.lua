@@ -313,6 +313,16 @@ function TargetingService.acquireTarget(ctx: any): {targetEntity: number?, aimPo
 
 	local origin: Vector3 = ctx.origin
 	local maxRange = ctx.maxRange or 200
+	-- Clamp targeting range to actual projectile travel distance when possible.
+	if ctx.projectileSpeed and (ctx.duration or ctx.lifetime) then
+		local lifetime = ctx.duration or ctx.lifetime
+		if typeof(lifetime) == "number" and lifetime > 0 then
+			local travelRange = ctx.projectileSpeed * lifetime
+			if travelRange > 0 then
+				maxRange = math.min(maxRange, travelRange)
+			end
+		end
+	end
 	local mode = ctx.mode or 2
 	local player = ctx.player
 	local key = keyFor(ctx.playerEntity, ctx.abilityId)

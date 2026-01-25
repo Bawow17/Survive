@@ -526,6 +526,7 @@ local ORPHAN_MODEL_TTL = 1.5 -- Seconds before we clean up an enemy model with n
 local NO_ID_MODEL_TTL = 1.5 -- Seconds before we clean up an enemy model missing ECS_EntityId
 local DEBUG_ENEMY_ENTITY_MODEL_COUNTS = true
 local SPAWN_BUDGET_PER_FRAME = 15
+local ENEMY_INSTANT_SPAWN_BUDGET = 8
 local FADE_OP_BUDGET_PER_FRAME = 750
 local ENABLE_CLIENT_GROUND_SNAP = false -- Raycasting per update is extremely expensive; server already aligns enemies to ground.
 
@@ -574,6 +575,7 @@ local fadeQueuedOps = 0
 local spawnQueue: {{entityId: string | number, data: {[string]: any}}} = {}
 local spawnQueueHead = 1
 local spawnQueueSet: {[string]: boolean} = {}
+local enemyInstantSpawnsThisFrame = 0
 
 -- Optimized fade function - sets transparency immediately without tweens
 local function setModelTransparency(model: Model, targetTransparency: number, cache: {fadeParts: {BasePart}?, fadeDecals: {Decal}?, fadeTextures: {Texture}?, fadeSurfaceGuis: {SurfaceGui}?, fadePartOriginals: {[BasePart]: number}?, fadeDecalOriginals: {[Decal]: number}?, fadeTextureOriginals: {[Texture]: number}?}?)
@@ -2866,7 +2868,8 @@ local function enqueueSpawn(entityId: string | number, rawData: {[string]: any})
 	end
 	local resolvedData = resolveEntityData(rawData)
 	local entityTypeName = extractEntityType(resolvedData)
-	if entityTypeName == "Enemy" then
+	if entityTypeName == "Enemy" and enemyInstantSpawnsThisFrame < ENEMY_INSTANT_SPAWN_BUDGET then
+		enemyInstantSpawnsThisFrame += 1
 		-- Enemies should appear immediately to match server-side combat.
 		knownEntityIds[key] = true
 		handleEntitySync(entityId, resolvedData)
@@ -3172,6 +3175,7 @@ end)
 		Prof.beginTimer("ClientEntityRenderer.Render")
 		local now = tick()
 		descendantOpsThisFrame = 0
+		enemyInstantSpawnsThisFrame = 0
 		
 		-- CRITICAL: Death animations must process even during pause
 		-- Otherwise enemies that die during pause freeze

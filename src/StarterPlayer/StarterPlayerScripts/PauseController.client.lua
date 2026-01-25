@@ -5,9 +5,11 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+local starterGui = game:GetService("StarterGui")
 local character = player.Character or player.CharacterAdded:Wait()
 local humanoid = character:WaitForChild("Humanoid") :: Humanoid
 
@@ -52,10 +54,21 @@ end)
 
 -- Wait for GUI elements
 local gameGui = playerGui:WaitForChild("GameGui")
+local levelUpToggle = gameGui:FindFirstChild("LevelUpToggle")
+if not levelUpToggle then
+	local starterGameGui = starterGui:FindFirstChild("GameGui")
+	local starterToggle = starterGameGui and starterGameGui:FindFirstChild("LevelUpToggle")
+	if starterToggle then
+		levelUpToggle = starterToggle:Clone()
+		levelUpToggle.Name = "LevelUpToggle"
+		levelUpToggle.Parent = gameGui
+	end
+end
+levelUpToggle = levelUpToggle or gameGui:WaitForChild("LevelUpToggle")
 local levelUpFrame = gameGui:WaitForChild("LevelUpFrame")
 local titleLabel = levelUpFrame:WaitForChild("TitleLabel")
-local timerLabel = levelUpFrame:WaitForChild("TimerLabel")
-local secondsLabel = levelUpFrame:WaitForChild("SecondsLabel")
+local timerLabel = levelUpFrame:FindFirstChild("TimerLabel")
+local secondsLabel = levelUpFrame:FindFirstChild("SecondsLabel")
 local outerWindow = levelUpFrame:WaitForChild("Window")
 local skipButton = outerWindow:WaitForChild("SkipButton")
 
@@ -70,11 +83,22 @@ local choice5 = window:WaitForChild("Choice5")
 -- Table of all choices for easy iteration
 local choices = {choice1, choice2, choice3, choice4, choice5}
 
+-- Level-up toggle button state (banked hands)
+local levelUpToggleTarget = levelUpToggle.Position
+local levelUpToggleTween: Tween? = nil
+local levelUpToggleVisible = false
+local LEVELUP_TOGGLE_DROP_TIME = 0.3
+
 -- Get remote events
 local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
 local GamePaused = remotes:WaitForChild("GamePaused") :: RemoteEvent
 local GameUnpaused = remotes:WaitForChild("GameUnpaused") :: RemoteEvent
 local RequestUnpause = remotes:WaitForChild("RequestUnpause") :: RemoteEvent
+local bankedFolder = remotes:WaitForChild("BankedHands")
+local BankedHandsUpdate = bankedFolder:WaitForChild("BankedHandsUpdate") :: RemoteEvent
+local BankedHandsShow = bankedFolder:WaitForChild("BankedHandsShow") :: RemoteEvent
+local BankedHandsOpen = bankedFolder:WaitForChild("BankedHandsOpen") :: RemoteEvent
+local BankedHandsSelect = bankedFolder:WaitForChild("BankedHandsSelect") :: RemoteEvent
 local DebugPauseFlag = remotes:FindFirstChild("DebugPause") :: BoolValue
 local DebugGrantLevels = remotes:FindFirstChild("DebugGrantLevels") :: RemoteEvent
 local debugEnabled = DebugPauseFlag and DebugPauseFlag.Value or false
@@ -89,8 +113,14 @@ local debugLastSpamTime = 0
 local debugLastPauseChange = 0
 local DEBUG_SPAM_INTERVAL = 0.03
 
+-- Banked hands UI state
+local uiMode: string? = nil
+local bankedPendingCount = 0
+local bankedOpen = false
+
 -- Initially hide the level-up frame
 levelUpFrame.Visible = false
+levelUpToggle.Visible = false
 
 -- Timer state (for individual pause mode)
 local pauseTimeout = 0
@@ -98,8 +128,61 @@ local pauseStartTime = 0
 local isTimerActive = false
 
 -- Initially hide timer labels
-timerLabel.Visible = false
-secondsLabel.Visible = false
+if timerLabel then
+	timerLabel.Visible = false
+end
+if secondsLabel then
+	secondsLabel.Visible = false
+end
+
+local function setLevelUpToggleVisible(show: boolean, animate: boolean?)
+	if show then
+		levelUpToggle.Active = true
+		levelUpToggle.AutoButtonColor = true
+		if levelUpToggleVisible then
+			levelUpToggle.Visible = true
+			return
+		end
+		levelUpToggleVisible = true
+		levelUpToggle.Visible = true
+		
+		local dropOffset = levelUpToggle.AbsoluteSize.Y + 12
+		local startPos = UDim2.new(
+			levelUpToggleTarget.X.Scale,
+			levelUpToggleTarget.X.Offset,
+			levelUpToggleTarget.Y.Scale,
+			levelUpToggleTarget.Y.Offset - dropOffset
+		)
+		
+		if levelUpToggleTween then
+			levelUpToggleTween:Cancel()
+			levelUpToggleTween = nil
+		end
+		
+		if animate then
+			levelUpToggle.Position = startPos
+			levelUpToggleTween = TweenService:Create(levelUpToggle, TweenInfo.new(LEVELUP_TOGGLE_DROP_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Position = levelUpToggleTarget,
+			})
+			levelUpToggleTween:Play()
+		else
+			levelUpToggle.Position = levelUpToggleTarget
+		end
+	else
+		levelUpToggle.Active = false
+		levelUpToggle.AutoButtonColor = false
+		if not levelUpToggleVisible then
+			levelUpToggle.Visible = false
+			return
+		end
+		levelUpToggleVisible = false
+		if levelUpToggleTween then
+			levelUpToggleTween:Cancel()
+			levelUpToggleTween = nil
+		end
+		levelUpToggle.Visible = false
+	end
+end
 
 -- Freeze player (anchor character and freeze animations)
 freezePlayer = function()
@@ -331,6 +414,76 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 	end
 end
 
+-- Banked hands updates (no pause)
+BankedHandsUpdate.OnClientEvent:Connect(function(data: any)
+	local count = data and data.count or 0
+	bankedPendingCount = count
+	
+	if count > 0 then
+		setLevelUpToggleVisible(true, not levelUpToggleVisible)
+	else
+		setLevelUpToggleVisible(false, false)
+		if uiMode == "banked" then
+			levelUpFrame.Visible = false
+			uiMode = nil
+		end
+		bankedOpen = false
+	end
+end)
+
+BankedHandsShow.OnClientEvent:Connect(function(data: any)
+	if not data then
+		return
+	end
+	
+	uiMode = "banked"
+	bankedOpen = true
+	if typeof(data.pendingCount) == "number" then
+		bankedPendingCount = data.pendingCount
+	end
+	
+	local fromLevel = data.fromLevel or 1
+	local toLevel = data.toLevel or (fromLevel + 1)
+	titleLabel.Text = string.format("Level up: %d > %d!", fromLevel, toLevel)
+	
+	local choicesData = data.choices or {}
+	for i = 1, 5 do
+		populateChoice(choices[i], choicesData[i], i)
+	end
+	
+	isTimerActive = false
+	if timerLabel then
+		timerLabel.Visible = false
+	end
+	if secondsLabel then
+		secondsLabel.Visible = false
+	end
+	
+	levelUpFrame.Visible = true
+end)
+
+-- Toggle banked hands menu
+levelUpToggle.MouseButton1Click:Connect(function()
+	if isPaused then
+		return
+	end
+	if bankedPendingCount <= 0 then
+		return
+	end
+	
+	if bankedOpen then
+		bankedOpen = false
+		if uiMode == "banked" then
+			uiMode = nil
+			levelUpFrame.Visible = false
+		end
+		BankedHandsOpen:FireServer({ open = false })
+	else
+		bankedOpen = true
+		BankedHandsOpen:FireServer({ open = true })
+	end
+end)
+
 -- Handle game pause
 GamePaused.OnClientEvent:Connect(function(data: any)
 	local reason = data.reason or "unknown"
@@ -352,6 +505,7 @@ GamePaused.OnClientEvent:Connect(function(data: any)
 	end
 	
 	if reason == "levelup" then
+		uiMode = "pause"
 		-- Update title text
 		titleLabel.Text = string.format("Level up: %d > %d!", fromLevel, toLevel)
 		
@@ -369,7 +523,7 @@ GamePaused.OnClientEvent:Connect(function(data: any)
 		end
 		
 		-- Setup timer if individual pause mode
-		if showTimer and timeout > 0 then
+		if showTimer and timeout > 0 and timerLabel and secondsLabel then
 			isTimerActive = true
 			pauseTimeout = timeout
 			pauseStartTime = tick()
@@ -378,8 +532,12 @@ GamePaused.OnClientEvent:Connect(function(data: any)
 			secondsLabel.Visible = true
 		else
 			isTimerActive = false
-			timerLabel.Visible = false
-			secondsLabel.Visible = false
+			if timerLabel then
+				timerLabel.Visible = false
+			end
+			if secondsLabel then
+				secondsLabel.Visible = false
+			end
 		end
 		
 		-- Show the GUI
@@ -417,11 +575,18 @@ GameUnpaused.OnClientEvent:Connect(function()
 	end
 	currentPauseToken = nil
 	debugPausedPosition = nil
+	if uiMode == "pause" then
+		uiMode = nil
+	end
 	
 	-- Stop timer
 	isTimerActive = false
-	timerLabel.Visible = false
-	secondsLabel.Visible = false
+	if timerLabel then
+		timerLabel.Visible = false
+	end
+	if secondsLabel then
+		secondsLabel.Visible = false
+	end
 	
 	-- Unfreeze player movement and animations
 	unfreezePlayer()
@@ -558,7 +723,14 @@ end)
 
 -- Skip button handler
 skipButton.MouseButton1Click:Connect(function()
-	-- Fire request to server
+	if uiMode == "banked" then
+		BankedHandsSelect:FireServer({
+			action = "skip",
+		})
+		return
+	end
+	
+	-- Fire request to server (pause mode)
 	RequestUnpause:FireServer({
 		action = "skip",
 		pauseToken = currentPauseToken,
@@ -576,6 +748,14 @@ for i, choiceFrame in ipairs(choices) do
 		button.MouseButton1Click:Connect(function()
 			local upgradeId = button:GetAttribute("UpgradeId")
 			if upgradeId then
+				if uiMode == "banked" then
+					BankedHandsSelect:FireServer({
+						action = "upgrade",
+						upgradeId = upgradeId,
+					})
+					return
+				end
+				
 				RequestUnpause:FireServer({
 					action = "upgrade",
 					upgradeId = upgradeId,
@@ -638,6 +818,10 @@ end
 -- Update timer countdown (for individual pause mode)
 RunService.RenderStepped:Connect(function()
 	if not isTimerActive then
+		return
+	end
+	if not secondsLabel then
+		isTimerActive = false
 		return
 	end
 	

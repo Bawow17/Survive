@@ -155,29 +155,49 @@ local function performFireBallBurst(playerEntity: number, player: Player): boole
 	local shots = math.max(stats.shotAmount, 1)
 	local totalSpread = math.min(math.abs(stats.targetingAngle) * 2, math.rad(10))
 	local step = shots > 1 and totalSpread / (shots - 1) or 0
-	local midpoint = (shots - 1) * 0.5
+	local offsets = table.create(shots)
+	if shots == 1 then
+		offsets[1] = 0
+	elseif shots % 2 == 1 then
+		local midpoint = (shots - 1) * 0.5
+		for i = 1, shots do
+			offsets[i] = (i - 1) - midpoint
+		end
+	else
+		local middleIndex = math.ceil(shots / 2)
+		offsets[middleIndex] = 0
+		local stepIndex = 1
+		for i = 1, shots do
+			if i ~= middleIndex then
+				local sign = (stepIndex % 2 == 1) and 1 or -1
+				local magnitude = math.floor((stepIndex + 1) / 2)
+				offsets[i] = sign * magnitude
+				stepIndex += 1
+			end
+		end
+	end
+	local targetingResult = TargetingService.acquireTarget({
+		playerEntity = playerEntity,
+		player = player,
+		origin = position,
+		maxRange = stats.targetingRange,
+		mode = stats.targetingMode,
+		stayHorizontal = stats.StayHorizontal,
+		alwaysStayHorizontal = stats.AlwaysStayHorizontal,
+		stickToPlayer = stats.StickToPlayer,
+		enablePrediction = stats.enablePrediction,
+		projectileSpeed = stats.projectileSpeed,
+		duration = stats.duration,
+		lockDuration = stats.targetLockDuration,
+		reacquireDelay = stats.reacquireDelay,
+		minTargetableAge = stats.minTargetableAge,
+		fovAngle = stats.targetingFov,
+		damage = stats.damage,
+		abilityId = FIREBALL_ID,
+	})
 
 	local created = 0
 	for shotIndex = 1, shots do
-		local targetingResult = TargetingService.acquireTarget({
-			playerEntity = playerEntity,
-			player = player,
-			origin = position,
-			maxRange = stats.targetingRange,
-			mode = stats.targetingMode,
-			stayHorizontal = stats.StayHorizontal,
-			alwaysStayHorizontal = stats.AlwaysStayHorizontal,
-			stickToPlayer = stats.StickToPlayer,
-			enablePrediction = stats.enablePrediction,
-			projectileSpeed = stats.projectileSpeed,
-			lockDuration = stats.targetLockDuration,
-			reacquireDelay = stats.reacquireDelay,
-			minTargetableAge = stats.minTargetableAge,
-			fovAngle = stats.targetingFov,
-			damage = stats.damage,
-			abilityId = FIREBALL_ID,
-		})
-
 		local targetEntity = targetingResult.targetEntity
 		if targetEntity then
 			local totalDamage = stats.damage
@@ -195,7 +215,7 @@ local function performFireBallBurst(playerEntity: number, player: Player): boole
 
 		local direction = baseDirection
 		if shots > 1 then
-			local offsetIndex = (shotIndex - 1) - midpoint
+			local offsetIndex = offsets[shotIndex] or 0
 			local finalAngle = offsetIndex * step
 			local cos = math.cos(finalAngle)
 			local sin = math.sin(finalAngle)

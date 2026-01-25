@@ -63,4 +63,7 @@ PlayerComponents.PlayerPauseState = world:component()
 -- PendingLevelUps component - Queue of level ups when gaining multiple levels at once
 PlayerComponents.PendingLevelUps = world:component()
 
+-- BankedHands component - Queue of level-up hands (no pause)
+PlayerComponents.BankedHands = world:component()
+
 return PlayerComponents

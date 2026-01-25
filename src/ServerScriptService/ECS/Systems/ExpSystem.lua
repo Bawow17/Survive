@@ -5,8 +5,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
-local PauseSystem = require(game.ServerScriptService.ECS.Systems.PauseSystem)
-local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
 local StatusEffectSystem = require(game.ServerScriptService.ECS.Systems.StatusEffectSystem)
 local UpgradeCounter = require(game.ServerScriptService.Balance.UpgradeCounter)
 
@@ -15,6 +13,7 @@ local ExpSystem = {}
 local world: any
 local Components: any
 local DirtyService: any
+local BankedHandsService: any
 
 local Experience: any
 local Level: any
@@ -84,6 +83,10 @@ function ExpSystem.init(worldRef: any, components: any, dirtyService: any)
 	end
 end
 
+function ExpSystem.setBankedHandsService(service: any)
+	BankedHandsService = service
+end
+
 -- Cache phase breakpoints
 local phase1End, phase2End, phase3End = UpgradeCounter.getPhaseBreakpoints()
 
@@ -119,6 +122,10 @@ local function calculateExpRequired(level: number): number
 	return math.floor(
 		phase2EndExp * (phases.Phase3.baseMultiplier ^ phase3Index) * (1 + phase3Index * 0.1)
 	)
+end
+
+function ExpSystem.getExpRequired(level: number): number
+	return calculateExpRequired(level)
 end
 
 -- Get highest player level in server (for catch-up system)
@@ -214,29 +221,13 @@ local function checkAndDeactivateCatchUp(playerEntity: number, player: Player, c
 end
 
 -- Handle level up event
-local function onLevelUp(playerEntity: number, newLevel: number, oldLevel: number, isQueuedLevel: boolean?)
-	-- Get player for pause trigger
-	local playerStats = world:get(playerEntity, PlayerStats)
-	if playerStats and playerStats.player then
-		local player = playerStats.player
-		
-		-- Select upgrade choices (5 options with weighted selection)
-		local upgradeChoices = UpgradeSystem.selectUpgradeChoices(playerEntity, newLevel, 5)
-		
-		-- If no upgrades available (all maxed and not a heal level), skip pause but still grant buffs
-		if #upgradeChoices == 0 then
-			StatusEffectSystem.grantInvincibility(playerEntity, 2.0, true, false, false)  -- Levelup invincibility (not spawn protection)
-			-- Speed boost removed - Bootstrap handles this in unpause callback
-			return
-		end
-		
-		-- NOTE: Buffs are granted AFTER unpause (in the unpause callback in Bootstrap)
-		-- to ensure the full 2-second duration is available after the pause ends
-		
-		-- For queued levels, PauseSystem.pause() updates existing pause state and increments pause token
-		-- First level-up or not queued: PauseSystem.pause() creates new pause state normally
-		PauseSystem.pause("levelup", player, oldLevel, newLevel, upgradeChoices)
+local function onLevelUp(playerEntity: number, newLevel: number, oldLevel: number)
+	if BankedHandsService and BankedHandsService.enqueueHand then
+		BankedHandsService.enqueueHand(playerEntity, oldLevel, newLevel)
 	end
+	-- Grant level-up buffs immediately (no level-up pause anymore)
+	StatusEffectSystem.grantInvincibility(playerEntity, 2.0, true, false, false)
+	StatusEffectSystem.grantSpeedBoost(playerEntity, 2.0, 1.15, "levelUp")
 end
 
 -- Apply exp directly to player (handles level ups)
@@ -268,7 +259,7 @@ local function applyExpDirect(playerEntity: number, amount: number)
 	exp.current = exp.current + finalAmount
 	exp.total = exp.total + finalAmount
 	
-	-- Collect all level ups into a queue
+	-- Collect all level ups for hand generation
 	local levelUps = {}
 	while exp.current >= exp.required and level.current < ItemBalance.MaxLevel do
 		exp.current = exp.current - exp.required
@@ -288,27 +279,9 @@ local function applyExpDirect(playerEntity: number, amount: number)
 		end
 	end
 	
-	-- If we have level ups, either start queue or add to existing queue
-	if #levelUps > 0 then
-		local pendingLevels = world:get(playerEntity, Components.PendingLevelUps)
-		if not pendingLevels then
-			-- No queue exists, create and trigger first level
-			world:set(playerEntity, Components.PendingLevelUps, {
-				levels = levelUps,
-				currentIndex = 1,
-			})
-			DirtyService.mark(playerEntity, "PendingLevelUps")
-			
-			-- Trigger first level up
-			onLevelUp(playerEntity, levelUps[1].to, levelUps[1].from)
-		else
-			-- Queue exists, add to it (will be processed when current unpause finishes)
-			for _, levelUp in ipairs(levelUps) do
-				table.insert(pendingLevels.levels, levelUp)
-			end
-			world:set(playerEntity, Components.PendingLevelUps, pendingLevels)
-			DirtyService.mark(playerEntity, "PendingLevelUps")
-		end
+	-- Generate banked hands for all level ups
+	for _, levelUp in ipairs(levelUps) do
+		onLevelUp(playerEntity, levelUp.to, levelUp.from)
 	end
 	
 	-- Cap exp if at max level

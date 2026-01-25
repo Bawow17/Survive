@@ -67,6 +67,7 @@ local EnemyExpDropSystem = require(game.ServerScriptService.ECS.Systems.EnemyExp
 local PauseSystem = require(game.ServerScriptService.ECS.Systems.PauseSystem)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local PickupService = require(game.ServerScriptService.Services.PickupService)
+local BankedHandsService = require(game.ServerScriptService.Services.BankedHandsService)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
 
 -- Upgrade Systems
@@ -298,6 +299,8 @@ function ECSWorldService.Initialize()
 	
 	-- Initialize EXP/Leveling systems
 	ExpSystem.init(world, Components, DirtyService)
+	BankedHandsService.init(world, Components, DirtyService, UpgradeSystem, ExpSystem, PassiveEffectSystem)
+	ExpSystem.setBankedHandsService(BankedHandsService)
 	PickupService.init(world, Components, ExpSystem, function(player)
 		return playerEntities[player]
 	end)
@@ -305,81 +308,6 @@ function ECSWorldService.Initialize()
 	PickupService.setExpSinkSystem(ExpSinkSystem)
 	EnemyExpDropSystem.init(world, Components, ECSWorldService, ExpSinkSystem, PickupService)
 	ExpOrbSpawner.init(world, Components, ECSWorldService, ExpSinkSystem, PickupService)
-	
-	-- Setup unpause callback (after ExpSystem and UpgradeSystem are initialized)
-	PauseSystem.setUnpauseCallback(function(action: string, player: Player, upgradeId: string?, pauseToken: number?)
-		local playerEntity = playerEntities[player]
-		
-		if action == "skip" then
-			if playerEntity then
-				ExpSystem.skipLevel(playerEntity)
-				-- Apply passive effects to restore walkspeed after skip
-				PassiveEffectSystem.applyToPlayer(playerEntity)
-			end
-		elseif action == "upgrade" then
-			if playerEntity and upgradeId then
-				-- Apply the selected upgrade
-				local success = UpgradeSystem.applyUpgrade(playerEntity, upgradeId)
-				if success then
-					-- Apply passive effects immediately (updates PassiveEffects component)
-					PassiveEffectSystem.applyToPlayer(playerEntity)
-				end
-			end
-		end
-		
-		-- Check if there are more queued levels (don't unpause yet)
-		-- Calculate current pause duration BEFORE processing next level (which creates new pause)
-		local pauseState = world:get(playerEntity, Components.PlayerPauseState)
-		local oldPauseDuration = 0
-		if pauseState and pauseState.pauseStartTime then
-			local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
-			oldPauseDuration = GameTimeSystem.getGameTime() - pauseState.pauseStartTime
-		end
-		
-		local hasMoreLevels = playerEntity and ExpSystem.processNextQueuedLevel(playerEntity)
-		if hasMoreLevels then
-			-- More levels queued, extend pause-aware buffs using OLD pause duration
-			if oldPauseDuration > 0 then
-				StatusEffectSystem.onPlayerPaused(playerEntity, oldPauseDuration)
-			end
-			
-			-- SAFETY: Verify pause state still exists after processing queued level
-			-- If pause state was lost, unpause to prevent softlock
-			local newPauseState = world:get(playerEntity, Components.PlayerPauseState)
-			if not newPauseState then
-				warn("[Bootstrap] ERROR: processNextQueuedLevel returned true but pause state is missing!")
-				warn("[Bootstrap] This indicates a race condition - forcing unpause to prevent softlock")
-				
-				-- Fallback: unpause the player to prevent being stuck
-				if not GameOptions.GlobalPause and playerEntity and player then
-					PauseSystem.unpausePlayer(playerEntity, player)
-				end
-			end
-			
-			-- Release this level's pause token (stay paused if more levels queued)
-			if not GameOptions.GlobalPause and playerEntity and player then
-				PauseSystem.releasePauseToken(playerEntity, player, pauseToken, "queue_next")
-			end
-			
-			return  -- Don't grant buffs yet or unpause (unless safety fallback triggered)
-		end
-		
-		-- Unpause FIRST (this extends pause-aware buffs like spawn protection)
-		if not GameOptions.GlobalPause and playerEntity then
-			-- Individual pause: release final pause token (unpause happens when count hits 0)
-			PauseSystem.releasePauseToken(playerEntity, player, pauseToken, "queue_empty")
-		else
-			-- Global pause: unpause entire game
-			PauseSystem.unpause()
-		end
-		
-		-- THEN grant level-up buffs (2s invincibility + 15% speed boost)
-		-- Speed boost now uses PassiveEffects system - stacks properly with Haste and Cloak
-		if playerEntity then
-			StatusEffectSystem.grantInvincibility(playerEntity, 2.0, true, false, false)  -- Levelup invincibility (not spawn protection)
-			StatusEffectSystem.grantSpeedBoost(playerEntity, 2.0, 1.15, "levelUp")  -- 15% speed boost for 2s
-		end
-	end)
 	
 	-- Initialize all ability systems from registry
 	for abilityId, ability in pairs(AbilityRegistry.getAll()) do
@@ -894,6 +822,15 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 			remaining = 0, 
 			max = 1.0  -- Per-ability cooldown, not a base value
 		}, "AttackCooldown")
+
+		-- Ensure BankedHands component exists (preserve queue on reconnect)
+		local existingHands = world:get(existingEntity, Components.BankedHands)
+		if not existingHands then
+			setComponent(existingEntity, Components.BankedHands, {
+				queue = {},
+				nextId = 1,
+			}, "BankedHands")
+		end
 		
 		-- Ensure player has starting abilities
 		local abilityData = world:get(existingEntity, Components.AbilityData)
@@ -995,6 +932,12 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		required = ItemBalance.BaseExpRequired,
 		total = PlayerBalance.StartingExperience
 	}, "Experience")
+
+	-- Initialize BankedHands component (queue for level-up hands)
+	setComponent(entity, Components.BankedHands, {
+		queue = {},
+		nextId = 1,
+	}, "BankedHands")
 	
 	-- Initialize Upgrades component (tracks upgrade progress)
 	setComponent(entity, Upgrades, {
