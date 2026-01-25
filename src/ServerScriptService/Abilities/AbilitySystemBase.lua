@@ -694,6 +694,17 @@ function AbilitySystemBase.createProjectile(
 		end
 
 		local explosionModelPath = balance.explosionModelPath
+		local explosionClientPath = explosionModelPath
+		if typeof(explosionModelPath) == "string" and explosionModelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
+			local serverPath = explosionModelPath:sub(#"ServerStorage." + 1)
+			local parts = string.split(serverPath, ".")
+			if #parts > 1 then
+				table.remove(parts, #parts)
+				local replicatedPath = table.concat(parts, ".")
+				ModelReplicationService.replicateModel(serverPath, replicatedPath)
+			end
+			explosionClientPath = "ReplicatedStorage." .. serverPath
+		end
 		local explosionRadius = 10
 		if explosionModelPath then
 			local hitboxSize = ModelHitboxHelper.getModelHitboxData(explosionModelPath)
@@ -711,7 +722,7 @@ function AbilitySystemBase.createProjectile(
 			delay = balance.explosionDelay or 0,
 			duration = balance.explosionDuration or 0.5,
 			tickInterval = balance.explosionTickInterval or 0,
-			modelPath = explosionModelPath,
+			modelPath = explosionClientPath,
 			scale = explosionScale,
 		}
 	end

@@ -289,30 +289,38 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 	local availableAbilities = getAvailableAbilityUpgrades(playerEntity)
 	local availablePassives = getAvailablePassiveUpgrades(playerEntity)
 	
-	-- Check for available attributes (level 15+ with max-level abilities)
-	-- Once requirements are met, attributes will keep appearing until one is selected
+	-- Check for available attributes (every 10 levels: 10/20/30/40/50)
+	-- Only one attribute choice is offered per eligible hand
 	local availableAttributes = {}
-	
-	if level >= 15 then
+	local attributeLevelInterval = 10
+	local maxAttributeLevel = 50
+	if level >= attributeLevelInterval and level % attributeLevelInterval == 0 and level <= maxAttributeLevel then
 		local maxLevelAbilities = getMaxLevelAbilities(playerEntity)
+		local attributeCandidates = {}
 		
 		for _, abilityInfo in ipairs(maxLevelAbilities) do
 			local attributes = getAvailableAttributesForAbility(playerEntity, abilityInfo.abilityId)
-			
-			-- Pick ONE random attribute per max-level ability
 			if #attributes > 0 then
-				local randomAttr = attributes[RNG:NextInteger(1, #attributes)]
-				table.insert(availableAttributes, {
-					id = abilityInfo.abilityId .. "_attr_" .. randomAttr.id,
+				table.insert(attributeCandidates, {
 					abilityId = abilityInfo.abilityId,
-					attributeId = randomAttr.id,
-					name = randomAttr.data.name,
-					desc = randomAttr.data.desc,
-					category = "attribute",
-					data = randomAttr.data,
-					color = randomAttr.data.color, -- Attribute color from Attributes.lua
+					attributes = attributes,
 				})
 			end
+		end
+		
+		if #attributeCandidates > 0 then
+			local pickedAbility = attributeCandidates[RNG:NextInteger(1, #attributeCandidates)]
+			local randomAttr = pickedAbility.attributes[RNG:NextInteger(1, #pickedAbility.attributes)]
+			table.insert(availableAttributes, {
+				id = pickedAbility.abilityId .. "_attr_" .. randomAttr.id,
+				abilityId = pickedAbility.abilityId,
+				attributeId = randomAttr.id,
+				name = randomAttr.data.name,
+				desc = randomAttr.data.desc,
+				category = "attribute",
+				data = randomAttr.data,
+				color = randomAttr.data.color, -- Attribute color from Attributes.lua
+			})
 		end
 	end
 	
@@ -344,19 +352,6 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 	
 	-- Player has upgraded mobility if they have anything OTHER than basic Dash
 	local hasMobilityUpgrade = mobilityData and mobilityData.equippedMobility ~= nil and mobilityData.equippedMobility ~= "Dash"
-	
-	-- CRITICAL FIX: Also check Upgrades component to ensure we don't offer mobility choices twice
-	-- If player has already selected a mobility, NEVER show mobility choices again (even if MobilityData sync issues occur)
-	if not hasMobilityUpgrade then
-		-- Check if player already has a recorded mobility selection from a past level
-		local upgrades = world:get(playerEntity, Upgrades)
-		if upgrades and upgrades.abilities then
-			-- Player has made ability upgrades, which means they've passed level 15+
-			-- In this case, they should have already selected a mobility (or chose to skip)
-			-- NEVER show mobility again if they've made ANY upgrades
-			hasMobilityUpgrade = true  -- Mark as having upgrade to prevent showing options
-		end
-	end
 	
 	-- Add mobility upgrade options if player meets level requirement and still has basic Dash
 	local availableMobility = {}
@@ -924,4 +919,3 @@ function UpgradeSystem.getAvailableUpgrades(playerEntity: number)
 end
 
 return UpgradeSystem
-

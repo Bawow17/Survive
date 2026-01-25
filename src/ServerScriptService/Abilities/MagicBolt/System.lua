@@ -491,6 +491,7 @@ function MagicBoltSystem.step(dt: number)
 										totalFrames = Config.animations.totalFrames,
 										duration = Config.animations.duration,
 										animationPriority = Config.animations.animationPriority,
+										anticipation = Config.animations.anticipation,
 									}
 								end
 								
@@ -500,7 +501,7 @@ function MagicBoltSystem.step(dt: number)
 								-- Notify client to play casting animation (even though clones shoot)
 								AbilityCastRemote:FireClient(player, MAGIC_BOLT_ID, cloneStats.cooldown, MAGIC_BOLT_NAME, {
 									projectileCount = burstCount,  -- Number of animation loops
-									pulseInterval = cloneStats.pulseInterval or 0,
+									pulseInterval = math.max(cloneInfo.pulseInterval or cloneStats.pulseInterval or 0, 0.01),
 									damageStats = damageStats,
 									animationData = animationData,
 								})
@@ -599,13 +600,18 @@ function MagicBoltSystem.step(dt: number)
 							totalFrames = Config.animations.totalFrames,
 							duration = Config.animations.duration,
 							animationPriority = Config.animations.animationPriority,
+							anticipation = Config.animations.anticipation,
 						}
 					end
 					
 					-- Notify client of ability cast with animation data
+					local animationPulseInterval = stats.pulseInterval or 0
+					if stats.projectileCount > 1 then
+						animationPulseInterval = math.max(animationPulseInterval, 0.01)
+					end
 					AbilityCastRemote:FireClient(player, MAGIC_BOLT_ID, stats.cooldown, MAGIC_BOLT_NAME, {
 						projectileCount = burstCount,  -- Number of animation loops
-						pulseInterval = stats.pulseInterval or 0,
+						pulseInterval = animationPulseInterval,
 						damageStats = damageStats,
 						animationData = animationData,  -- Send all animation config from server
 					})

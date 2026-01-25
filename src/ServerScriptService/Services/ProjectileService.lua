@@ -227,13 +227,14 @@ local function sendDespawn(record: ProjectileRecord, reason: string)
 	end
 end
 
-local function sendImpact(record: ProjectileRecord, position: Vector3, reason: string, aoe: AoeConfig?)
+local function sendImpact(record: ProjectileRecord, position: Vector3, reason: string, aoe: AoeConfig?, shouldDespawn: boolean?)
 	for player in pairs(record.recipients) do
 		if player and player.Parent == Players then
 			queueForPlayer(pendingImpacts, player, {
 				id = record.id,
 				pos = position,
 				reason = reason,
+				despawn = shouldDespawn ~= false,
 				aoe = aoe and {
 					radius = aoe.radius,
 				} or nil,
@@ -620,7 +621,7 @@ function ProjectileService.spawnProjectile(payload: {
 	return id
 end
 
-local function startExplosion(record: ProjectileRecord, center: Vector3, reason: string)
+local function startExplosion(record: ProjectileRecord, center: Vector3, reason: string, despawnOnImpact: boolean?)
 	if not record.aoe then
 		return
 	end
@@ -642,7 +643,7 @@ local function startExplosion(record: ProjectileRecord, center: Vector3, reason:
 		kind = record.kind,
 	}
 
-	sendImpact(record, center, reason, aoe)
+	sendImpact(record, center, reason, aoe, despawnOnImpact)
 end
 
 local function processExplosions(now: number, hitBudget: number): number
@@ -776,7 +777,7 @@ function ProjectileService.step(dt: number)
 		if record.expiresAt <= now then
 			local impactPos = record.lastPos
 			if record.aoe and record.aoe.triggerOnExpire then
-				startExplosion(record, impactPos, "exploded")
+				startExplosion(record, impactPos, "exploded", true)
 				despawnProjectile(record, "exploded", nil)
 			else
 				despawnProjectile(record, "expired", impactPos)
@@ -898,9 +899,12 @@ function ProjectileService.step(dt: number)
 					end
 
 					if record.aoe and record.aoe.trigger == "hit" then
-						startExplosion(record, hitPos, "exploded")
-						hit = true
-						hitReason = "exploded"
+						local shouldDespawn = record.pierceRemaining <= 0
+						startExplosion(record, hitPos, "exploded", shouldDespawn)
+						if shouldDespawn then
+							hit = true
+							hitReason = "exploded"
+						end
 					elseif record.pierceRemaining <= 0 then
 						hit = true
 					end

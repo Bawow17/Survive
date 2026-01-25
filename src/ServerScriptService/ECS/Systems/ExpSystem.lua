@@ -429,7 +429,8 @@ function ExpSystem.processNextQueuedLevel(playerEntity: number): boolean
 end
 
 -- PUBLIC API: Skip current level (demote and refund 40% exp)
-function ExpSystem.skipLevel(playerEntity: number)
+-- refundBaseExp: optional exp value to base the 40% refund on (e.g., skipped hand level)
+function ExpSystem.skipLevel(playerEntity: number, refundBaseExp: number?)
 	if not world then
 		warn("[ExpSystem] World not initialized")
 		return
@@ -460,7 +461,8 @@ function ExpSystem.skipLevel(playerEntity: number)
 	
 	-- ADD 40% refund to current exp (don't reset, just add it back)
 	-- This way player keeps any chunked/overflow exp and gets the 40% refund
-	exp.current = exp.current + math.floor(exp.required * 0.4)
+	local refundBase = refundBaseExp or exp.required
+	exp.current = exp.current + math.floor(refundBase * 0.4)
 	
 	-- Update components
 	DirtyService.setIfChanged(world, playerEntity, Experience, exp, "Experience")

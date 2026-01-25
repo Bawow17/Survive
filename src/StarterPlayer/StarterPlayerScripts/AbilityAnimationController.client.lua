@@ -29,6 +29,7 @@ local isPaused = false
 -- Animation speed cap (prevents animations from looking too fast)
 local MAX_ANIMATION_SPEED = 3.8  -- Cap at 3.8x speed for natural look
 local MAX_ANIMATION_LOOPS = 7  -- Max number of animations to play per cast
+local LAST_SEGMENT_SLOW_FACTOR = 0.4  -- Slow the final segment, speed others up to keep total time
 
 -- Get humanoid and animator
 local function getAnimator(): Animator?
@@ -107,7 +108,8 @@ local function playAnimationSegment(
 	pulseInterval: number,
 	isFinal: boolean,
 	animationData: any,
-	isSingleProjectileFastCooldown: boolean?
+	isSingleProjectileFastCooldown: boolean?,
+	targetDuration: number?
 ): boolean
 	if not animationData then
 		return false
@@ -124,43 +126,38 @@ local function playAnimationSegment(
 		return false
 	end
 	
-	-- Calculate animation speed based on whether it needs to fit in pulseInterval
+	-- Calculate animation speed based on whether it needs to fit in pulseInterval / targetDuration
 	local speedScale = 1.0
 	local waitTime = animationData.duration
-	
-	if isFinal then
-		-- Final animation always plays at normal speed with full winddown
+	local frameRatio = animationData.loopFrame / animationData.totalFrames
+	local naturalLoopTime = animationData.duration * frameRatio
+	local naturalTime = isFinal and animationData.duration or naturalLoopTime
+
+	if targetDuration and targetDuration > 0 then
+		if targetDuration < naturalTime then
+			local uncappedSpeed = naturalTime / targetDuration
+			speedScale = math.min(uncappedSpeed, MAX_ANIMATION_SPEED)
+			waitTime = naturalTime / speedScale
+		else
+			speedScale = 1.0
+			waitTime = naturalTime
+		end
+	elseif isFinal then
+		-- Final animation plays full duration at normal speed when no target duration is provided
 		speedScale = 1.0
 		waitTime = animationData.duration
 	elseif isSingleProjectileFastCooldown and animationData.cooldownDuration then
 		-- Single-projectile fast cooldown: speed up to fit within cooldown
-		local frameRatio = animationData.loopFrame / animationData.totalFrames
-		local naturalLoopTime = animationData.duration * frameRatio
-		
-		-- Speed up animation to fit in cooldown duration
 		local uncappedSpeed = naturalLoopTime / animationData.cooldownDuration
 		speedScale = math.min(uncappedSpeed, MAX_ANIMATION_SPEED)
-		
-		-- Wait for cooldown duration (animation will be sped up to fit)
 		waitTime = animationData.cooldownDuration
 	else
 		-- For non-final animations (first and loop), check if we need to speed up
-		-- Natural time to loop frame (where animation would be cut)
-		local frameRatio = animationData.loopFrame / animationData.totalFrames
-		local naturalLoopTime = animationData.duration * frameRatio
-		
-		-- Only speed up if pulse interval is shorter than natural loop time
-		-- Server already handles anticipation delay, so use pulse interval directly
 		if pulseInterval > 0.01 and pulseInterval < naturalLoopTime then
-			-- Speed up so animation reaches loop frame exactly at pulseInterval
 			local uncappedSpeed = naturalLoopTime / pulseInterval
-			speedScale = math.min(uncappedSpeed, MAX_ANIMATION_SPEED)  -- Cap at max speed
-			
-			-- Recalculate wait time based on CAPPED speed (not pulse interval)
-			-- This ensures animation actually has time to play at the capped speed
+			speedScale = math.min(uncappedSpeed, MAX_ANIMATION_SPEED)
 			waitTime = naturalLoopTime / speedScale
 		else
-			-- Play at normal speed, stop at loop frame naturally
 			speedScale = 1.0
 			waitTime = naturalLoopTime
 		end
@@ -279,7 +276,15 @@ local function playAbilityCast(
 		
 		-- Cap animation loops to prevent spam on high projectile counts
 		local cappedCount = math.min(projectileCount, MAX_ANIMATION_LOOPS)
-		
+		local anticipation = (animationData and typeof(animationData.anticipation) == "number") and animationData.anticipation or 0
+		local basePulseInterval = pulseInterval
+		if projectileCount <= 1 then
+			basePulseInterval = 0
+		end
+		local totalSchedule = 0
+		local elapsedSchedule = 0
+		local segmentIntervals = table.create(cappedCount)
+
 		-- Check if this is a single-projectile ability with fast cooldown
 		-- If cooldown is shorter than animation, just replay "first" animation
 		local isSingleProjectileFastCooldown = false
@@ -296,6 +301,58 @@ local function playAbilityCast(
 			end
 		end
 		
+		-- Compute intended total schedule length for this cast
+		for i = 1, cappedCount do
+			local segmentInterval = basePulseInterval
+			if i == 1 and not skipFirstAnimation and projectileCount > 1 and anticipation > segmentInterval then
+				segmentInterval = anticipation
+			end
+			segmentIntervals[i] = segmentInterval
+			if segmentInterval > 0 then
+				totalSchedule += segmentInterval
+			end
+		end
+		
+		local totalTarget = (animationData and animationData.cooldownDuration) or 0
+		local scheduleScale = 1.0
+		if totalTarget > 0 and totalSchedule > 0 and totalTarget < totalSchedule then
+			scheduleScale = totalTarget / totalSchedule
+		end
+		
+		-- Scale all segments to fit within cooldown (if needed)
+		if scheduleScale ~= 1 then
+			for i = 1, cappedCount do
+				local interval = segmentIntervals[i] or 0
+				if interval > 0 then
+					segmentIntervals[i] = interval * scheduleScale
+				end
+			end
+		end
+		
+		-- Bias: speed up all but the last segment, slow the last slightly (total time unchanged)
+		if cappedCount > 1 and LAST_SEGMENT_SLOW_FACTOR > 0 then
+			local totalScaled = 0
+			for i = 1, cappedCount do
+				totalScaled += segmentIntervals[i] or 0
+			end
+			local lastBase = segmentIntervals[cappedCount] or 0
+			local remainingTotal = totalScaled - lastBase
+			if totalScaled > 0 and remainingTotal > 0 and lastBase > 0 then
+				local desiredLast = lastBase * (1 + LAST_SEGMENT_SLOW_FACTOR)
+				if desiredLast >= totalScaled then
+					desiredLast = totalScaled * 0.95
+				end
+				local scaleOthers = (totalScaled - desiredLast) / remainingTotal
+				if scaleOthers < 0 then
+					scaleOthers = 0
+				end
+				for i = 1, cappedCount - 1 do
+					segmentIntervals[i] = (segmentIntervals[i] or 0) * scaleOthers
+				end
+				segmentIntervals[cappedCount] = desiredLast
+			end
+		end
+
 		-- Play animation sequence for each projectile
 		-- Animation pattern: 1 (first), then alternating 2/3 (loop/last)
 		-- When skipping first, offset the pattern but still play same number of animations
@@ -340,12 +397,16 @@ local function playAbilityCast(
 			end
 			
 			-- During rapid-fire, don't treat as final (keep speed up for smooth flow)
-			-- Only play final winddown if this is the last animation AND not in rapid-fire
-			-- NEVER treat as final for single-projectile fast cooldown (always same animation)
-			local isFinalAnimation = (i == cappedCount) and not skipFirstAnimation and not isSingleProjectileFastCooldown
+			-- Only skip final winddown for single-projectile fast cooldown (always same animation)
+			local isFinalAnimation = (i == cappedCount) and not isSingleProjectileFastCooldown
 			
 			-- Play animation segment
-			local success = playAnimationSegment(abilityId, animType, pulseInterval, isFinalAnimation, animationData, isSingleProjectileFastCooldown)
+			local segmentInterval = segmentIntervals[i] or basePulseInterval
+			local targetDuration: number? = nil
+			if segmentInterval > 0 then
+				targetDuration = segmentInterval
+			end
+			local success = playAnimationSegment(abilityId, animType, segmentInterval, isFinalAnimation, animationData, isSingleProjectileFastCooldown, targetDuration)
 			if not success then
 				break
 			end
@@ -354,6 +415,10 @@ local function playAbilityCast(
 			-- Don't update for single-projectile abilities (always plays "first")
 			if currentCastId == thisCastId and projectileCount > 1 then
 				lastAnimationType[abilityId] = animType
+			end
+
+			if segmentInterval > 0 then
+				elapsedSchedule += segmentInterval
 			end
 		end
 		
@@ -429,4 +494,3 @@ localPlayer.CharacterAdded:Connect(function(character)
 	-- Wait for humanoid and animator
 	character:WaitForChild("Humanoid")
 end)
-

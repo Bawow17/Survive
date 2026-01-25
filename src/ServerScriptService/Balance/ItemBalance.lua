@@ -52,7 +52,7 @@ return {
 	-- Enemy Death Drop Settings
 	EnemyDrops = {
 		Enabled = true,
-		BaseExpMultiplier = 1.3,  -- Baseline multiplier for all drops
+		BaseExpMultiplier = 10.3,  -- Baseline multiplier for all drops
 		HPScaling = 1.005,  -- Every 100 HP = 1.005x exp (compound: (1.005)^(HP/100))
 		
 		-- Drop weights (separate from ambient)

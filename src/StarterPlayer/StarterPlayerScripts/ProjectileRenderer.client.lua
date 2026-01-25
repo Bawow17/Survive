@@ -77,6 +77,7 @@ local modelPoolByPath: {[string]: {Model}} = {}
 local impactPoolByPath: {[string]: {Model}} = {}
 local MAX_POOL_SIZE = 80
 local MAX_IMPACT_POOL_SIZE = 20
+local explosionTokenCounter = 0
 
 local enemiesFolder: Folder? = workspace:FindFirstChild("Enemies") :: Folder?
 local enemySnapshot: {{pos: Vector3}} = {}
@@ -130,6 +131,12 @@ local function configureModel(model: Model): (BasePart?, {BasePart})
 	end
 	for _, descendant in ipairs(model:GetDescendants()) do
 		if descendant:IsA("BasePart") then
+			if descendant:GetAttribute("__OrigTransparency") == nil then
+				descendant:SetAttribute("__OrigTransparency", descendant.Transparency)
+			end
+			if descendant:GetAttribute("__OrigSize") == nil then
+				descendant:SetAttribute("__OrigSize", descendant.Size)
+			end
 			descendant.Anchored = true
 			descendant.CanCollide = false
 			descendant.CanTouch = false
@@ -242,24 +249,56 @@ local function updateModelTransform(record: ProjectileRecord, position: Vector3,
 end
 
 local function playExplosionVfx(model: Model)
-	local vfxPart = model:FindFirstChild("Part")
-	if not (vfxPart and vfxPart:IsA("BasePart")) then
+	local parts = {}
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			table.insert(parts, descendant)
+		end
+	end
+	if #parts == 0 then
 		return
 	end
-	local part = vfxPart :: BasePart
-	local originalSize = part.Size
-	local originalTransparency = part.Transparency
+	explosionTokenCounter += 1
+	local token = explosionTokenCounter
+	model:SetAttribute("__ExplosionToken", token)
 
-	part.Size = Vector3.new(0, 0, 0)
-	part.Transparency = originalTransparency
+	local startScale = 0.001
+	for _, part in ipairs(parts) do
+		local originalSize = part:GetAttribute("__OrigSize")
+		if typeof(originalSize) ~= "Vector3" then
+			originalSize = part.Size
+			part:SetAttribute("__OrigSize", originalSize)
+		end
+		local originalTransparency = part:GetAttribute("__OrigTransparency")
+		if typeof(originalTransparency) ~= "number" then
+			originalTransparency = part.Transparency
+			part:SetAttribute("__OrigTransparency", originalTransparency)
+		end
+		part.Size = Vector3.new(
+			originalSize.X * startScale,
+			originalSize.Y * startScale,
+			originalSize.Z * startScale
+		)
+		part.Transparency = originalTransparency
+	end
 
 	local expandStepDuration = EXPLOSION_STEPS > 0 and (EXPLOSION_EXPAND_DURATION / EXPLOSION_STEPS) or 0
 	for step = 1, EXPLOSION_STEPS do
-		local sizeAlpha = step / EXPLOSION_STEPS
+		local t = step / EXPLOSION_STEPS
+		local sizeAlpha = startScale + (1 - startScale) * t
 		local scheduledDelay = (step - 1) * expandStepDuration
 		task.delay(scheduledDelay, function()
-			if part and part.Parent then
-				part.Size = originalSize * sizeAlpha
+			if model:GetAttribute("__ExplosionToken") ~= token then
+				return
+			end
+			for _, part in ipairs(parts) do
+				if part and part.Parent then
+					local originalSize = part:GetAttribute("__OrigSize")
+					if typeof(originalSize) ~= "Vector3" then
+						originalSize = part.Size
+					end
+					part.Size = originalSize * sizeAlpha
+				end
 			end
 		end)
 	end
@@ -267,19 +306,37 @@ local function playExplosionVfx(model: Model)
 	local fadeStepDuration = EXPLOSION_STEPS > 0 and (EXPLOSION_FADE_DURATION / EXPLOSION_STEPS) or 0
 	for step = 1, EXPLOSION_STEPS do
 		local fadeAlpha = step / EXPLOSION_STEPS
-		local transparencyTarget = originalTransparency + (1 - originalTransparency) * fadeAlpha
 		local scheduledDelay = EXPLOSION_EXPAND_DURATION + (step - 1) * fadeStepDuration
 		task.delay(scheduledDelay, function()
-			if part and part.Parent then
-				part.Transparency = transparencyTarget
+			if model:GetAttribute("__ExplosionToken") ~= token then
+				return
+			end
+			for _, part in ipairs(parts) do
+				if part and part.Parent then
+					local originalTransparency = part:GetAttribute("__OrigTransparency")
+					if typeof(originalTransparency) ~= "number" then
+						originalTransparency = part.Transparency
+					end
+					local transparencyTarget = originalTransparency + (1 - originalTransparency) * fadeAlpha
+					part.Transparency = transparencyTarget
+				end
 			end
 		end)
 	end
 
 	task.delay(EXPLOSION_EXPAND_DURATION + EXPLOSION_FADE_DURATION + 0.05, function()
-		if part and part.Parent then
-			part.Transparency = 1
-			part.Size = originalSize
+		if model:GetAttribute("__ExplosionToken") ~= token then
+			return
+		end
+		for _, part in ipairs(parts) do
+			if part and part.Parent then
+				local originalSize = part:GetAttribute("__OrigSize")
+				if typeof(originalSize) ~= "Vector3" then
+					originalSize = part.Size
+				end
+				part.Transparency = 1
+				part.Size = originalSize
+			end
 		end
 	end)
 end
@@ -303,6 +360,11 @@ local function spawnImpactEffect(effect: any, position: Vector3)
 			pcall(function()
 				model:ScaleTo(scale)
 			end)
+			for _, descendant in ipairs(model:GetDescendants()) do
+				if descendant:IsA("BasePart") then
+					descendant:SetAttribute("__OrigSize", descendant.Size)
+				end
+			end
 		end
 		model:PivotTo(CFrame.new(position))
 		playExplosionVfx(model)
@@ -582,7 +644,9 @@ ProjectilesImpactBatch.OnClientEvent:Connect(function(payloads: any)
 		if impactPos and entry.effect then
 			spawnImpactEffect(entry.effect, impactPos)
 		end
-		despawnProjectile(id)
+		if entry.despawn ~= false then
+			despawnProjectile(id)
+		end
 	end
 end)
 

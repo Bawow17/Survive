@@ -182,12 +182,11 @@ function BankedHandsService.init(worldRef: any, components: any, dirtyService: a
 
 		local action = data and data.action
 		if action == "skip" then
-			local refund = math.floor((hand.requiredExp or 0) * 0.4)
 			table.remove(hands.queue, 1)
 			DirtyService.mark(playerEntity, "BankedHands")
 			sendCount(player, #hands.queue, false)
-			if refund > 0 and ExpSystem and ExpSystem.addExperience then
-				ExpSystem.addExperience(playerEntity, refund)
+			if ExpSystem and ExpSystem.skipLevel then
+				ExpSystem.skipLevel(playerEntity, hand.requiredExp)
 			end
 		elseif action == "upgrade" then
 			local upgradeId = data and data.upgradeId
