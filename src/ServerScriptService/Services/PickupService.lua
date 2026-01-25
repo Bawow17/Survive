@@ -61,6 +61,7 @@ local REFRESH_INTERVAL = 0.5
 
 local REQUEST_DISTANCE_BUFFER = 3
 local MAGNET_RADIUS_MULTIPLIER = 6
+local GLOBAL_MAGNET_RADIUS = 1e9
 
 local function ensurePlayerKnown(player: Player): {[number]: boolean}
 	local known = knownByPlayer[player]
@@ -254,7 +255,14 @@ local function flushVisibilityForPlayer(player: Player, playerEntity: number, pl
 	local spawnPayloads = {}
 	local despawnIds = {}
 
-	local nearby = gatherPickupsNear(playerPos, SPAWN_SEND_RADIUS, playerEntity)
+	local spawnRadius = SPAWN_SEND_RADIUS
+	local despawnRadius = DESPAWN_SEND_RADIUS
+	if isMagnetActive(playerEntity) then
+		spawnRadius = GLOBAL_MAGNET_RADIUS
+		despawnRadius = GLOBAL_MAGNET_RADIUS
+	end
+
+	local nearby = gatherPickupsNear(playerPos, spawnRadius, playerEntity)
 	for _, record in ipairs(nearby) do
 		if not known[record.id] then
 			known[record.id] = true
@@ -264,7 +272,7 @@ local function flushVisibilityForPlayer(player: Player, playerEntity: number, pl
 	end
 
 	-- Despawn pickups that are far away to keep client maps small.
-	local despawnRadiusSq = DESPAWN_SEND_RADIUS * DESPAWN_SEND_RADIUS
+	local despawnRadiusSq = despawnRadius * despawnRadius
 	for pickupId in pairs(known) do
 		local record = pickups[pickupId]
 		if not record or record.claimed then
@@ -388,7 +396,7 @@ function PickupService.init(worldRef: any, components: any, expSystemRef: any, g
 		local baseRadius, magnetRadius = buildPickupRadius(player)
 		local allowedRadius = baseRadius
 		if not record.isSink and isMagnetActive(playerEntity) then
-			allowedRadius = math.max(allowedRadius, magnetRadius)
+			allowedRadius = math.max(allowedRadius, magnetRadius, GLOBAL_MAGNET_RADIUS)
 		end
 		allowedRadius = allowedRadius + REQUEST_DISTANCE_BUFFER
 		local allowedSq = allowedRadius * allowedRadius

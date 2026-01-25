@@ -320,6 +320,31 @@ local function getEnemyAimPosition(enemyId: number): Vector3?
 	return nil
 end
 
+local PETAL_AIM_OFFSET_MAX = 30
+
+local function getEnemyBasePosition(enemyId: number): Vector3?
+	local pos = world and world:get(enemyId, Position)
+	if pos then
+		return Vector3.new(pos.x, pos.y, pos.z)
+	end
+	return nil
+end
+
+local function getPetalTargetPosition(enemyId: number): Vector3?
+	local basePos = getEnemyBasePosition(enemyId)
+	local aimPoint = TargetingService.getEnemyAimPoint(enemyId)
+	if not aimPoint then
+		return basePos
+	end
+	if basePos then
+		local offset = aimPoint - basePos
+		if offset.Magnitude > PETAL_AIM_OFFSET_MAX then
+			return basePos
+		end
+	end
+	return aimPoint
+end
+
 local function getOwnerPosition(record: ProjectileRecord): Vector3?
 	local ownerEntity = record.petal and record.petal.ownerEntity or record.ownerEntity
 	if not ownerEntity then
@@ -379,7 +404,7 @@ local assignments: {[number]: {closest: number?, toughest: number?}} = {}
 		for _, enemyId in ipairs(candidates) do
 			local health = world:get(enemyId, Health)
 			if health and health.current and health.current > 0 then
-				local enemyPos = getEnemyAimPosition(enemyId)
+				local enemyPos = getPetalTargetPosition(enemyId)
 				if enemyPos then
 					local distSq = distanceSq(entry.pos, enemyPos)
 					if distSq <= entry.range * entry.range then
@@ -1132,7 +1157,7 @@ function ProjectileService.step(dt: number)
 				end
 			end
 			if target then
-				local targetPos = getEnemyAimPosition(target)
+				local targetPos = getPetalTargetPosition(target)
 				if not targetPos then
 					target = nil
 				elseif ownerPos and distanceSq(ownerPos, targetPos) > (petal.maxRange * petal.maxRange) then
@@ -1153,7 +1178,7 @@ function ProjectileService.step(dt: number)
 			petal.targetEntity = target
 
 			if target and ownerPos then
-				local targetPos = getEnemyAimPosition(target)
+				local targetPos = getPetalTargetPosition(target)
 				if targetPos and distanceSq(ownerPos, targetPos) <= (petal.maxRange * petal.maxRange) then
 					local desired = targetPos - record.lastPos
 					if petal.stayHorizontal or petal.alwaysStayHorizontal then
