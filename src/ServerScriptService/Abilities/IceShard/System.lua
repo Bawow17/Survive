@@ -133,9 +133,23 @@ end
 
 local function getAdjustedIceShardStats(playerEntity: number, abilityData: any): (any, string?)
 	local stats = AbilitySystemBase.getAbilityStats(playerEntity, ICESHARD_ID, Balance)
+	local baseShotAmount = math.max(stats.shotAmount or 1, 1)
+	if stats.damage then
+		stats.damage = stats.damage * (1.7 * baseShotAmount)
+	end
 	local attributeId = getIceShardAttribute(playerEntity, abilityData)
 	if attributeId == "CrystalShards" then
 		applyCrystalShardsOverrides(stats)
+		if stats.damage then
+			stats.damage = stats.damage * 0.8
+		end
+	elseif attributeId == "ImpalingFrost" then
+		local effectiveShotAmount = baseShotAmount + 2
+		local excessShots = math.max(effectiveShotAmount - 1, 0)
+		stats.shotAmount = 1
+		stats.projectileCount = math.max((stats.projectileCount or 1) + 1 + excessShots, 1)
+		stats.pulseInterval = 0.02
+		stats.targetingMode = 0
 	end
 	return stats, attributeId
 end
@@ -221,7 +235,7 @@ local function spawnPetalProjectile(
 
 	local petalStats = {
 		modelPath = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard.FrozenPetals",
-		damage = stats.damage,
+		damage = (stats.damage or 0) * (special.petalDamageMultiplier or 1),
 		projectileSpeed = (stats.projectileSpeed or 0) * (special.petalSpeedMultiplier or 0.5),
 		penetration = 999,
 		duration = special.petalLifetime or 999999,
@@ -235,6 +249,21 @@ local function spawnPetalProjectile(
 		AlwaysStayHorizontal = stats.AlwaysStayHorizontal,
 		StickToPlayer = false,
 	}
+
+	local petalRadius: number? = nil
+	local hitboxSize = ModelHitboxHelper.getModelHitboxData(petalStats.modelPath)
+	if not hitboxSize and typeof(petalStats.modelPath) == "string" then
+		local serverPath = petalStats.modelPath:gsub("^ReplicatedStorage%.", "ServerStorage.")
+		if serverPath ~= petalStats.modelPath then
+			hitboxSize = ModelHitboxHelper.getModelHitboxData(serverPath)
+		end
+	end
+	if hitboxSize then
+		local baseRadius = math.max(hitboxSize.X, hitboxSize.Z) * 0.5
+		local scale = petalStats.scale or 1
+		local radiusMult = special.petalRadiusMultiplier or 1
+		petalRadius = baseRadius * scale * radiusMult
+	end
 
 	local targetPoint = position + direction * (petalStats.projectileSpeed * petalStats.duration)
 	return AbilitySystemBase.createProjectile(
@@ -255,6 +284,7 @@ local function spawnPetalProjectile(
 				alwaysStayHorizontal = petalStats.AlwaysStayHorizontal,
 				role = (index == 1 and "closest") or (index == 2 and "toughest") or "closest",
 			},
+			radius = petalRadius,
 		}
 	)
 end
@@ -325,6 +355,7 @@ local function updateFrozenPetals(playerEntity: number, player: Player, stats: a
 	state.repelTimer = (state.repelTimer or (special.repelInterval or 3)) - dt
 	if state.repelTimer <= 0 then
 		spawnRepelPulse(playerEntity, player, special)
+		AbilityCastRemote:FireClient(player, ICESHARD_ID, special.repelInterval or 3, ICESHARD_NAME)
 		state.repelTimer = special.repelInterval or 3
 	end
 end

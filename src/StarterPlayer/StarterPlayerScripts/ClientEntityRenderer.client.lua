@@ -93,6 +93,7 @@ local sharedComponents: {[string]: {[number]: any}} = {
 type RenderRecord = {
 	model: Model,
 	entityType: string,
+	entitySubtype: string?,
 	velocity: any?,
 	facingDirection: any?,
 	lastUpdate: number,
@@ -130,6 +131,8 @@ type RenderRecord = {
 	impaleModel: Model?,
 	impaleParts: {BasePart}?,
 	impaleToken: number?,
+	impaleFollowPart: BasePart?,
+	impaleFollowOffset: CFrame?,
 }
 
 local renderedEntities: {[string]: RenderRecord} = {}
@@ -359,6 +362,61 @@ local function restoreModelTransparency(record: RenderRecord)
 	end
 end
 
+local function forceEnemyVisible(record: RenderRecord)
+	if not record then
+		return
+	end
+	if record.fadeParts then
+		for _, part in ipairs(record.fadeParts) do
+			if part and part.Parent then
+				local original = record.fadePartOriginals and record.fadePartOriginals[part]
+				if typeof(original) ~= "number" or original >= 0.95 then
+					original = 0
+					if record.fadePartOriginals then
+						record.fadePartOriginals[part] = original
+					end
+				end
+				part.Transparency = original
+			end
+		end
+	end
+	if record.fadeDecals then
+		for _, decal in ipairs(record.fadeDecals) do
+			if decal and decal.Parent then
+				local original = record.fadeDecalOriginals and record.fadeDecalOriginals[decal]
+				if typeof(original) ~= "number" or original >= 0.95 then
+					original = 0
+					if record.fadeDecalOriginals then
+						record.fadeDecalOriginals[decal] = original
+					end
+				end
+				decal.Transparency = original
+			end
+		end
+	end
+	if record.fadeTextures then
+		for _, texture in ipairs(record.fadeTextures) do
+			if texture and texture.Parent then
+				local original = record.fadeTextureOriginals and record.fadeTextureOriginals[texture]
+				if typeof(original) ~= "number" or original >= 0.95 then
+					original = 0
+					if record.fadeTextureOriginals then
+						record.fadeTextureOriginals[texture] = original
+					end
+				end
+				texture.Transparency = original
+			end
+		end
+	end
+	if record.fadeSurfaceGuis then
+		for _, surfaceGui in ipairs(record.fadeSurfaceGuis) do
+			if surfaceGui and surfaceGui.Parent then
+				surfaceGui.Enabled = true
+			end
+		end
+	end
+end
+
 local function resetModelForPool(record: RenderRecord, model: Model)
 	restoreModelTransparency(record)
 	local highlight = model:FindFirstChild("HitFlash")
@@ -488,7 +546,7 @@ local function toVelocityVector(velocityData: any): Vector3?
 	return nil
 end
 
-local function findModelByPath(modelPath: string): Model?
+local function findModelByPath(modelPath: string): Instance?
     local current: Instance? = game
     for _, partName in ipairs(string.split(modelPath, ".")) do
         if not current then
@@ -500,33 +558,43 @@ local function findModelByPath(modelPath: string): Model?
             current = current:FindFirstChild(partName)
         end
     end
-    if current and current:IsA("Model") then
-        return current
-    end
-    return nil
+	if current and (current:IsA("Model") or current:IsA("BasePart")) then
+		return current
+	end
+	return nil
+end
+
+local function getImpaleFolder(): Folder
+	local folder = Workspace:FindFirstChild("ImpaleEffects")
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "ImpaleEffects"
+		folder.Parent = Workspace
+	end
+	return folder
 end
 
 local function buildImpaleParts(model: Model): {BasePart}
-    local parts = {}
-    local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-    if primary and not model.PrimaryPart then
-        model.PrimaryPart = primary
-    end
-    for _, descendant in ipairs(model:GetDescendants()) do
-        if descendant:IsA("BasePart") then
-            if descendant:GetAttribute("__ImpaleOrigTransparency") == nil then
-                descendant:SetAttribute("__ImpaleOrigTransparency", descendant.Transparency)
-            end
-            descendant.Transparency = descendant:GetAttribute("__ImpaleOrigTransparency") :: number
-            descendant.Anchored = false
-            descendant.CanCollide = false
-            descendant.CanTouch = false
-            descendant.CanQuery = false
-            descendant.Massless = true
-            table.insert(parts, descendant)
-        end
-    end
-    return parts
+	local parts = {}
+	local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+	if primary and not model.PrimaryPart then
+		model.PrimaryPart = primary
+	end
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			if descendant:GetAttribute("__ImpaleOrigTransparency") == nil then
+				descendant:SetAttribute("__ImpaleOrigTransparency", descendant.Transparency)
+			end
+			descendant.Transparency = descendant:GetAttribute("__ImpaleOrigTransparency") :: number
+			descendant.Anchored = true
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+			descendant.Massless = true
+			table.insert(parts, descendant)
+		end
+	end
+	return parts
 end
 
 local function weldImpaleModel(model: Model, target: BasePart)
@@ -598,6 +666,7 @@ local deathAnimations: {[Model]: {
 	fadeStarted: boolean,
 	expireTime: number,
 }} = {}
+local STATUS_EFFECT_OFFSETS: {[string]: {offset: Vector3, rotation: Vector3}} = {}
 
 -- Maximum render distance for projectiles
 local MAX_RENDER_DISTANCE = 500 -- Cull projectiles beyond this distance
@@ -611,6 +680,26 @@ local CULL_IN_DIST = ENEMY_CULL_IN_DIST -- Small hysteresis window (keeps visual
 local CULL_TOGGLE_COOLDOWN = 0.75
 local CULL_OUT_DIST_SQ = CULL_OUT_DIST * CULL_OUT_DIST
 local CULL_IN_DIST_SQ = CULL_IN_DIST * CULL_IN_DIST
+
+-- Status effect offsets per enemy subtype (forward = -Z in model space)
+STATUS_EFFECT_OFFSETS = {
+	Zombie = {
+		offset = Vector3.new(0, 0, 5),
+		rotation = Vector3.new(0, 0, 0),
+	},
+	Charger = {
+		offset = Vector3.new(0, -1, -3),
+		rotation = Vector3.new(math.rad(90), 0, 0),
+	},
+}
+
+local function getStatusEffectOffsetCFrame(entitySubtype: string?): CFrame
+	if entitySubtype and STATUS_EFFECT_OFFSETS[entitySubtype] then
+		local data = STATUS_EFFECT_OFFSETS[entitySubtype]
+		return CFrame.new(data.offset) * CFrame.Angles(data.rotation.X, data.rotation.Y, data.rotation.Z)
+	end
+	return CFrame.new()
+end
 
 -- TweenService for smooth enemy movement
 local activeEnemyTweens: {[Model]: Tween} = {}
@@ -1233,6 +1322,13 @@ local function handleDeathAnimation(model: Model, deathData: any)
 		duration = fadeDuration,
 		expireTime = expireTime,
 	}
+
+	-- If this enemy has an impale model, fade it alongside death to avoid lingering VFX.
+	if record and record.impaleModel and record.impaleParts then
+		impaleTokenCounter += 1
+		record.impaleToken = impaleTokenCounter
+		fadeImpaleModel(record.impaleModel, record.impaleParts, fadeDuration, record.impaleToken)
+	end
 end
 
 local function handleEnemySlow(record: RenderRecord, slowData: any)
@@ -1240,7 +1336,26 @@ local function handleEnemySlow(record: RenderRecord, slowData: any)
         return
     end
 
-    local modelPath = slowData.impaleModelPath
+	local function includeImpalePartsInFade(recordToUpdate: RenderRecord, impaleParts: {BasePart})
+		if not recordToUpdate.fadeParts then
+			recordToUpdate.fadeParts = {}
+		end
+		if not recordToUpdate.fadePartOriginals then
+			recordToUpdate.fadePartOriginals = {}
+		end
+		local partSet = {}
+		for _, part in ipairs(recordToUpdate.fadeParts) do
+			partSet[part] = true
+		end
+		for _, part in ipairs(impaleParts) do
+			if part and part.Parent and not partSet[part] then
+				recordToUpdate.fadeParts[#recordToUpdate.fadeParts + 1] = part
+				partSet[part] = true
+			end
+		end
+	end
+
+	local modelPath = slowData.impaleModelPath
     if typeof(modelPath) ~= "string" or modelPath == "" then
         modelPath = ModelPaths.getModelPath("Projectile", "IceShard")
     end
@@ -1248,8 +1363,8 @@ local function handleEnemySlow(record: RenderRecord, slowData: any)
         return
     end
 
-    local template = findModelByPath(modelPath)
-    if not template then
+	local template = findModelByPath(modelPath)
+	if not template then
         return
     end
 
@@ -1257,34 +1372,81 @@ local function handleEnemySlow(record: RenderRecord, slowData: any)
     if not enemyRoot then
         return
     end
+	local hitbox = record.model:FindFirstChild("Hitbox", true) or record.model:FindFirstChild("hitbox", true)
+	local targetPart = (hitbox and hitbox:IsA("BasePart")) and (hitbox :: BasePart) or enemyRoot
 
-    local impaleModel = record.impaleModel
-    if not impaleModel or not impaleModel.Parent then
-        impaleModel = template:Clone()
-        impaleModel.Name = "ImpaledShard"
-        impaleModel.Parent = record.model
-        record.impaleParts = buildImpaleParts(impaleModel)
-        weldImpaleModel(impaleModel, enemyRoot)
-        record.impaleModel = impaleModel
-    else
-        if record.impaleParts then
-            for _, part in ipairs(record.impaleParts) do
-                if part and part.Parent then
-                    local original = part:GetAttribute("__ImpaleOrigTransparency")
-                    if typeof(original) == "number" then
-                        part.Transparency = original
-                    end
-                end
-            end
-        end
-    end
+	local function scaleImpaleModel(model: Model, target: BasePart)
+		local baseExtents = model:GetAttribute("__ImpaleOrigExtents")
+		if typeof(baseExtents) ~= "Vector3" then
+			baseExtents = model:GetExtentsSize()
+			model:SetAttribute("__ImpaleOrigExtents", baseExtents)
+		end
+		local baseMax = math.max(baseExtents.X, baseExtents.Y, baseExtents.Z)
+		if baseMax <= 0 then
+			return
+		end
+		local targetSize = target.Size
+		local targetMax = math.max(targetSize.X, targetSize.Y, targetSize.Z) * 0.3
+		local scaleFactor = targetMax / baseMax
+		pcall(function()
+			model:ScaleTo(scaleFactor)
+		end)
+	end
+
+	local impaleModel = record.impaleModel
+	if not impaleModel or not impaleModel.Parent then
+		if template:IsA("Model") then
+			impaleModel = template:Clone()
+		else
+			local wrapper = Instance.new("Model")
+			wrapper.Name = "ImpaledShard"
+			local partClone = template:Clone()
+			partClone.Parent = wrapper
+			if partClone:IsA("BasePart") then
+				wrapper.PrimaryPart = partClone
+			end
+			impaleModel = wrapper
+		end
+
+		impaleModel.Name = "ImpaledShard"
+		impaleModel.Parent = getImpaleFolder()
+		record.impaleParts = buildImpaleParts(impaleModel)
+		scaleImpaleModel(impaleModel, targetPart)
+		local offsetCFrame = getStatusEffectOffsetCFrame(record.entitySubtype)
+		impaleModel:PivotTo(targetPart.CFrame * offsetCFrame)
+		record.impaleModel = impaleModel
+		record.impaleFollowPart = targetPart
+		record.impaleFollowOffset = offsetCFrame
+	else
+		if record.impaleParts then
+			for _, part in ipairs(record.impaleParts) do
+				if part and part.Parent then
+					local original = part:GetAttribute("__ImpaleOrigTransparency")
+					if typeof(original) == "number" then
+						part.Transparency = original
+					end
+				end
+			end
+		end
+		local offsetCFrame = getStatusEffectOffsetCFrame(record.entitySubtype)
+		record.impaleFollowPart = targetPart
+		record.impaleFollowOffset = offsetCFrame
+	end
 
     impaleTokenCounter += 1
     local token = impaleTokenCounter
     record.impaleToken = token
 
     local duration = typeof(slowData.duration) == "number" and slowData.duration or 0.5
-    fadeImpaleModel(impaleModel, record.impaleParts or buildImpaleParts(impaleModel), duration, token)
+	if duration <= 0 then
+		fadeImpaleModel(impaleModel, record.impaleParts or buildImpaleParts(impaleModel), 0.25, token)
+	else
+		task.delay(duration, function()
+			if impaleModel and impaleModel.Parent then
+				fadeImpaleModel(impaleModel, record.impaleParts or buildImpaleParts(impaleModel), duration, token)
+			end
+		end)
+	end
 end
 
 local function updateDeathAnimations()
@@ -2475,6 +2637,7 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			model = model,
 			spawnTime = tick(),  -- NEW: Track when model was created
 			entityType = entityTypeName,
+			entitySubtype = entitySubtype,
 			velocity = velocityComponent or entityData.Velocity,
 			facingDirection = entityData.FacingDirection,
 			lastUpdate = tick(),
@@ -2737,6 +2900,7 @@ end
 local function updateEntityType(record: RenderRecord, newType: any)
 	if typeof(newType) == "table" and newType.type then
 		record.entityType = newType.type
+		record.entitySubtype = newType.subtype
 	end
 end
 
@@ -2990,6 +3154,15 @@ local function performDespawn(key: string, record: RenderRecord)
 				destroyVisualModel(model)
 			end
 		end
+	end
+
+	-- Cleanup impale VFX if present (now parented outside the enemy model)
+	if record.impaleModel and record.impaleModel.Parent then
+		pcall(function()
+			record.impaleModel:Destroy()
+		end)
+		record.impaleModel = nil
+		record.impaleParts = nil
 	end
 
 	renderedEntities[key] = nil
@@ -3582,6 +3755,23 @@ end)
 		
 		-- OPTIMIZED: Handle distance-based fade out/in for enemies (not projectiles)
 		if record.entityType == "Enemy" then
+			if record.impaleModel and record.impaleFollowPart and record.impaleModel.Parent then
+				pcall(function()
+					local offsetCFrame = record.impaleFollowOffset or CFrame.new()
+					record.impaleModel:PivotTo(record.impaleFollowPart.CFrame * offsetCFrame)
+				end)
+			end
+
+			if record.isSpawning and record.spawnTime then
+				local spawnElapsed = now - record.spawnTime
+				if spawnElapsed > (SPAWN_FADE_DURATION + 0.35) then
+					record.isSpawning = false
+					if not record.isFadedOut and not activeFades[model] then
+						fadeModel(model, 0, 0.1)
+					end
+				end
+			end
+
 			local lastToggle = record.lastCullToggleTime or 0
 			local canToggle = (now - lastToggle) >= CULL_TOGGLE_COOLDOWN
 
@@ -3600,6 +3790,19 @@ end)
 					record.isFadedOut = false
 					record.lastCullToggleTime = now
 					fadeModel(model, 0, CULL_FADE_DURATION)  -- Fade in over 0.3s
+				end
+			end
+
+			-- Safety net: if an enemy is fully transparent while it shouldn't be, force visibility.
+			local nextCheck = record.nextVisibilityCheck or 0
+			if now >= nextCheck then
+				record.nextVisibilityCheck = now + 0.5
+				if not record.isFadedOut and not record.isSpawning and not deathAnimations[model] and not activeFades[model] then
+					local currentTrans = getCurrentModelTransparency(model, { fadeParts = record.fadeParts })
+					if currentTrans >= 0.95 then
+						forceEnemyVisible(record)
+						profInc("enemyVisibilityFixes", 1)
+					end
 				end
 			end
 		end

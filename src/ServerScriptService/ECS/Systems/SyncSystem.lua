@@ -1157,6 +1157,7 @@ function SyncSystem.init(worldRef: any, components: any, dirtyService: any, remo
 		MobilityData = Components.MobilityData,  -- Equipped mobility ability
 		MobilityCooldown = Components.MobilityCooldown,  -- Mobility cooldown tracking
 		PassiveEffects = Components.PassiveEffects,  -- Passive multipliers (for mobility)
+		EnemySlow = Components.EnemySlow,
 	}
 	
 	-- PERFORMANCE FIX: Cache player position query (CRITICAL for FPS!)

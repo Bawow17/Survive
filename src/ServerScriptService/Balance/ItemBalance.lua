@@ -113,8 +113,8 @@ return {
 		SpawnDelay = 2,  -- Wait 0.5s after player joins before spawning orbs
 		
 		-- Number of orbs to spawn
-		MinOrbs = 85,   -- Minimum orbs
-		MaxOrbs = 100,  -- Maximum orbs (random between min/max)
+		MinOrbs = 800,   -- Minimum orbs
+		MaxOrbs = 900,  -- Maximum orbs (random between min/max)
 		
 		-- Spawn radius around player
 		MinRadius = 25,  -- Minimum distance from player (studs)

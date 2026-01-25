@@ -38,7 +38,7 @@ return {
 	-- Homing configuration (only used when targetingMode = 3)
 	homingStrength = 100, -- Turn speed in degrees per second
 	homingDistance = 300, -- Distance for target acquisition in studs
-	homingMaxAngle = 50, -- Max turn angle in degrees (prevents 180° reversals)
+	homingMaxAngle = 180, -- Max turn angle in degrees (prevents 180° reversals)
 	
 	-- Spawn configuration
 	spawnOffset = Vector3.new(0, 0, 0), -- offset from player position

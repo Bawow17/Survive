@@ -501,7 +501,7 @@ function MagicBoltSystem.step(dt: number)
 								-- Notify client to play casting animation (even though clones shoot)
 								AbilityCastRemote:FireClient(player, MAGIC_BOLT_ID, cloneStats.cooldown, MAGIC_BOLT_NAME, {
 									projectileCount = burstCount,  -- Number of animation loops
-									pulseInterval = math.max(cloneInfo.pulseInterval or cloneStats.pulseInterval or 0, 0.01),
+									pulseInterval = math.max(firstClone.pulseInterval or cloneStats.pulseInterval or 0, 0.01),
 									damageStats = damageStats,
 									animationData = animationData,
 								})

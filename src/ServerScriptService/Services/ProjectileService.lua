@@ -161,6 +161,7 @@ local ProjectilesImpactBatch: RemoteEvent
 local SIM_HZ = 15
 local SIM_INTERVAL = 1 / SIM_HZ
 local FAR_SIM_INTERVAL = 0.25
+local PETAL_SIM_INTERVAL = 1 / 60
 local RELEVANCE_RADIUS = 260
 local SPAWN_SEND_RADIUS = 300
 local MAX_PROJECTILES_SIMULATED_PER_TICK = 600
@@ -169,7 +170,7 @@ local MAX_HITS_PER_TICK = 600
 local MAX_SPAWNS_PER_SECOND = 400
 local RECIPIENT_REFRESH_INTERVAL = 0.5
 local MAX_RECIPIENT_SPAWNS_PER_TICK = 200
-local PETAL_MIN_SEPARATION = 80
+local PETAL_MIN_SEPARATION = 30
 
 local RAYCAST_PARAMS = RaycastParams.new()
 RAYCAST_PARAMS.FilterType = Enum.RaycastFilterType.Exclude
@@ -1096,7 +1097,10 @@ function ProjectileService.step(dt: number)
 
 		local allowCollision, nearestDistSq = shouldSimulateCollision(record, playerPositions)
 		local simInterval = SIM_INTERVAL
-		if not allowCollision then
+		if record.petal then
+			allowCollision = true
+			simInterval = PETAL_SIM_INTERVAL
+		elseif not allowCollision then
 			simInterval = FAR_SIM_INTERVAL
 		end
 
@@ -1135,13 +1139,15 @@ function ProjectileService.step(dt: number)
 					target = nil
 				end
 			end
-			local role = petal.role or "closest"
-			local assignment = ownerEntity and petalAssignmentsByOwner[ownerEntity] or nil
-			if assignment then
-				if role == "toughest" then
-					target = assignment.toughest
-				else
-					target = assignment.closest
+			if not target then
+				local role = petal.role or "closest"
+				local assignment = ownerEntity and petalAssignmentsByOwner[ownerEntity] or nil
+				if assignment then
+					if role == "toughest" then
+						target = assignment.toughest
+					else
+						target = assignment.closest
+					end
 				end
 			end
 			petal.targetEntity = target

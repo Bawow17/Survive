@@ -91,7 +91,7 @@ local MAX_IMPACT_POOL_SIZE = 20
 local explosionTokenCounter = 0
 local PETAL_COLOR_CLOSEST = Color3.fromRGB(255, 182, 193)
 local PETAL_COLOR_TOUGHEST = Color3.fromRGB(173, 216, 230)
-local PETAL_MIN_SEPARATION = 80
+local PETAL_MIN_SEPARATION = 30
 local PETAL_TARGET_REFRESH = 0.05
 local petalTargetCache: {[number]: {time: number, range: number, closest: Vector3?, toughest: Vector3?}} = {}
 

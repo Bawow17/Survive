@@ -12,9 +12,11 @@ return {
 		special = {
 			petalCount = 2,
 			petalMaxRange = 100,
-			petalSpeedMultiplier = 0.65,
-			petalHitCooldown = 0.3,
-			petalHomingStrength = 720, -- very fast turning
+			petalSpeedMultiplier = 1.3,
+			petalHitCooldown = 0.2,
+			petalDamageMultiplier = 2.0,
+			petalRadiusMultiplier = 2.0,
+			petalHomingStrength = 1440, -- very fast turning
 			petalHomingMaxAngle = 360,
 			petalLifetime = 999999,
 			repelInterval = 3.0,
