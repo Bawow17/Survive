@@ -3,7 +3,7 @@
 
 local EnemyBalance = {}
 
-EnemyBalance.HealthMultiplier = 0.9
+EnemyBalance.HealthMultiplier = 3.0
 EnemyBalance.DamageMultiplier = 0.7
 
 -- Enemy spawning settings (with time-based scaling)

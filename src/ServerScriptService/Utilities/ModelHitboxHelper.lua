@@ -25,8 +25,16 @@ function ModelHitboxHelper.getModelHitboxData(modelPath: string): (Vector3?, Vec
 
 	local model: Model = current
 
-	-- Priority 1: Look for "Hitbox" part (this is what we want for projectiles)
-	local hitbox = model:FindFirstChild("Hitbox")
+	-- Priority 1: Look for "Hitbox"/"hitbox" part (this is what we want for projectiles)
+	local hitbox = model:FindFirstChild("Hitbox") or model:FindFirstChild("hitbox")
+	if not hitbox then
+		for _, descendant in ipairs(model:GetDescendants()) do
+			if descendant:IsA("BasePart") and (descendant.Name == "Hitbox" or descendant.Name == "hitbox") then
+				hitbox = descendant
+				break
+			end
+		end
+	end
 	if hitbox and hitbox:IsA("BasePart") then
 		local pivot = model:GetPivot()
 		return hitbox.Size, hitbox.Position - pivot.Position
@@ -51,4 +59,3 @@ function ModelHitboxHelper.getModelHitboxData(modelPath: string): (Vector3?, Vec
 end
 
 return ModelHitboxHelper
-

@@ -257,6 +257,13 @@ local function getAvailableAttributesForAbility(playerEntity: number, abilityId:
 		-- Already selected an attribute for this ability
 		return available
 	end
+	local abilityData = world:get(playerEntity, AbilityData)
+	if abilityData and abilityData.abilities and abilityData.abilities[abilityId] then
+		local abilityRecord = abilityData.abilities[abilityId]
+		if abilityRecord and abilityRecord.selectedAttribute then
+			return available
+		end
+	end
 	
 	-- Try to load Attributes.lua for this ability
 	local success, attributesModule = pcall(function()
@@ -281,20 +288,44 @@ local function getAvailableAttributesForAbility(playerEntity: number, abilityId:
 	return available
 end
 
+local function countSelectedAttributes(playerEntity: number): number
+	local selectionCount = 0
+	local attributeSelections = world:get(playerEntity, AttributeSelections)
+	if attributeSelections then
+		for _ in pairs(attributeSelections) do
+			selectionCount += 1
+		end
+	end
+
+	local abilityData = world:get(playerEntity, AbilityData)
+	local abilityCount = 0
+	if abilityData and abilityData.abilities then
+		for _, abilityRecord in pairs(abilityData.abilities) do
+			if abilityRecord and abilityRecord.selectedAttribute then
+				abilityCount += 1
+			end
+		end
+	end
+
+	return math.max(selectionCount, abilityCount)
+end
+
 -- Select upgrade choices using weighted selection
 -- 1 ability (60% owned/40% all), 1 passive (50/50), 3 random
 function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number, count: number): {any}
 	count = count or 5
-	
+
 	local availableAbilities = getAvailableAbilityUpgrades(playerEntity)
 	local availablePassives = getAvailablePassiveUpgrades(playerEntity)
 	
-	-- Check for available attributes (every 10 levels: 10/20/30/40/50)
+	-- Check for available attributes (1 slot per 10 levels, starting at level 10)
 	-- Only one attribute choice is offered per eligible hand
 	local availableAttributes = {}
 	local attributeLevelInterval = 10
-	local maxAttributeLevel = 50
-	if level >= attributeLevelInterval and level % attributeLevelInterval == 0 and level <= maxAttributeLevel then
+	local maxAttributeSlots = 5
+	local slotsAvailable = math.min(math.floor(level / attributeLevelInterval), maxAttributeSlots)
+	local slotsUsed = countSelectedAttributes(playerEntity)
+	if slotsAvailable > 0 and slotsUsed < slotsAvailable then
 		local maxLevelAbilities = getMaxLevelAbilities(playerEntity)
 		local attributeCandidates = {}
 		
@@ -764,6 +795,9 @@ local function applyAttributeUpgrade(playerEntity: number, upgradeId: string): b
 		abilityRecord.attributeColor = attributeData.color
 	end
 	abilityRecord.selectedAttribute = attributeId
+	if attributeData.special then
+		abilityRecord.attributeSpecial = attributeData.special
+	end
 	
 	-- Update ability data
 	DirtyService.setIfChanged(world, playerEntity, AbilityData, {abilities = abilities}, "AbilityData")

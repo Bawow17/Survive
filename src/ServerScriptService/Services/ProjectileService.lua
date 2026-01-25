@@ -9,6 +9,7 @@ local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local TargetingService = require(game.ServerScriptService.Abilities.TargetingService)
+local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -53,6 +54,10 @@ type AoeConfig = {
 	tickInterval: number?,
 	modelPath: string?,
 	scale: number?,
+	knockbackDistance: number?,
+	knockbackDuration: number?,
+	knockbackStunned: boolean?,
+	retargetPetalsOwner: number?,
 }
 
 type CollisionConfig = {
@@ -66,6 +71,31 @@ type OrbitConfig = {
 	angle: number,
 }
 
+type PetalConfig = {
+	ownerEntity: number,
+	maxRange: number,
+	homingStrength: number?,
+	homingMaxAngle: number?,
+	stayHorizontal: boolean?,
+	alwaysStayHorizontal: boolean?,
+	targetEntity: number?,
+	role: string?,
+}
+
+type SplitConfig = {
+	count: number,
+	damageMultiplier: number,
+	scaleMultiplier: number,
+	maxSpreadDeg: number,
+	targetingAngle: number?,
+}
+
+type SlowConfig = {
+	duration: number,
+	multiplier: number,
+	impaleModelPath: string?,
+}
+
 type ProjectileRecord = {
 	id: number,
 	kind: string,
@@ -77,9 +107,11 @@ type ProjectileRecord = {
 	ownerEntity: number?,
 	spawnTime: number,
 	expiresAt: number,
+	lifetime: number,
 	lastSimTime: number,
 	lastPos: Vector3,
 	pierceRemaining: number,
+	basePierce: number,
 	hitSet: {[number]: boolean},
 	hitCooldowns: {[number]: number},
 	hitCooldown: number,
@@ -87,6 +119,9 @@ type ProjectileRecord = {
 	aoe: AoeConfig?,
 	collision: CollisionConfig?,
 	orbit: OrbitConfig?,
+	petal: PetalConfig?,
+	splitOnHit: SplitConfig?,
+	slowOnHit: SlowConfig?,
 	recipients: {[Player]: boolean},
 	visualScale: number?,
 	visualColor: Color3?,
@@ -134,6 +169,7 @@ local MAX_HITS_PER_TICK = 600
 local MAX_SPAWNS_PER_SECOND = 400
 local RECIPIENT_REFRESH_INTERVAL = 0.5
 local MAX_RECIPIENT_SPAWNS_PER_TICK = 200
+local PETAL_MIN_SEPARATION = 80
 
 local RAYCAST_PARAMS = RaycastParams.new()
 RAYCAST_PARAMS.FilterType = Enum.RaycastFilterType.Exclude
@@ -143,6 +179,7 @@ local spawnCounts: {[Player]: {count: number, resetAt: number}} = setmetatable({
 local pendingSpawns: {[Player]: {any}} = {}
 local pendingDespawns: {[Player]: {any}} = {}
 local pendingImpacts: {[Player]: {any}} = {}
+local petalRetargetRequests: {[number]: boolean} = {}
 local activeExplosions: {{
 	position: Vector3,
 	radius: number,
@@ -155,6 +192,11 @@ local activeExplosions: {{
 	modelPath: string?,
 	scale: number?,
 	kind: string,
+	knockbackDistance: number?,
+	knockbackDuration: number?,
+	knockbackStunned: boolean?,
+	retargetOwnerEntity: number?,
+	retargetTriggered: boolean?,
 }} = {}
 local lastRecipientRefresh = 0
 
@@ -216,6 +258,15 @@ local function queueSpawnForPlayer(player: Player, record: ProjectileRecord)
 			stayHorizontal = record.homing.stayHorizontal,
 			alwaysStayHorizontal = record.homing.alwaysStayHorizontal,
 		} or nil,
+		petal = record.petal and {
+			maxRange = record.petal.maxRange,
+			ownerUserId = record.ownerUserId,
+			homingStrength = record.petal.homingStrength,
+			homingMaxAngle = record.petal.homingMaxAngle,
+			stayHorizontal = record.petal.stayHorizontal,
+			alwaysStayHorizontal = record.petal.alwaysStayHorizontal,
+			role = record.petal.role,
+		} or nil,
 	})
 end
 
@@ -268,6 +319,126 @@ local function getEnemyAimPosition(enemyId: number): Vector3?
 	return nil
 end
 
+local function getOwnerPosition(record: ProjectileRecord): Vector3?
+	local ownerEntity = record.petal and record.petal.ownerEntity or record.ownerEntity
+	if not ownerEntity then
+		return nil
+	end
+	local ownerPlayer = getPlayerFromEntity and getPlayerFromEntity(ownerEntity) or nil
+	if ownerPlayer and ownerPlayer.Character then
+		local hrp = ownerPlayer.Character:FindFirstChild("HumanoidRootPart")
+		if hrp and hrp:IsA("BasePart") then
+			return (hrp :: BasePart).Position
+		end
+	end
+	local pos = world and world:get(ownerEntity, Position)
+	if pos then
+		return Vector3.new(pos.x, pos.y, pos.z)
+	end
+	return nil
+end
+
+local function buildPetalAssignments(): {[number]: {closest: number?, toughest: number?}}
+	local ownerEntries: {[number]: {pos: Vector3, range: number}} = {}
+	for _, id in ipairs(projectileList) do
+		local record = projectiles[id]
+		if record and record.petal and record.petal.ownerEntity then
+			local ownerEntity = record.petal.ownerEntity
+			local entry = ownerEntries[ownerEntity]
+			if not entry then
+				local ownerPos = getOwnerPosition(record)
+				if ownerPos then
+					ownerEntries[ownerEntity] = {
+						pos = ownerPos,
+						range = record.petal.maxRange or 0,
+					}
+				elseif record.lastPos then
+					ownerEntries[ownerEntity] = {
+						pos = record.lastPos,
+						range = record.petal.maxRange or 0,
+					}
+				end
+			else
+				local range = record.petal.maxRange or 0
+				if range > entry.range then
+					entry.range = range
+				end
+			end
+		end
+	end
+
+local assignments: {[number]: {closest: number?, toughest: number?}} = {}
+	for ownerEntity, entry in pairs(ownerEntries) do
+		local candidates = OctreeSystem.getEnemiesInRadius(entry.pos, entry.range)
+		local closestId: number? = nil
+		local closestDistSq = entry.range * entry.range
+		local closestPos: Vector3? = nil
+		local candidateList = {}
+
+		for _, enemyId in ipairs(candidates) do
+			local health = world:get(enemyId, Health)
+			if health and health.current and health.current > 0 then
+				local enemyPos = getEnemyAimPosition(enemyId)
+				if enemyPos then
+					local distSq = distanceSq(entry.pos, enemyPos)
+					if distSq <= entry.range * entry.range then
+						table.insert(candidateList, {
+							id = enemyId,
+							pos = enemyPos,
+							distSq = distSq,
+							hp = typeof(health.max) == "number" and health.max or health.current or 0,
+						})
+						if distSq < closestDistSq then
+							closestDistSq = distSq
+							closestId = enemyId
+							closestPos = enemyPos
+						end
+					end
+				end
+			end
+		end
+
+		local toughestId = closestId
+		if closestId and #candidateList > 1 and closestPos then
+			local minSepSq = PETAL_MIN_SEPARATION * PETAL_MIN_SEPARATION
+			local bestOtherId: number? = nil
+			local bestOtherHp = -math.huge
+			local bestOtherDistSq = math.huge
+			local bestSepId: number? = nil
+			local bestSepHp = -math.huge
+			local bestSepDistSq = math.huge
+
+			for _, entryCandidate in ipairs(candidateList) do
+				if entryCandidate.id ~= closestId then
+					if entryCandidate.hp > bestOtherHp or (entryCandidate.hp == bestOtherHp and entryCandidate.distSq < bestOtherDistSq) then
+						bestOtherHp = entryCandidate.hp
+						bestOtherDistSq = entryCandidate.distSq
+						bestOtherId = entryCandidate.id
+					end
+					local sepSq = distanceSq(closestPos, entryCandidate.pos)
+					if sepSq >= minSepSq then
+						if entryCandidate.hp > bestSepHp or (entryCandidate.hp == bestSepHp and entryCandidate.distSq < bestSepDistSq) then
+							bestSepHp = entryCandidate.hp
+							bestSepDistSq = entryCandidate.distSq
+							bestSepId = entryCandidate.id
+						end
+					end
+				end
+			end
+
+			-- Prefer highest total HP that also satisfies min separation; otherwise highest HP among other targets.
+			toughestId = bestSepId or bestOtherId or closestId
+		end
+
+		assignments[ownerEntity] = {
+			closest = closestId,
+			toughest = toughestId or closestId,
+		}
+	end
+
+	return assignments
+end
+
 local enemyHitboxCache: {[string]: {offset: Vector3, radius: number}} = {}
 
 local function getEnemyCollisionCenter(enemyId: number): (Vector3?, number?)
@@ -315,6 +486,104 @@ local function closestPointOnSegment(a: Vector3, b: Vector3, p: Vector3): Vector
 		t = math.clamp(t, 0, 1)
 	end
 	return a + ab * t
+end
+
+local function cloneHomingConfig(homing: HomingConfig?): HomingConfig?
+	if not homing then
+		return nil
+	end
+	return {
+		strengthDeg = homing.strengthDeg,
+		maxAngleDeg = homing.maxAngleDeg,
+		maxTurnDeg = homing.maxTurnDeg,
+		acquireRadius = homing.acquireRadius,
+		stayHorizontal = homing.stayHorizontal,
+		alwaysStayHorizontal = homing.alwaysStayHorizontal,
+		targetEntity = nil,
+	}
+end
+
+local function buildSpreadOffsets(count: number): {number}
+	local offsets = table.create(count)
+	if count == 1 then
+		offsets[1] = 0
+	elseif count % 2 == 1 then
+		local midpoint = (count - 1) * 0.5
+		for i = 1, count do
+			offsets[i] = (i - 1) - midpoint
+		end
+	else
+		local middleIndex = math.ceil(count / 2)
+		offsets[middleIndex] = 0
+		local stepIndex = 1
+		for i = 1, count do
+			if i ~= middleIndex then
+				local sign = (stepIndex % 2 == 1) and 1 or -1
+				local magnitude = math.floor((stepIndex + 1) / 2)
+				offsets[i] = sign * magnitude
+				stepIndex += 1
+			end
+		end
+	end
+	return offsets
+end
+
+local function spawnSplitProjectiles(record: ProjectileRecord, hitPos: Vector3, now: number)
+	if not record.splitOnHit then
+		return
+	end
+	local split = record.splitOnHit
+	local count = split.count or 0
+	if count <= 0 then
+		return
+	end
+	local baseDirection = record.direction.Magnitude > 0 and record.direction.Unit or Vector3.new(0, 0, 1)
+	local totalSpread = math.min(math.abs(split.targetingAngle or 0) * 2, math.rad(split.maxSpreadDeg or 180))
+	local step = count > 1 and totalSpread / (count - 1) or 0
+	local offsets = buildSpreadOffsets(count)
+	local lifetime = record.lifetime or math.max(record.expiresAt - now, 0.05)
+	local splitScale = split.scaleMultiplier or 1
+	local splitDamage = record.damage * (split.damageMultiplier or 1)
+	local splitRadius = record.radius * splitScale
+	local splitScaleVisual = (record.visualScale or 1) * splitScale
+	local basePierce = record.basePierce or 0
+	local homingCopy = cloneHomingConfig(record.homing)
+
+	for i = 1, count do
+		local offsetIndex = offsets[i] or 0
+		local finalAngle = offsetIndex * step
+		local cos = math.cos(finalAngle)
+		local sin = math.sin(finalAngle)
+		local direction = Vector3.new(
+			baseDirection.X * cos - baseDirection.Z * sin,
+			baseDirection.Y,
+			baseDirection.X * sin + baseDirection.Z * cos
+		)
+		if direction.Magnitude == 0 then
+			direction = Vector3.new(0, 0, 1)
+		end
+		direction = direction.Unit
+
+		ProjectileService.spawnProjectile({
+			kind = record.kind,
+			origin = hitPos,
+			direction = direction,
+			speed = record.speed,
+			damage = splitDamage,
+			radius = splitRadius,
+			lifetime = lifetime,
+			ownerEntity = record.ownerEntity,
+			pierce = basePierce,
+			modelPath = record.modelPath,
+			visualScale = splitScaleVisual,
+			visualColor = record.visualColor,
+			homing = homingCopy,
+			hitCooldown = record.hitCooldown,
+			stayHorizontal = record.stayHorizontal,
+			alwaysStayHorizontal = record.alwaysStayHorizontal,
+			stickToPlayer = record.stickToPlayer,
+		})
+	end
 end
 
 local function tryAcquireTarget(record: ProjectileRecord, radius: number): number?
@@ -531,6 +800,9 @@ function ProjectileService.spawnProjectile(payload: {
 	stayHorizontal: boolean?,
 	alwaysStayHorizontal: boolean?,
 	stickToPlayer: boolean?,
+	petal: PetalConfig?,
+	splitOnHit: SplitConfig?,
+	slowOnHit: SlowConfig?,
 }): number?
 	if not payload or typeof(payload.origin) ~= "Vector3" then
 		return nil
@@ -575,9 +847,11 @@ function ProjectileService.spawnProjectile(payload: {
 		ownerEntity = payload.ownerEntity,
 		spawnTime = now,
 		expiresAt = now + lifetime,
+		lifetime = lifetime,
 		lastSimTime = now,
 		lastPos = payload.origin,
 		pierceRemaining = (payload.pierce or 0) + 1,
+		basePierce = payload.pierce or 0,
 		hitSet = {},
 		hitCooldowns = {},
 		hitCooldown = payload.hitCooldown or 0.04,
@@ -585,6 +859,9 @@ function ProjectileService.spawnProjectile(payload: {
 		aoe = payload.aoe,
 		collision = payload.collision,
 		orbit = payload.orbit,
+		petal = payload.petal,
+		splitOnHit = payload.splitOnHit,
+		slowOnHit = payload.slowOnHit,
 		recipients = {},
 		visualScale = payload.visualScale,
 		visualColor = payload.visualColor,
@@ -641,6 +918,11 @@ local function startExplosion(record: ProjectileRecord, center: Vector3, reason:
 		modelPath = aoe.modelPath,
 		scale = aoe.scale,
 		kind = record.kind,
+		knockbackDistance = aoe.knockbackDistance,
+		knockbackDuration = aoe.knockbackDuration,
+		knockbackStunned = aoe.knockbackStunned,
+		retargetOwnerEntity = aoe.retargetPetalsOwner,
+		retargetTriggered = false,
 	}
 
 	sendImpact(record, center, reason, aoe, despawnOnImpact)
@@ -658,6 +940,7 @@ local function processExplosions(now: number, hitBudget: number): number
 			activeExplosions[index] = activeExplosions[#activeExplosions]
 			activeExplosions[#activeExplosions] = nil
 		elseif now >= explosion.nextTick then
+			local hitAny = false
 			local radius = explosion.radius
 			local candidates = OctreeSystem.getEnemiesInRadius(explosion.position, radius)
 			for _, enemyId in ipairs(candidates) do
@@ -669,12 +952,32 @@ local function processExplosions(now: number, hitBudget: number): number
 					local enemyPos = getEnemyCollisionCenter(enemyId)
 					if enemyPos and health and health.current and health.current > 0 then
 						if (enemyPos - explosion.position).Magnitude <= radius then
+							hitAny = true
 							explosion.hitSet[enemyId] = true
 							hitBudget -= 1
 							DamageSystem.applyDamage(enemyId, explosion.damage, "magic", explosion.ownerEntity, explosion.kind)
+
+							if explosion.knockbackDistance and explosion.knockbackDistance > 0 then
+								local dir = enemyPos - explosion.position
+								dir = Vector3.new(dir.X, 0, dir.Z)
+								if dir.Magnitude > 0.01 then
+									DamageSystem.applyKnockback(
+										enemyId,
+										dir,
+										explosion.knockbackDistance,
+										explosion.knockbackDuration or 0.25,
+										explosion.knockbackStunned
+									)
+								end
+							end
 						end
 					end
 				end
+			end
+
+			if hitAny and explosion.retargetOwnerEntity and not explosion.retargetTriggered then
+				petalRetargetRequests[explosion.retargetOwnerEntity] = true
+				explosion.retargetTriggered = true
 			end
 
 			if explosion.tickInterval > 0 then
@@ -731,6 +1034,8 @@ function ProjectileService.step(dt: number)
 	local simCount = 0
 	local collisionChecks = 0
 	local hitBudget = MAX_HITS_PER_TICK
+	local petalRetargetConsumed: {[number]: boolean} = {}
+	local petalAssignmentsByOwner = buildPetalAssignments()
 
 	if now - lastRecipientRefresh >= RECIPIENT_REFRESH_INTERVAL then
 		lastRecipientRefresh = now
@@ -802,7 +1107,81 @@ function ProjectileService.step(dt: number)
 		end
 
 		local newPos = record.lastPos
-		if record.orbit then
+		if record.petal then
+			local petal = record.petal
+			local ownerEntity = petal.ownerEntity
+			local forceRetarget = ownerEntity and petalRetargetRequests[ownerEntity] or false
+			if forceRetarget and ownerEntity then
+				petal.targetEntity = nil
+				petalRetargetConsumed[ownerEntity] = true
+			end
+
+			local ownerPos = getOwnerPosition(record)
+			local target = petal.targetEntity
+			if target and not world:contains(target) then
+				target = nil
+			end
+			if target then
+				local health = world:get(target, Health)
+				if health and health.current and health.current <= 0 then
+					target = nil
+				end
+			end
+			if target then
+				local targetPos = getEnemyAimPosition(target)
+				if not targetPos then
+					target = nil
+				elseif ownerPos and distanceSq(ownerPos, targetPos) > (petal.maxRange * petal.maxRange) then
+					target = nil
+				end
+			end
+			local role = petal.role or "closest"
+			local assignment = ownerEntity and petalAssignmentsByOwner[ownerEntity] or nil
+			if assignment then
+				if role == "toughest" then
+					target = assignment.toughest
+				else
+					target = assignment.closest
+				end
+			end
+			petal.targetEntity = target
+
+			if target and ownerPos then
+				local targetPos = getEnemyAimPosition(target)
+				if targetPos and distanceSq(ownerPos, targetPos) <= (petal.maxRange * petal.maxRange) then
+					local desired = targetPos - record.lastPos
+					if petal.stayHorizontal or petal.alwaysStayHorizontal then
+						desired = Vector3.new(desired.X, 0, desired.Z)
+					end
+					if desired.Magnitude > 0 then
+						desired = desired.Unit
+						local current = record.direction
+						local dot = math.clamp(current:Dot(desired), -1, 1)
+						local angle = math.acos(dot)
+						local maxAngle = petal.homingMaxAngle and math.rad(petal.homingMaxAngle) or math.huge
+						if maxAngle < math.pi and angle > maxAngle then
+							petal.targetEntity = nil
+						else
+							if angle <= 0.0001 then
+								record.direction = desired
+							else
+								local maxStep = math.rad(petal.homingStrength or 360) * (now - record.lastSimTime)
+								local turn = math.min(angle, maxStep)
+								local axis = current:Cross(desired)
+								if axis.Magnitude <= 0.0001 then
+									record.direction = desired
+								else
+									axis = axis.Unit
+									local rotation = CFrame.fromAxisAngle(axis, turn)
+									record.direction = rotation:VectorToWorldSpace(current).Unit
+								end
+							end
+							newPos = record.lastPos + record.direction * record.speed * dtSim
+						end
+					end
+				end
+			end
+		elseif record.orbit then
 			local ownerPosComp = record.orbit.ownerEntity and world:get(record.orbit.ownerEntity, Position)
 			if not ownerPosComp then
 				despawnProjectile(record, "expired", record.lastPos)
@@ -888,6 +1267,14 @@ function ProjectileService.step(dt: number)
 						end
 					end
 					DamageSystem.applyDamage(enemyId, record.damage, "magic", record.ownerEntity, record.kind)
+					if record.slowOnHit then
+						EnemySlowSystem.applySlow(
+							enemyId,
+							record.slowOnHit.duration,
+							record.slowOnHit.multiplier,
+							record.slowOnHit.impaleModelPath
+						)
+					end
 					record.hitSet[enemyId] = true
 					record.hitCooldowns[enemyId] = now + record.hitCooldown
 					record.pierceRemaining -= 1
@@ -898,7 +1285,12 @@ function ProjectileService.step(dt: number)
 						record.homing.targetEntity = nil
 					end
 
-					if record.aoe and record.aoe.trigger == "hit" then
+					if record.splitOnHit and not record.splitOnHit.used then
+						record.splitOnHit.used = true
+						spawnSplitProjectiles(record, hitPos, now)
+						hit = true
+						hitReason = "split"
+					elseif record.aoe and record.aoe.trigger == "hit" then
 						local shouldDespawn = record.pierceRemaining <= 0
 						startExplosion(record, hitPos, "exploded", shouldDespawn)
 						if shouldDespawn then
@@ -927,6 +1319,10 @@ function ProjectileService.step(dt: number)
 		end
 	end
 
+	for ownerEntity in pairs(petalRetargetConsumed) do
+		petalRetargetRequests[ownerEntity] = nil
+	end
+
 	hitBudget = processExplosions(now, hitBudget)
 
 	profGauge("ProjectileService.Active", #projectileList)
@@ -952,6 +1348,10 @@ function ProjectileService.step(dt: number)
 		end
 		pendingImpacts[player] = nil
 	end
+end
+
+function ProjectileService.isProjectileActive(projectileId: number): boolean
+	return projectiles[projectileId] ~= nil
 end
 
 return ProjectileService

@@ -10,6 +10,7 @@ local EasingUtils = require(game.ServerScriptService.Balance.EasingUtils)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local ObstacleRaycastCache = require(game.ServerScriptService.ECS.Systems.ObstacleRaycastCache)
+local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -892,6 +893,8 @@ function ZombieAISystem.step(dt: number)
 			
 			-- Calculate final speed with both multipliers
 			local finalSpeed = baseSpeed * globalSpeedMult * lifetimeSpeedMult
+			local slowMultiplier = EnemySlowSystem.getSlowMultiplier(enemyEntity)
+			finalSpeed = finalSpeed * slowMultiplier
 			
 			-- CRITICAL: Update AI component with scaled speed (for persistence + sync)
 			if ai.speed ~= finalSpeed then

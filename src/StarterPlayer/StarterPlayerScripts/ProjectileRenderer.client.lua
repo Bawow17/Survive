@@ -44,6 +44,16 @@ type OrbitPayload = {
 	angle: number,
 }
 
+type PetalPayload = {
+	maxRange: number?,
+	ownerUserId: number?,
+	homingStrength: number?,
+	homingMaxAngle: number?,
+	stayHorizontal: boolean?,
+	alwaysStayHorizontal: boolean?,
+	role: string?,
+}
+
 type ProjectileRecord = {
 	id: number,
 	kind: string,
@@ -62,6 +72,7 @@ type ProjectileRecord = {
 	stickToPlayer: boolean?,
 	orbit: OrbitPayload?,
 	homing: HomingPayload?,
+	petal: PetalPayload?,
 	lastSimTime: number?,
 	lastPos: Vector3?,
 	lastHomingUpdate: number?,
@@ -78,6 +89,11 @@ local impactPoolByPath: {[string]: {Model}} = {}
 local MAX_POOL_SIZE = 80
 local MAX_IMPACT_POOL_SIZE = 20
 local explosionTokenCounter = 0
+local PETAL_COLOR_CLOSEST = Color3.fromRGB(255, 182, 193)
+local PETAL_COLOR_TOUGHEST = Color3.fromRGB(173, 216, 230)
+local PETAL_MIN_SEPARATION = 80
+local PETAL_TARGET_REFRESH = 0.05
+local petalTargetCache: {[number]: {time: number, range: number, closest: Vector3?, toughest: Vector3?}} = {}
 
 local enemiesFolder: Folder? = workspace:FindFirstChild("Enemies") :: Folder?
 local enemySnapshot: {{pos: Vector3}} = {}
@@ -229,10 +245,22 @@ local function applyVisual(record: ProjectileRecord)
 			part.Color = record.visualColor
 		end
 	end
-	if record.visualScale and record.visualScale ~= 1 then
-		pcall(function()
-			model:ScaleTo(record.visualScale :: number)
-		end)
+	local scale = record.visualScale or 1
+	pcall(function()
+		model:ScaleTo(scale :: number)
+	end)
+	if record.petal and record.petal.role then
+		local hitbox = model:FindFirstChild("Hitbox", true)
+		if hitbox then
+			local emitter = hitbox:FindFirstChild("Petals")
+			if emitter and emitter:IsA("ParticleEmitter") then
+				if record.petal.role == "toughest" then
+					emitter.Color = ColorSequence.new(PETAL_COLOR_TOUGHEST)
+				else
+					emitter.Color = ColorSequence.new(PETAL_COLOR_CLOSEST)
+				end
+			end
+		end
 	end
 end
 
@@ -486,6 +514,120 @@ local function updateHoming(record: ProjectileRecord, dt: number, now: number)
 	record.direction = rotation:VectorToWorldSpace(currentDir).Unit
 end
 
+local function updatePetal(record: ProjectileRecord, dt: number, now: number): boolean
+	local petal = record.petal
+	if not petal then
+		return false
+	end
+	local ownerUserId = petal.ownerUserId or record.ownerUserId
+	if not ownerUserId then
+		return false
+	end
+	local ownerRoot = getOwnerRootPart(ownerUserId)
+	if not ownerRoot then
+		return false
+	end
+	local ownerPos = ownerRoot.Position
+	local maxRange = petal.maxRange or 100
+	local cache = petalTargetCache[ownerUserId]
+	if not cache or (now - cache.time) > PETAL_TARGET_REFRESH or cache.range ~= maxRange then
+		local radiusSq = maxRange * maxRange
+		local closestPos: Vector3? = nil
+		local closestDistSq = radiusSq
+		local closestIndex: number? = nil
+		local candidates: {{pos: Vector3, distSq: number}} = {}
+		for index, entry in ipairs(enemySnapshot) do
+			local delta = entry.pos - ownerPos
+			local distSq = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
+			if distSq <= radiusSq then
+				table.insert(candidates, { pos = entry.pos, distSq = distSq })
+				if distSq < closestDistSq then
+					closestDistSq = distSq
+					closestPos = entry.pos
+					closestIndex = index
+				end
+			end
+		end
+		local toughestPos = closestPos
+		if closestPos and #candidates > 1 then
+			local minSepSq = PETAL_MIN_SEPARATION * PETAL_MIN_SEPARATION
+			local bestSepPos: Vector3? = nil
+			local bestSepSq = -math.huge
+			local bestAnyPos: Vector3? = nil
+			local bestAnyDistSq = -math.huge
+			for idx, candidate in ipairs(candidates) do
+				if idx ~= closestIndex then
+					local sep = candidate.pos - closestPos
+					local sepSq = sep.X * sep.X + sep.Y * sep.Y + sep.Z * sep.Z
+					if sepSq >= minSepSq and sepSq > bestSepSq then
+						bestSepSq = sepSq
+						bestSepPos = candidate.pos
+					end
+					if candidate.distSq > bestAnyDistSq then
+						bestAnyDistSq = candidate.distSq
+						bestAnyPos = candidate.pos
+					end
+				end
+			end
+			toughestPos = bestSepPos or bestAnyPos or closestPos
+		end
+
+		cache = {
+			time = now,
+			range = maxRange,
+			closest = closestPos,
+			toughest = toughestPos,
+		}
+		petalTargetCache[ownerUserId] = cache
+	end
+
+	local targetPos = (petal.role == "toughest") and cache.toughest or cache.closest
+	if not targetPos then
+		return false
+	end
+	if (targetPos - ownerPos).Magnitude > maxRange then
+		return false
+	end
+	local currentPos = record.lastPos or record.origin
+	local desired = targetPos - currentPos
+	if petal.stayHorizontal or petal.alwaysStayHorizontal then
+		desired = Vector3.new(desired.X, 0, desired.Z)
+	end
+	if desired.Magnitude == 0 then
+		return false
+	end
+	desired = desired.Unit
+
+	local currentDir = record.direction
+	local dot = math.clamp(currentDir:Dot(desired), -1, 1)
+	local angle = math.acos(dot)
+	local maxAngle = petal.homingMaxAngle and math.rad(petal.homingMaxAngle) or math.huge
+	if maxAngle < math.pi and angle > maxAngle then
+		return false
+	end
+	if angle <= 0.0001 then
+		record.direction = desired
+		return true
+	end
+
+	local strength = petal.homingStrength or DEFAULT_HOMING_STRENGTH
+	local maxTurn = math.huge
+	if record.homing and record.homing.maxTurnDeg then
+		maxTurn = math.rad(record.homing.maxTurnDeg)
+	end
+	local maxStep = math.rad(strength) * dt
+	local turn = math.min(angle, maxTurn, maxStep)
+	local axis = currentDir:Cross(desired)
+	if axis.Magnitude <= 0.0001 then
+		record.direction = desired
+		return true
+	end
+	axis = axis.Unit
+	local rotation = CFrame.fromAxisAngle(axis, turn)
+	record.direction = rotation:VectorToWorldSpace(currentDir).Unit
+	return true
+end
+
 local function shouldRenderAt(position: Vector3, threshold: number): boolean
 	local camera = workspace.CurrentCamera
 	if not camera then
@@ -575,6 +717,7 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 				stickToPlayer = data.stickToPlayer == true,
 				orbit = typeof(data.orbit) == "table" and data.orbit or nil,
 				homing = typeof(data.homing) == "table" and data.homing or nil,
+				petal = typeof(data.petal) == "table" and data.petal or nil,
 				lastSimTime = now,
 				lastPos = initialPos,
 				lastOwnerPos = nil,
@@ -597,6 +740,7 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			record.stickToPlayer = data.stickToPlayer == true
 			record.orbit = typeof(data.orbit) == "table" and data.orbit or record.orbit
 			record.homing = typeof(data.homing) == "table" and data.homing or record.homing
+			record.petal = typeof(data.petal) == "table" and data.petal or record.petal
 			record.lastSimTime = now
 			record.lastPos = initialPos
 			record.lastOwnerPos = nil
@@ -604,6 +748,9 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 
 		if record.orbit and not record.orbit.ownerUserId then
 			record.orbit.ownerUserId = record.ownerUserId
+		end
+		if record.petal and not record.petal.ownerUserId then
+			record.petal.ownerUserId = record.ownerUserId
 		end
 
 		ensureModel(record, initialPos)
@@ -704,7 +851,12 @@ RunService.Heartbeat:Connect(function(dt: number)
 		local pos = record.lastPos or record.origin
 		local dtSim = now - (record.lastSimTime or now)
 		if dtSim > 0 then
-			if record.orbit then
+			if record.petal then
+				local shouldMove = updatePetal(record, dtSim, now)
+				if shouldMove then
+					pos = pos + record.direction * record.speed * dtSim
+				end
+			elseif record.orbit then
 				local ownerRoot = getOwnerRootPart(record.orbit.ownerUserId)
 				if ownerRoot then
 					local angle = (record.orbit.angle or 0) + math.rad(record.orbit.speedDeg or 0) * dtSim

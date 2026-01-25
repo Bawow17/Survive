@@ -26,6 +26,7 @@ local StatusEffectSystem
 local GameTimeSystem
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local EasingUtils = require(game.ServerScriptService.Balance.EasingUtils)
+local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 
 -- Component references
 local _Position
@@ -640,6 +641,8 @@ function ChargerAISystem.step(dt: number)
 			lifetimeSpeedMult = EasingUtils.evaluate(EnemyBalance.LifetimeMoveSpeedScaling, entityLifetime)
 		end
 		approachSpeed = approachSpeed * globalSpeedMult * lifetimeSpeedMult
+		local slowMultiplier = EnemySlowSystem.getSlowMultiplier(entity)
+		approachSpeed = approachSpeed * slowMultiplier
 		
 		-- CRITICAL: Update AI component with scaled speed (for persistence + sync)
 		if ai.speed ~= approachSpeed then
@@ -860,7 +863,7 @@ function ChargerAISystem.step(dt: number)
 				local lockedDashDir = chargerState.dashDirection or faceDirVec3  -- Fallback if lock failed
 				
 				-- Calculate dash duration
-				local dashSpeed = balance.dashSpeed or 60
+				local dashSpeed = (balance.dashSpeed or 60) * slowMultiplier
 				local dashDist = dist + (balance.dashOvershoot or 30)
 				local dashDur = dashSpeed > 0 and (dashDist / dashSpeed) or (balance.dashDuration or 0.75)
 				dashDur = math.max(balance.dashDuration or 0.75, dashDur)
@@ -881,7 +884,7 @@ function ChargerAISystem.step(dt: number)
 		elseif chargerState.state == S_DASH then
 			-- Fast straight-line dash
 			local dashDir = chargerState.dashDirection or faceDirVec3
-			local dashSpeed = balance.dashSpeed or 60
+			local dashSpeed = (balance.dashSpeed or 60) * slowMultiplier
 			local newVel = dashDir * dashSpeed
 			setVelocity(entity, { x = newVel.X, y = 0, z = newVel.Z })
 			

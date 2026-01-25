@@ -390,4 +390,29 @@ function DamageSystem.getStats()
 	}
 end
 
+function DamageSystem.applyKnockback(targetEntity: number, direction: Vector3, distance: number, duration: number, stunned: boolean?): boolean
+	if not world or not targetEntity then
+		return false
+	end
+	if typeof(direction) ~= "Vector3" or direction.Magnitude <= 0.001 then
+		return false
+	end
+	local entityPos = world:get(targetEntity, Position)
+	if not entityPos then
+		return false
+	end
+	local knockbackDuration = math.max(duration or 0.2, 0.05)
+	local knockbackVelocity = direction.Unit * (math.max(distance or 0, 0) / knockbackDuration)
+	DirtyService.setIfChanged(world, targetEntity, Knockback, {
+		velocity = {
+			x = knockbackVelocity.X,
+			y = knockbackVelocity.Y,
+			z = knockbackVelocity.Z,
+		},
+		endTime = tick() + knockbackDuration,
+		stunned = stunned == nil and true or stunned,
+	}, "Knockback")
+	return true
+end
+
 return DamageSystem

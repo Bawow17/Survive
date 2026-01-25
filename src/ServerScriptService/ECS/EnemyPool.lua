@@ -166,6 +166,9 @@ function EnemyPool.release(entity: number)
 		if world:has(entity, Components.EnemyPausedTime) then
 			world:remove(entity, Components.EnemyPausedTime)
 		end
+		if world:has(entity, Components.EnemySlow) then
+			world:remove(entity, Components.EnemySlow)
+		end
 		
 		-- Return to pool
 		poolCount += 1

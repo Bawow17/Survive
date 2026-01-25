@@ -127,6 +127,9 @@ type RenderRecord = {
 	simSpawnTime: number?,
 	simLifetime: number?,
 	simSeed: number?,
+	impaleModel: Model?,
+	impaleParts: {BasePart}?,
+	impaleToken: number?,
 }
 
 local renderedEntities: {[string]: RenderRecord} = {}
@@ -150,6 +153,7 @@ local lastExpOrbCleanup = 0
 local lastDeathCleanupCheck = 0
 local lastInvisibleEnemyCheck = 0
 local DEATH_CLEANUP_INTERVAL = 1.0  -- Check every second
+local impaleTokenCounter = 0
 
 local function entityKey(entityId: string | number): string
 	if typeof(entityId) == "number" then
@@ -361,6 +365,11 @@ local function resetModelForPool(record: RenderRecord, model: Model)
 	if highlight and highlight:IsA("Highlight") then
 		highlight:Destroy()
 	end
+	for _, child in ipairs(model:GetChildren()) do
+		if child:IsA("Model") and (child.Name == "ImpaledShard" or child:GetAttribute("__ImpaleToken") ~= nil) then
+			child:Destroy()
+		end
+	end
 	model:SetAttribute("ECS_EntityId", nil)
 	model:SetAttribute("ECS_LastUpdate", nil)
 	model:SetAttribute("HitFlashLogged", nil)
@@ -477,6 +486,107 @@ local function toVelocityVector(velocityData: any): Vector3?
 		end
 	end
 	return nil
+end
+
+local function findModelByPath(modelPath: string): Model?
+    local current: Instance? = game
+    for _, partName in ipairs(string.split(modelPath, ".")) do
+        if not current then
+            return nil
+        end
+        if partName == "ReplicatedStorage" then
+            current = ReplicatedStorage
+        else
+            current = current:FindFirstChild(partName)
+        end
+    end
+    if current and current:IsA("Model") then
+        return current
+    end
+    return nil
+end
+
+local function buildImpaleParts(model: Model): {BasePart}
+    local parts = {}
+    local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+    if primary and not model.PrimaryPart then
+        model.PrimaryPart = primary
+    end
+    for _, descendant in ipairs(model:GetDescendants()) do
+        if descendant:IsA("BasePart") then
+            if descendant:GetAttribute("__ImpaleOrigTransparency") == nil then
+                descendant:SetAttribute("__ImpaleOrigTransparency", descendant.Transparency)
+            end
+            descendant.Transparency = descendant:GetAttribute("__ImpaleOrigTransparency") :: number
+            descendant.Anchored = false
+            descendant.CanCollide = false
+            descendant.CanTouch = false
+            descendant.CanQuery = false
+            descendant.Massless = true
+            table.insert(parts, descendant)
+        end
+    end
+    return parts
+end
+
+local function weldImpaleModel(model: Model, target: BasePart)
+    local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+    if not primary then
+        return
+    end
+    if not model.PrimaryPart then
+        model.PrimaryPart = primary
+    end
+
+    -- Weld internal parts to primary for stability
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") and part ~= primary then
+            local constraint = Instance.new("WeldConstraint")
+            constraint.Part0 = primary
+            constraint.Part1 = part
+            constraint.Parent = primary
+        end
+    end
+
+    local attach = Instance.new("WeldConstraint")
+    attach.Part0 = target
+    attach.Part1 = primary
+    attach.Parent = target
+    model:PivotTo(target.CFrame)
+end
+
+local function fadeImpaleModel(model: Model, parts: {BasePart}, duration: number, token: number)
+    model:SetAttribute("__ImpaleToken", token)
+    local steps = 10
+    local stepDuration = steps > 0 and (duration / steps) or 0
+    for step = 1, steps do
+        local alpha = step / steps
+        local delayTime = (step - 1) * stepDuration
+        task.delay(delayTime, function()
+            if model:GetAttribute("__ImpaleToken") ~= token then
+                return
+            end
+            for _, part in ipairs(parts) do
+                if part and part.Parent then
+                    local original = part:GetAttribute("__ImpaleOrigTransparency")
+                    if typeof(original) ~= "number" then
+                        original = part.Transparency
+                        part:SetAttribute("__ImpaleOrigTransparency", original)
+                    end
+                    part.Transparency = original + (1 - original) * alpha
+                end
+            end
+        end)
+    end
+
+    task.delay(duration + 0.05, function()
+        if model:GetAttribute("__ImpaleToken") ~= token then
+            return
+        end
+        if model and model.Parent then
+            model:Destroy()
+        end
+    end)
 end
 
 -- Hit flash and death animation tracking
@@ -1123,6 +1233,58 @@ local function handleDeathAnimation(model: Model, deathData: any)
 		duration = fadeDuration,
 		expireTime = expireTime,
 	}
+end
+
+local function handleEnemySlow(record: RenderRecord, slowData: any)
+    if not record or not record.model or typeof(slowData) ~= "table" then
+        return
+    end
+
+    local modelPath = slowData.impaleModelPath
+    if typeof(modelPath) ~= "string" or modelPath == "" then
+        modelPath = ModelPaths.getModelPath("Projectile", "IceShard")
+    end
+    if not modelPath then
+        return
+    end
+
+    local template = findModelByPath(modelPath)
+    if not template then
+        return
+    end
+
+    local enemyRoot = record.model.PrimaryPart or record.model:FindFirstChildWhichIsA("BasePart")
+    if not enemyRoot then
+        return
+    end
+
+    local impaleModel = record.impaleModel
+    if not impaleModel or not impaleModel.Parent then
+        impaleModel = template:Clone()
+        impaleModel.Name = "ImpaledShard"
+        impaleModel.Parent = record.model
+        record.impaleParts = buildImpaleParts(impaleModel)
+        weldImpaleModel(impaleModel, enemyRoot)
+        record.impaleModel = impaleModel
+    else
+        if record.impaleParts then
+            for _, part in ipairs(record.impaleParts) do
+                if part and part.Parent then
+                    local original = part:GetAttribute("__ImpaleOrigTransparency")
+                    if typeof(original) == "number" then
+                        part.Transparency = original
+                    end
+                end
+            end
+        end
+    end
+
+    impaleTokenCounter += 1
+    local token = impaleTokenCounter
+    record.impaleToken = token
+
+    local duration = typeof(slowData.duration) == "number" and slowData.duration or 0.5
+    fadeImpaleModel(impaleModel, record.impaleParts or buildImpaleParts(impaleModel), duration, token)
 end
 
 local function updateDeathAnimations()
@@ -2629,6 +2791,11 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 	-- Handle death animation
 	if entityData.DeathAnimation then
 		handleDeathAnimation(record.model, entityData.DeathAnimation)
+	end
+
+	-- Handle enemy slow impale visual
+	if entityData.EnemySlow then
+		handleEnemySlow(record, entityData.EnemySlow)
 	end
 	
 	-- Handle Visual component changes (for red orb teleportation)

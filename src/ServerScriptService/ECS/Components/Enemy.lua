@@ -37,4 +37,7 @@ EnemyComponents.PathfindingState = world:component()
 -- EnemyPausedTime component - Tracks total time enemy has been paused (for lifetime scaling)
 EnemyComponents.EnemyPausedTime = world:component()
 
+-- EnemySlow component - Tracks slow debuff state (duration + multiplier)
+EnemyComponents.EnemySlow = world:component()
+
 return EnemyComponents
