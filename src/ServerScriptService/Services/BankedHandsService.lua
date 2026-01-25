@@ -73,6 +73,18 @@ local function resolveNextHand(playerEntity: number, player: Player?): (any?, {q
 		local hand = hands.queue[1]
 		if not hand.choices then
 			hand.choices = UpgradeSystem.selectUpgradeChoices(playerEntity, hand.toLevel, 5)
+			hand.clientChoices = {}
+			for index, choice in ipairs(hand.choices) do
+				hand.clientChoices[index] = {
+					id = choice.id,
+					name = choice.name,
+					desc = choice.desc,
+					category = choice.category,
+					color = choice.color,
+					rarity = choice.rarity,
+					level = choice.level,
+				}
+			end
 			changed = true
 		end
 		if hand.choices and #hand.choices > 0 then
@@ -101,7 +113,7 @@ local function sendHand(player: Player?, hand: any, count: number)
 		handId = hand.id,
 		fromLevel = hand.fromLevel,
 		toLevel = hand.toLevel,
-		choices = hand.choices or {},
+		choices = hand.clientChoices or hand.choices or {},
 		pendingCount = count,
 	})
 end
@@ -194,10 +206,12 @@ function BankedHandsService.init(worldRef: any, components: any, dirtyService: a
 				return
 			end
 			local valid = false
+			local chosenUpgrade = nil
 			if hand.choices then
 				for _, choice in ipairs(hand.choices) do
 					if choice and choice.id == upgradeId then
 						valid = true
+						chosenUpgrade = choice
 						break
 					end
 				end
@@ -205,7 +219,7 @@ function BankedHandsService.init(worldRef: any, components: any, dirtyService: a
 			if not valid then
 				return
 			end
-			local success = UpgradeSystem.applyUpgrade(playerEntity, upgradeId)
+			local success = UpgradeSystem.applyUpgrade(playerEntity, chosenUpgrade)
 			if not success then
 				return
 			end

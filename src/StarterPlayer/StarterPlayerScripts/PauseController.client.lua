@@ -369,6 +369,8 @@ end
 local function populateChoice(choiceFrame: Frame, upgradeData: any, index: number)
 	local nameLabel = choiceFrame:FindFirstChild("Name")
 	local descLabel = choiceFrame:FindFirstChild("Desc")
+	local rarityLabel = choiceFrame:FindFirstChild("Rarity")
+	local levelLabel = choiceFrame:FindFirstChild("Level")
 	local button = choiceFrame:FindFirstChild("Button")
 	
 	if not upgradeData then
@@ -392,19 +394,45 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 	
 	if nameLabel then
 		nameLabel.Text = displayName or "Unknown"
-		
-		-- Apply color to name text
-		local textColor = Color3.fromRGB(255, 255, 255) -- Default white
-		if upgradeData.color then
-			textColor = upgradeData.color
-		elseif upgradeData.data and upgradeData.data.color then
-			textColor = upgradeData.data.color
+		local nameColor = Color3.fromRGB(255, 255, 255)
+		if upgradeData and (upgradeData.category == "ability" or upgradeData.category == "attribute" or upgradeData.category == "ability_unlock") then
+			if upgradeData.color then
+				nameColor = upgradeData.color
+			elseif upgradeData.data and upgradeData.data.color then
+				nameColor = upgradeData.data.color
+			end
 		end
-		nameLabel.TextColor3 = textColor
+		nameLabel.TextColor3 = nameColor
 	end
 	
 	if descLabel then
 		descLabel.Text = displayDesc or ""
+	end
+
+	if rarityLabel then
+		local rarityText = ""
+		if upgradeData and upgradeData.category ~= "ability_unlock" then
+			rarityText = upgradeData.rarity or upgradeData.category or ""
+		end
+		rarityLabel.Text = rarityText
+		local rarityColor = Color3.fromRGB(255, 255, 255)
+		if upgradeData.color then
+			rarityColor = upgradeData.color
+		elseif upgradeData.data and upgradeData.data.color then
+			rarityColor = upgradeData.data.color
+		end
+		rarityLabel.TextColor3 = rarityColor
+	end
+
+	if levelLabel then
+		local levelValue = upgradeData and upgradeData.level
+		if typeof(levelValue) == "number" then
+			levelLabel.Text = "Lv " .. tostring(levelValue)
+			levelLabel.Visible = true
+		else
+			levelLabel.Text = ""
+			levelLabel.Visible = false
+		end
 	end
 	
 	-- Store upgrade ID on button for click handler

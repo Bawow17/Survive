@@ -61,7 +61,7 @@ local REFRESH_INTERVAL = 0.5
 
 local REQUEST_DISTANCE_BUFFER = 3
 local MAGNET_RADIUS_MULTIPLIER = 6
-local GLOBAL_MAGNET_RADIUS = 1e9
+local GLOBAL_MAGNET_RADIUS = 1000
 
 local function ensurePlayerKnown(player: Player): {[number]: boolean}
 	local known = knownByPlayer[player]

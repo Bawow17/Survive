@@ -946,7 +946,10 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 	-- Initialize Upgrades component (tracks upgrade progress)
 	setComponent(entity, Upgrades, {
 		abilities = {},
-		passives = {}
+		passives = {
+			stats = {},
+			counts = {},
+		},
 	}, "Upgrades")
 	
 	-- Initialize PassiveEffects component (computed passive multipliers)
@@ -960,7 +963,22 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		sizeMultiplier = 1.0,
 		durationMultiplier = 1.0,
 		pickupRangeMultiplier = 1.0,
+		penetrationMultiplier = 1.0,
+		mobilityCooldownMultiplier = 1.0,
 		mobilityDistanceMultiplier = 1.0,  -- Calculated from moveSpeed + active buffs
+		mobilityDistanceBase = 1.0,
+		mobilityVerticalMultiplier = 1.0,
+		grappleDistanceMultiplier = 1.0,
+		regenMultiplier = 1.0,
+		regenDelayMultiplier = 1.0,
+		critChance = 0,
+		critDamage = 0,
+		armorReduction = 0,
+		lifesteal = 0,
+		luck = 0,
+		powerupChance = 0,
+		projectileCountBonus = 0,
+		projectileBounceBonus = 0,
 		activeSpeedBuffs = {},  -- Track multiple speed buffs: {levelUp: {mult, endTime}, cloak: {mult, endTime}}
 	}, "PassiveEffects")
 	
@@ -1339,6 +1357,10 @@ local function stepWorld(dt: number)
 	-- Passive effect system (applies passive multipliers to humanoid properties)
 	debug.profilebegin("PassiveEffects")
 	PassiveEffectSystem.step(dt)
+	debug.profileend()
+
+	debug.profilebegin("UpgradeRebuild")
+	UpgradeSystem.step(dt)
 	debug.profileend()
 
 	-- Network synchronization

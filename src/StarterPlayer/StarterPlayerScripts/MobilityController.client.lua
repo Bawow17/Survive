@@ -53,6 +53,8 @@ local equippedMobility: string? = nil
 local lastUsedTime: number = 0
 local mobilityDistanceMultiplier: number = 1.0
 local cooldownMultiplier: number = 1.0
+local mobilityCooldownMultiplier: number = 1.0
+local mobilityVerticalMultiplier: number = 1.0
 
 -- Config values from server (overridden when mobility is equipped)
 local serverDistance: number? = nil
@@ -567,6 +569,14 @@ local function initRemotes()
 				if typeof(data.mobilityDistanceMultiplier) == "number" then
 					mobilityDistanceMultiplier = data.mobilityDistanceMultiplier
 				end
+				if typeof(data.mobilityVerticalMultiplier) == "number" then
+					mobilityVerticalMultiplier = data.mobilityVerticalMultiplier
+				end
+				if typeof(data.mobilityCooldownMultiplier) == "number" then
+					mobilityCooldownMultiplier = data.mobilityCooldownMultiplier
+				elseif typeof(data.cooldownMultiplier) == "number" then
+					mobilityCooldownMultiplier = data.cooldownMultiplier
+				end
 				if typeof(data.cooldownMultiplier) == "number" then
 					cooldownMultiplier = data.cooldownMultiplier
 				end
@@ -628,7 +638,7 @@ local function isOnCooldown(config: any): boolean
 	elseif isPaused then
 		currentTime = pauseStartTime
 	end
-	local effectiveCooldown = config.cooldown * cooldownMultiplier
+	local effectiveCooldown = config.cooldown * mobilityCooldownMultiplier
 	local timeSinceLastUse = currentTime - lastUsedTime
 	return timeSinceLastUse < effectiveCooldown
 end
@@ -1086,7 +1096,7 @@ local function executeDoubleJump()
 	-- Use server config values if available, otherwise fallback to hardcoded
 	local effectiveConfig = {
 		horizontalDistance = serverDistance or DOUBLE_JUMP_CONFIG.horizontalDistance,
-		verticalHeight = serverVerticalHeight or DOUBLE_JUMP_CONFIG.verticalHeight,
+		verticalHeight = (serverVerticalHeight or DOUBLE_JUMP_CONFIG.verticalHeight) * mobilityVerticalMultiplier,
 		cooldown = serverCooldown or DOUBLE_JUMP_CONFIG.cooldown,
 	}
 	

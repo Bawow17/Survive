@@ -125,8 +125,11 @@ local function handleMobilityActivation(player: Player, mobilityId: string)
 	-- Apply cooldown multiplier from passive effects
 	local effectiveCooldown = config.cooldown
 	local passiveEffects = world:get(playerEntity, PassiveEffects)
-	if passiveEffects and passiveEffects.cooldownMultiplier then
-		effectiveCooldown = effectiveCooldown * passiveEffects.cooldownMultiplier
+	if passiveEffects then
+		local mobilityCooldownMult = passiveEffects.mobilityCooldownMultiplier or passiveEffects.cooldownMultiplier
+		if mobilityCooldownMult then
+			effectiveCooldown = effectiveCooldown * mobilityCooldownMult
+		end
 	end
 	
 	-- Grace period: Allow activation if within 1 second of cooldown finishing

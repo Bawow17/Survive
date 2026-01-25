@@ -11,7 +11,7 @@ return {
 		color = Color3.fromRGB(0, 100, 255), -- Blue
 		stats = {
 			scale = "55%",  -- 35% projectile size
-			cooldown = "+5%",  
+			cooldown = "+2.5%",  
 			damage = "67%",  -- Reduce damage by 33%
 			explosionDamage = "33%",  -- 33% explosion damage
 			explosionScale = "45%",  -- NEW: 35% explosion size (matches projectile)
@@ -53,4 +53,3 @@ return {
 		},
 	},
 }
-

@@ -13,7 +13,7 @@ return {
 	BaseDamageMultiplier = 1.0,  -- Global damage scaling (higher = more damage)
 	
 	-- Regeneration & Survival
-	HealthRegenRate = 1.8,  -- HP per second at 100% regen (0 = no regen by default)
+	HealthRegenRate = 1.0,  -- HP per second at 100% regen (0 = no regen by default)
 	HealthRegenDelay = 5.0,  -- Total delay before reaching 100% regen (first 1s = 0%, then scales up)
 	BaseInvincibilityFrames = 0.5,  -- Seconds of invincibility after taking damage
 	
@@ -49,4 +49,3 @@ return {
 		-- Example: L10 with L100 highest = 2.0 + (3 * (90/100)) = 2.0 + 2.7 = 4.7x EXP
 	},
 }
-

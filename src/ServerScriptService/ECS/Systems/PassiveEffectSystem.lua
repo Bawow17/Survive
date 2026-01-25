@@ -115,7 +115,8 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 	end
 	
 	-- Apply same multiplier to mobility distances (Dash, Double Jump, Shield Bash)
-	effects.mobilityDistanceMultiplier = totalSpeedMult
+	local mobilityBase = effects.mobilityDistanceBase or 1.0
+	effects.mobilityDistanceMultiplier = mobilityBase * totalSpeedMult
 	DirtyService.setIfChanged(world, playerEntity, PassiveEffects, effects, "PassiveEffects")
 	
 	-- Store pickup range multiplier for ExpCollectionSystem
@@ -242,7 +243,8 @@ function PassiveEffectSystem.refreshPlayerSpeed(playerEntity: number)
 	humanoid.WalkSpeed = baseWalkSpeed * totalSpeedMult
 	
 	-- Apply same multiplier to mobility distances
-	effects.mobilityDistanceMultiplier = totalSpeedMult
+	local mobilityBase = effects.mobilityDistanceBase or 1.0
+	effects.mobilityDistanceMultiplier = mobilityBase * totalSpeedMult
 	DirtyService.setIfChanged(world, playerEntity, PassiveEffects, effects, "PassiveEffects")
 end
 

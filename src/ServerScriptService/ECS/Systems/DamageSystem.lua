@@ -18,6 +18,9 @@ local EntityType: any
 local HitFlash: any
 local Knockback: any
 local DeathAnimation: any
+local PassiveEffects: any
+
+local RNG = Random.new()
 
 local damageAttemptCount = 0
 local damageAppliedCount = 0
@@ -33,6 +36,18 @@ local KNOCKBACK_DURATION = 0.2
 -- Buffer time between HitFlash end and death fade start
 local DEATH_ANIMATION_BUFFER = 0.05  -- 50ms buffer for client to render HitFlash
 
+local function isPlayerSourceEntity(sourceEntity: number?): boolean
+	if not sourceEntity then
+		return false
+	end
+	local sourceType = world:get(sourceEntity, EntityType)
+	if sourceType and sourceType.type == "Player" then
+		return true
+	end
+	local sourceStats = world:get(sourceEntity, Components.PlayerStats)
+	return sourceStats and sourceStats.player ~= nil
+end
+
 function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	world = worldRef
 	Components = components
@@ -44,6 +59,7 @@ function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	HitFlash = Components.HitFlash
 	Knockback = Components.Knockback
 	DeathAnimation = Components.DeathAnimation
+	PassiveEffects = Components.PassiveEffects
 end
 
 -- Set EnemyExpDropSystem reference (called after it's initialized)
@@ -102,6 +118,30 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	local entityType = world:get(targetEntity, EntityType)
 	local isPlayer = entityType and entityType.type == "Player"
 	local isEnemy = entityType and entityType.type == "Enemy"
+
+	-- Apply player defensive modifiers (armor)
+	if isPlayer then
+		local targetEffects = world:get(targetEntity, PassiveEffects)
+		if targetEffects then
+			local armorReduction = math.clamp(targetEffects.armorReduction or 0, 0, 0.6)
+			if armorReduction > 0 then
+				local effectiveArmor = armorReduction * armorReduction
+				damageAmount = damageAmount * (1 - effectiveArmor)
+			end
+		end
+	end
+
+	-- Apply player offensive modifiers (crit)
+	if isEnemy and sourceEntity and isPlayerSourceEntity(sourceEntity) then
+		local sourceEffects = world:get(sourceEntity, PassiveEffects)
+		if sourceEffects then
+			local critChance = sourceEffects.critChance or 0
+			if critChance > 0 and RNG:NextNumber() < critChance then
+				local critDamage = sourceEffects.critDamage or 0
+				damageAmount = damageAmount * (2 + critDamage)
+			end
+		end
+	end
 	
 	-- CRITICAL: Check if player is Shield Bashing - absorb ALL damage and prevent death
 	if isPlayer then
@@ -123,31 +163,21 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	end
 	
 	-- Track ability damage for player sources (only count damage to enemies)
-	if sourceEntity and abilityId and isEnemy then
-		local sourceEntityType = world:get(sourceEntity, EntityType)
-		local isPlayerSource = sourceEntityType and sourceEntityType.type == "Player"
-		
-		if isPlayerSource then
-			local damageStats = world:get(sourceEntity, Components.AbilityDamageStats)
-			if not damageStats then
-				damageStats = {}
-			end
-			
-			-- Accumulate damage for this ability
-			damageStats[abilityId] = (damageStats[abilityId] or 0) + damageAmount
-			DirtyService.setIfChanged(world, sourceEntity, Components.AbilityDamageStats, damageStats, "AbilityDamageStats")
+	if sourceEntity and abilityId and isEnemy and isPlayerSourceEntity(sourceEntity) then
+		local damageStats = world:get(sourceEntity, Components.AbilityDamageStats)
+		if not damageStats then
+			damageStats = {}
 		end
+		
+		-- Accumulate damage for this ability
+		damageStats[abilityId] = (damageStats[abilityId] or 0) + damageAmount
+		DirtyService.setIfChanged(world, sourceEntity, Components.AbilityDamageStats, damageStats, "AbilityDamageStats")
 	end
 	
 	-- Track session damage for player sources (damage to enemies)
-	if sourceEntity and isEnemy then
-		local sourceEntityType = world:get(sourceEntity, EntityType)
-		local isPlayerSource = sourceEntityType and sourceEntityType.type == "Player"
-		
-		if isPlayerSource then
-			local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
-			SessionStatsTracker.trackDamage(sourceEntity, damageAmount)
-		end
+	if sourceEntity and isEnemy and isPlayerSourceEntity(sourceEntity) then
+		local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
+		SessionStatsTracker.trackDamage(sourceEntity, damageAmount)
 	end
 	
 	-- Get health component
@@ -300,6 +330,33 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 					-- Notify HealthRegenSystem that player took damage
 					local HealthRegenSystem = require(game.ServerScriptService.ECS.Systems.HealthRegenSystem)
 					HealthRegenSystem.onPlayerDamaged(targetEntity)
+				end
+			end
+		end
+	end
+
+	-- Apply lifesteal for player sources damaging enemies
+	if isEnemy and sourceEntity and remainingDamage > 0 and isPlayerSourceEntity(sourceEntity) then
+		local sourceEffects = world:get(sourceEntity, PassiveEffects)
+		local lifesteal = sourceEffects and sourceEffects.lifesteal or 0
+		if lifesteal > 0 then
+			local sourceHealth = world:get(sourceEntity, Health)
+			if sourceHealth then
+				local healAmount = remainingDamage * lifesteal
+				if healAmount > 0 then
+					local healed = math.min(sourceHealth.current + healAmount, sourceHealth.max)
+					DirtyService.setIfChanged(world, sourceEntity, Health, {
+						current = healed,
+						max = sourceHealth.max,
+					}, "Health")
+
+					local sourceStats = world:get(sourceEntity, Components.PlayerStats)
+					if sourceStats and sourceStats.player and sourceStats.player.Character then
+						local humanoid = sourceStats.player.Character:FindFirstChildOfClass("Humanoid")
+						if humanoid then
+							humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + healAmount)
+						end
+					end
 				end
 			end
 		end

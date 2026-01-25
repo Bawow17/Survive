@@ -27,7 +27,7 @@ local SEEK_SPEED = 120
 local CHECK_INTERVAL = 0.1
 local REQUEST_RETRY_DELAY = 0.4
 local MAGNET_RADIUS_MULTIPLIER = 6
-local GLOBAL_MAGNET_RADIUS = 1e9
+local GLOBAL_MAGNET_RADIUS = 1000
 local ORB_TEMPLATE_PATH = {"ContentDrawer", "ItemModels", "OrbTemplate"}
 
 local COLOR_BY_KIND = {

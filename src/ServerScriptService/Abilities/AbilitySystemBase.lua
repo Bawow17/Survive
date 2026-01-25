@@ -8,6 +8,7 @@ local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGr
 local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
+local UpgradeDefs = require(game.ServerScriptService.Balance.Upgrades.UpgradeDefs)
 
 -- Targeting prediction tuning
 local PREDICTION_FACTOR = 0.6  -- Used only when targetingStats.enablePrediction is true.
@@ -174,6 +175,18 @@ function AbilitySystemBase.getAbilityStats(playerEntity: number, abilityId: stri
 		-- Apply duration multiplier
 		if stats.duration and passiveEffects.durationMultiplier then
 			stats.duration = stats.duration * passiveEffects.durationMultiplier
+		end
+
+		-- Apply penetration multiplier (rounded for integer penetration)
+		if stats.penetration and passiveEffects.penetrationMultiplier then
+			stats.penetration = math.max(0, math.floor(stats.penetration * passiveEffects.penetrationMultiplier + 0.0001))
+		end
+
+		-- Apply projectile count bonus (cap at 5x base)
+		if stats.projectileCount and passiveEffects.projectileCountBonus then
+			local baseCount = baseBalance.projectileCount or stats.projectileCount
+			local maxCount = math.floor(baseCount * UpgradeDefs.SoftCaps.countMaxMultiplier + 0.0001)
+			stats.projectileCount = math.min(maxCount, math.floor(stats.projectileCount + passiveEffects.projectileCountBonus + 0.0001))
 		end
 	end
 	

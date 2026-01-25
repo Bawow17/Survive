@@ -49,6 +49,52 @@ local TeamWipeRemote: RemoteEvent
 local StartCleanupRemote: RemoteEvent
 local WipeCleanupCompleteRemote: RemoteEvent
 
+local function clearAfterimagesAttribute(playerEntity: number)
+	if not world or not Components then
+		return
+	end
+
+	local changed = false
+	local attributeSelections = world:get(playerEntity, Components.AttributeSelections)
+	if attributeSelections then
+		for abilityId, attributeId in pairs(attributeSelections) do
+			if attributeId == "Afterimages" then
+				attributeSelections[abilityId] = nil
+				changed = true
+			end
+		end
+		if changed then
+			if next(attributeSelections) then
+				DirtyService.setIfChanged(world, playerEntity, Components.AttributeSelections, attributeSelections, "AttributeSelections")
+			else
+				world:remove(playerEntity, Components.AttributeSelections)
+			end
+		end
+	end
+
+	local abilityData = world:get(playerEntity, Components.AbilityData)
+	if abilityData and abilityData.abilities then
+		local abilityChanged = false
+		for _, record in pairs(abilityData.abilities) do
+			if record and record.selectedAttribute == "Afterimages" then
+				record.selectedAttribute = nil
+				record.attributeColor = nil
+				record.attributeSpecial = nil
+				abilityChanged = true
+			end
+		end
+		if abilityChanged then
+			DirtyService.setIfChanged(world, playerEntity, Components.AbilityData, {abilities = abilityData.abilities}, "AbilityData")
+		end
+	end
+
+	local clonesData = world:get(playerEntity, Components.AfterimageClones)
+	if clonesData then
+		local AfterimageCloneSystem = require(game.ServerScriptService.ECS.Systems.AfterimageCloneSystem)
+		AfterimageCloneSystem.cleanupClones(playerEntity)
+	end
+end
+
 function GameStateManager.init(worldRef, components, dirtyService, ecsWorldService)
 	world = worldRef
 	Components = components
@@ -485,6 +531,7 @@ function GameStateManager.resetGame()
 	-- Clear player entities
 	for player, data in pairs(playersInGame) do
 		if data.entity then
+			clearAfterimagesAttribute(data.entity)
 			ECSWorldService.DestroyEntity(data.entity)
 		end
 	end
@@ -619,6 +666,7 @@ function handleStartCleanup(player: Player)
 	-- Destroy all player entities
 	for targetPlayer, data in pairs(playersInGame) do
 		if data.entity then
+			clearAfterimagesAttribute(data.entity)
 			ECSWorldService.DestroyEntity(data.entity)
 			data.entity = nil
 		end

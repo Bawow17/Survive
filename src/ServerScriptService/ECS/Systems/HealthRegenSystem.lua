@@ -13,6 +13,7 @@ local DirtyService: any
 
 local Health: any
 local HealthRegen: any
+local PassiveEffects: any
 local _PlayerStats: any
 
 -- Cached query for players
@@ -25,10 +26,11 @@ function HealthRegenSystem.init(worldRef: any, components: any, dirtyService: an
 	
 	Health = Components.Health
 	HealthRegen = Components.HealthRegen
+	PassiveEffects = Components.PassiveEffects
 	_PlayerStats = Components.PlayerStats
 	
 	-- Create cached query
-	playerQuery = world:query(Components.Health, Components.HealthRegen, Components.PlayerStats):cached()
+	playerQuery = world:query(Components.Health, Components.HealthRegen, Components.PlayerStats, Components.PassiveEffects):cached()
 end
 
 -- Call this when player takes damage to reset regen delay
@@ -63,7 +65,7 @@ function HealthRegenSystem.step(dt: number)
 	local currentTime = GameTimeSystem.getGameTime()
 	
 	-- Process all players
-	for playerEntity, health, healthRegen, playerStats in playerQuery do
+	for playerEntity, health, healthRegen, playerStats, passiveEffects in playerQuery do
 		-- Validate player
 		if not playerStats or not playerStats.player or not playerStats.player.Parent then
 			continue
@@ -109,28 +111,34 @@ function HealthRegenSystem.step(dt: number)
 				DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
 			end
 			continue
-		elseif timeSinceDamage < PlayerBalance.HealthRegenDelay then
-			-- Scaling phase: scale from 0% to 100%
-			local scalingDuration = PlayerBalance.HealthRegenDelay - INITIAL_NO_HEAL_DURATION
-			local scalingElapsed = timeSinceDamage - INITIAL_NO_HEAL_DURATION
-			regenMultiplier = scalingElapsed / scalingDuration  -- 0.0 to 1.0
-			
-			if not healthRegen.isRegenerating then
-				healthRegen.isRegenerating = true
-				DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
-			end
 		else
-			-- Full delay passed: 100% regen rate
-			regenMultiplier = 1.0
-			
-			if not healthRegen.isRegenerating then
-				healthRegen.isRegenerating = true
-				DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
+			local regenDelayMult = passiveEffects and passiveEffects.regenDelayMultiplier or 1.0
+			local regenDelay = PlayerBalance.HealthRegenDelay * regenDelayMult
+			if timeSinceDamage < regenDelay then
+				-- Scaling phase: scale from 0% to 100%
+				local scalingDuration = regenDelay - INITIAL_NO_HEAL_DURATION
+				local scalingElapsed = timeSinceDamage - INITIAL_NO_HEAL_DURATION
+				regenMultiplier = scalingDuration > 0 and (scalingElapsed / scalingDuration) or 1.0
+				regenMultiplier = math.clamp(regenMultiplier, 0, 1)
+				
+				if not healthRegen.isRegenerating then
+					healthRegen.isRegenerating = true
+					DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
+				end
+			else
+				-- Full delay passed: 100% regen rate
+				regenMultiplier = 1.0
+				
+				if not healthRegen.isRegenerating then
+					healthRegen.isRegenerating = true
+					DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
+				end
 			end
 		end
 		
 		-- Apply regeneration with multiplier
-		local regenAmount = PlayerBalance.HealthRegenRate * dt * regenMultiplier
+		local passiveRegenMult = passiveEffects and passiveEffects.regenMultiplier or 1.0
+		local regenAmount = PlayerBalance.HealthRegenRate * passiveRegenMult * dt * regenMultiplier
 		local newHealth = math.min(health.current + regenAmount, health.max)
 		
 		-- Update ECS health
@@ -152,4 +160,3 @@ function HealthRegenSystem.step(dt: number)
 end
 
 return HealthRegenSystem
-
