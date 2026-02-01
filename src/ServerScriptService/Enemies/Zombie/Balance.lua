@@ -10,8 +10,8 @@ return {
 	modelPath = "ReplicatedStorage.ContentDrawer.Enemies.Mobs.Zombie",
 	
 	-- Base stats (before multipliers and scaling)
-	baseHealth = 70,
-	baseDamage = 15,
+	baseHealth = 85,
+	baseDamage = 25,
 	baseSpeed = 14,
 	
 	-- AI behavior

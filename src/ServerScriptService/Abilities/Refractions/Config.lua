@@ -16,7 +16,7 @@ return {
 	modelPath = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.Refractions.Refractions",
 	
 	-- Core stats
-	damage = 60,
+	damage = 50,
 	projectileSpeed = 0, -- Beam is stationary relative to player
 	penetration = 9999, -- Infinite penetration
 	duration = 0.5,
@@ -46,5 +46,5 @@ return {
 	spreadAngleOdd = math.rad(0),
 	
 	-- Hit cadence for beam ticks
-	hitCooldown = 0.2,
+	hitCooldown = 0.12,
 }

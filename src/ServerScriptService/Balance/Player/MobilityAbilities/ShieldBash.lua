@@ -20,7 +20,7 @@ return {
 	-- Combat
 	damage = 250,  -- damage per enemy hit
 	knockbackDistance = 50,  -- studs
-	preDashInvincibility = 0.45,  -- seconds of invincibility BEFORE dash (lag protection)
+	preDashInvincibility = 0.0,  -- no pre-dash invincibility (invincibility is granted on hit)
 	invincibilityPerHit = 0.25,  -- seconds of invincibility per enemy hit (stacks)
 	overshieldPerHit = 0.05,  -- 5% of max health as overshield per enemy hit (stacks)
 	
@@ -37,4 +37,3 @@ return {
 	minLevel = 15,  -- Available as upgrade at level 
 	category = "mobility",
 }
-

@@ -46,8 +46,12 @@ local activeShieldBashes: {{
 	damage: number,
 	knockbackDistance: number,
 	invincibilityPerHit: number,
-	overshieldPerHit: number,  -- NEW
-	hitboxRadius: number,
+	overshieldPerHit: number,
+	hitboxSize: Vector3,
+	startPosition: Vector3,
+	direction: Vector3,
+	distance: number,
+	lastPosition: Vector3,
 	hitEnemies: {[number]: boolean},
 }} = {}
 
@@ -168,15 +172,6 @@ local function handleMobilityActivation(player: Player, mobilityId: string)
 	
 	-- Apply server-side effects
 	if mobilityId == "ShieldBash" then
-		-- Grant pre-dash invincibility for lag protection
-		local preDashInvuln = mobilityData.preDashInvincibility or config.preDashInvincibility or 0
-		if preDashInvuln > 0 then
-			StatusEffectSystem.grantInvincibility(playerEntity, preDashInvuln, false, false, false)
-			print(string.format("[ShieldBash] PRE-DASH INVINCIBILITY: %.2fs granted", preDashInvuln))
-		else
-			warn("[ShieldBash] WARNING: No pre-dash invincibility configured!")
-		end
-		
 		-- Get hitbox size from the shield model using shared helper
 		local hitboxSize = Vector3.new(6, 6, 6)  -- Default fallback
 		
@@ -193,82 +188,50 @@ local function handleMobilityActivation(player: Player, mobilityId: string)
 			warn("[ShieldBash] No shieldModelPath in config, using default hitbox size")
 		end
 		
+		-- Determine dash direction + predicted path (instant response, no wall checks)
+		local rootPart = character:FindFirstChild("HumanoidRootPart")
+		if not rootPart then
+			return
+		end
+
+		local dashDirection = rootPart.CFrame.LookVector
+		dashDirection = Vector3.new(dashDirection.X, 0, dashDirection.Z)
+		if dashDirection.Magnitude < 0.1 then
+			dashDirection = Vector3.new(0, 0, 1)
+		else
+			dashDirection = dashDirection.Unit
+		end
+
+		local passiveEffects = world:get(playerEntity, PassiveEffects)
+		local distanceMultiplier = 1.0
+		if passiveEffects and typeof(passiveEffects.mobilityDistanceMultiplier) == "number" then
+			distanceMultiplier = passiveEffects.mobilityDistanceMultiplier
+		end
+		local dashDistance = (mobilityData.distance or config.distance or 25) * distanceMultiplier
+		local dashDuration = mobilityData.duration or config.duration or 0.2
+		local startPosition = rootPart.Position
+
 		-- Start server-side collision tracking for Shield Bash
 		local bashData = {
 			playerEntity = playerEntity,
 			player = player,
 			startTime = currentTime,
-			duration = config.duration or 0.2,
+			duration = dashDuration,
 			damage = mobilityData.damage or 50,
 			knockbackDistance = mobilityData.knockbackDistance or 20,
 			invincibilityPerHit = mobilityData.invincibilityPerHit or 0.05,
-			overshieldPerHit = mobilityData.overshieldPerHit or 0.05,  -- NEW
-			hitboxSize = hitboxSize,  -- Store the size vector
-			hitEnemies = {},  -- Track which enemies we've already hit
-			lastUpdateTime = 0,  -- For 150fps throttling
-			damageAbsorbed = 0,  -- Track damage taken during dash for healing
+			overshieldPerHit = mobilityData.overshieldPerHit or 0.05,
+			hitboxSize = hitboxSize,
+			startPosition = startPosition,
+			direction = dashDirection,
+			distance = dashDistance,
+			lastPosition = startPosition,
+			hitEnemies = {},
 		}
 		table.insert(activeShieldBashes, bashData)
-		
-		-- INSTANT HIT DETECTION: Check for enemies immediately on activation (no throttle delay)
-		local rootPart = character:FindFirstChild("HumanoidRootPart")
-		if rootPart then
-			local charPos = rootPart.Position
-			local lookDir = rootPart.CFrame.LookVector
-			local hitboxOffset = bashData.hitboxSize.Z / 2
-			local hitboxPos = charPos + (lookDir * hitboxOffset)
-			
-			-- Check for enemies in front of player
-			local GRID_SIZE = SpatialGridSystem.getGridSize()
-			local maxDimension = math.max(bashData.hitboxSize.X, bashData.hitboxSize.Y, bashData.hitboxSize.Z)
-			local searchRadius = math.ceil(maxDimension / GRID_SIZE)
-			local nearbyEntities = SpatialGridSystem.getNeighboringEntities(hitboxPos, searchRadius)
-			
-			-- Count enemies in hitbox
-			local enemiesInRange = 0
-			local hitboxCFrame = CFrame.new(hitboxPos, hitboxPos + lookDir)
-			local halfSize = bashData.hitboxSize / 2
-			
-			for _, targetEntity in ipairs(nearbyEntities) do
-				local targetType = world:get(targetEntity, Components.EntityType)
-				if targetType and targetType.type == "Enemy" then
-					local enemyPos = world:get(targetEntity, Components.Position)
-					if enemyPos then
-						local enemyWorldPos = Vector3.new(enemyPos.x, enemyPos.y, enemyPos.z)
-						local localPos = hitboxCFrame:PointToObjectSpace(enemyWorldPos)
-						
-						if math.abs(localPos.X) <= halfSize.X 
-							and math.abs(localPos.Y) <= halfSize.Y 
-							and math.abs(localPos.Z) <= halfSize.Z then
-							enemiesInRange = enemiesInRange + 1
-						end
-					end
-				end
-			end
-			
-			-- Grant proactive invincibility if enemies detected
-			if enemiesInRange > 0 then
-				local proactiveInvincibility = enemiesInRange * bashData.invincibilityPerHit
-				local statusEffects = world:get(bashData.playerEntity, Components.StatusEffects)
-				local currentRemaining = 0
-				
-				if statusEffects and statusEffects.invincible then
-					local currentEndTime = statusEffects.invincible.endTime
-					local currentTime = GameTimeSystem.getGameTime()
-					currentRemaining = math.max(0, currentEndTime - currentTime)
-				end
-				
-				local totalDuration = currentRemaining + proactiveInvincibility
-				StatusEffectSystem.grantInvincibility(bashData.playerEntity, totalDuration, false, false, false)
-				print(string.format("[ShieldBash] INSTANT: Detected %d enemies → Adding %.2fs invincibility (previous: %.2fs, total: %.2fs)", 
-					enemiesInRange, proactiveInvincibility, currentRemaining, totalDuration))
-			else
-				print("[ShieldBash] INSTANT: No enemies detected in hitbox")
-			end
-		end
-		
-		print(string.format("[ShieldBash] Activated: duration=%.2fs, hitbox=(%.1f,%.1f,%.1f), updating at 150fps", 
-			bashData.duration, hitboxSize.X, hitboxSize.Y, hitboxSize.Z))
+
+		print(string.format("[ShieldBash] Activated: duration=%.2fs, distance=%.1f, hitbox=(%.1f,%.1f,%.1f)", 
+			bashData.duration, bashData.distance, hitboxSize.X, hitboxSize.Y, hitboxSize.Z))
 	elseif mobilityId == "DoubleJump" then
 		-- Grant HP heal on Double Jump use
 		-- ONLY applies overheal when player is already at full HP
@@ -368,166 +331,107 @@ end
 local function processShieldBashCollisions(dt: number)
 	local currentTime = GameTimeSystem.getGameTime()
 	local toRemove = {}
+
+	local function applyShieldBashHits(bashData: any, centerPos: Vector3)
+		local lookDir = bashData.direction
+		if lookDir.Magnitude < 0.1 then
+			lookDir = Vector3.new(0, 0, 1)
+		end
+		local hitboxOffset = bashData.hitboxSize.Z / 2
+		local hitboxPos = centerPos + (lookDir * hitboxOffset)
+		local hitboxCFrame = CFrame.new(hitboxPos, hitboxPos + lookDir)
+
+		local GRID_SIZE = SpatialGridSystem.getGridSize()
+		local maxDimension = math.max(bashData.hitboxSize.X, bashData.hitboxSize.Y, bashData.hitboxSize.Z)
+		local searchRadius = math.ceil(maxDimension / GRID_SIZE)
+		local nearbyEntities = SpatialGridSystem.getNeighboringEntities(hitboxPos, searchRadius)
+		if #nearbyEntities == 0 then
+			nearbyEntities = SpatialGridSystem.getNeighboringEntities(hitboxPos, searchRadius + 1)
+		end
+
+		local halfSize = bashData.hitboxSize / 2
+		local hitsThisCycle = 0
+
+		for _, targetEntity in ipairs(nearbyEntities) do
+			local targetType = world:get(targetEntity, Components.EntityType)
+			if targetType and targetType.type == "Enemy" and not bashData.hitEnemies[targetEntity] then
+				local enemyPos = world:get(targetEntity, Components.Position)
+				if enemyPos then
+					local enemyWorldPos = Vector3.new(enemyPos.x, enemyPos.y, enemyPos.z)
+					local localPos = hitboxCFrame:PointToObjectSpace(enemyWorldPos)
+
+					if math.abs(localPos.X) <= halfSize.X
+						and math.abs(localPos.Y) <= halfSize.Y
+						and math.abs(localPos.Z) <= halfSize.Z then
+						local enemyHealth = world:get(targetEntity, Components.Health)
+						if enemyHealth and enemyHealth.current > 0 then
+							DamageSystem.applyDamage(targetEntity, bashData.damage, "physical", bashData.playerEntity, "ShieldBash")
+							hitsThisCycle += 1
+
+							local enemyData = world:get(targetEntity, Components.EnemyData)
+							if enemyData and enemyData.model then
+								local enemyRootPart = enemyData.model.PrimaryPart or enemyData.model:FindFirstChild("HumanoidRootPart")
+								if enemyRootPart then
+									local knockbackDirection = (enemyRootPart.Position - centerPos)
+									knockbackDirection = Vector3.new(knockbackDirection.X, 0, knockbackDirection.Z)
+									if knockbackDirection.Magnitude > 0.1 then
+										knockbackDirection = knockbackDirection.Unit
+										knockbackDirection = Vector3.new(knockbackDirection.X, 0.3, knockbackDirection.Z).Unit
+										local knockbackVelocity = knockbackDirection * bashData.knockbackDistance * 10
+										enemyRootPart.AssemblyLinearVelocity = knockbackVelocity
+									end
+								end
+							end
+
+							bashData.hitEnemies[targetEntity] = true
+						end
+					end
+				end
+			end
+		end
+
+		if hitsThisCycle > 0 then
+			local invincibilityToAdd = hitsThisCycle * bashData.invincibilityPerHit
+			local statusEffects = world:get(bashData.playerEntity, Components.StatusEffects)
+			local currentRemaining = 0
+			if statusEffects and statusEffects.invincible then
+				local currentEndTime = statusEffects.invincible.endTime
+				local now = GameTimeSystem.getGameTime()
+				currentRemaining = math.max(0, currentEndTime - now)
+			end
+			local totalDuration = currentRemaining + invincibilityToAdd
+			StatusEffectSystem.grantInvincibility(bashData.playerEntity, totalDuration, false, false, false)
+
+			local health = world:get(bashData.playerEntity, Components.Health)
+			if health and bashData.overshieldPerHit > 0 then
+				local overshieldAmount = health.max * bashData.overshieldPerHit * hitsThisCycle
+				OverhealSystem.grantOverheal(bashData.playerEntity, overshieldAmount)
+			end
+		end
+	end
 	
 	for i, bashData in ipairs(activeShieldBashes) do
 		local elapsed = currentTime - bashData.startTime
 		
 		-- Check if Shield Bash duration expired
 		if elapsed >= bashData.duration then
-			-- Grant final overshield based on total hits
-			local hitCount = 0
-			for _ in pairs(bashData.hitEnemies) do
-				hitCount = hitCount + 1
-			end
-			
-			local health = world:get(bashData.playerEntity, Components.Health)
-			if health then
-				-- Grant overshield based on total hits
-				if hitCount > 0 then
-					local overshieldAmount = health.max * bashData.overshieldPerHit * hitCount
-					OverhealSystem.grantOverheal(bashData.playerEntity, overshieldAmount)
-					print(string.format("[ShieldBash] Complete: hit %d enemies, granted %.0f%% overshield", 
-						hitCount, hitCount * bashData.overshieldPerHit * 100))
-				end
-				
-				-- CRITICAL: Heal ALL damage absorbed during dash (full invincibility)
-				if bashData.damageAbsorbed > 0 then
-					local newHealth = math.min(health.current + bashData.damageAbsorbed, health.max)
-					DirtyService.setIfChanged(world, bashData.playerEntity, Components.Health, {
-						current = newHealth,
-						max = health.max,
-					}, "Health")
-					
-					-- Also update Roblox humanoid health
-					if bashData.player.Character then
-						local humanoid = bashData.player.Character:FindFirstChild("Humanoid")
-						if humanoid then
-							humanoid.Health = newHealth
-						end
-					end
-					
-					print(string.format("[ShieldBash] REVERTED %.1f absorbed damage | HP: %.1f→%.1f", 
-						bashData.damageAbsorbed, health.current, newHealth))
-				end
-			end
-			
 			table.insert(toRemove, i)
 		else
-			-- Update hitbox at 150fps (every ~0.0067s) for high-speed tracking
-			if not bashData.lastUpdateTime or (elapsed - bashData.lastUpdateTime) >= 0.0067 then
-				bashData.lastUpdateTime = elapsed
-				
-				-- Get player position for hitbox center
-				local playerPos = world:get(bashData.playerEntity, Components.Position)
-				if playerPos and bashData.player.Character then
-					local rootPart = bashData.player.Character:FindFirstChild("HumanoidRootPart")
-					if rootPart then
-						-- Update position from character (client-predicted)
-						local charPos = rootPart.Position
-						
-						-- Hitbox offset: position in front of player based on hitbox depth
-						local lookDir = rootPart.CFrame.LookVector
-						local hitboxOffset = bashData.hitboxSize.Z / 2  -- Half the depth of the hitbox
-						local hitboxPos = charPos + (lookDir * hitboxOffset)
-						
-						-- Create hitbox CFrame (oriented with player's look direction)
-						local hitboxCFrame = CFrame.new(hitboxPos, hitboxPos + lookDir)
-						
-						-- Check for enemies in range using spatial grid
-						-- Use the maximum dimension for spatial search radius
-						local GRID_SIZE = SpatialGridSystem.getGridSize()
-						local maxDimension = math.max(bashData.hitboxSize.X, bashData.hitboxSize.Y, bashData.hitboxSize.Z)
-						local searchRadius = math.ceil(maxDimension / GRID_SIZE)
-						
-						local nearbyEntities = SpatialGridSystem.getNeighboringEntities(hitboxPos, searchRadius)
-						
-						-- Expand search if no entities found
-						if #nearbyEntities == 0 then
-							nearbyEntities = SpatialGridSystem.getNeighboringEntities(hitboxPos, searchRadius + 1)
-						end
-						
-						-- Track hits this update cycle
-						local hitsThisCycle = 0
-						
-						-- Filter for enemies and check box collision
-						for _, targetEntity in ipairs(nearbyEntities) do
-							-- Check if it's an enemy
-							local targetType = world:get(targetEntity, Components.EntityType)
-							if targetType and targetType.type == "Enemy" and not bashData.hitEnemies[targetEntity] then
-								-- Check if enemy is inside the hitbox (oriented bounding box test)
-								local enemyPos = world:get(targetEntity, Components.Position)
-								if enemyPos then
-									local enemyWorldPos = Vector3.new(enemyPos.x, enemyPos.y, enemyPos.z)
-									
-									-- Transform enemy position to hitbox local space
-									local localPos = hitboxCFrame:PointToObjectSpace(enemyWorldPos)
-									local halfSize = bashData.hitboxSize / 2
-									
-									-- Check if point is inside the box
-									local insideBox = math.abs(localPos.X) <= halfSize.X 
-										and math.abs(localPos.Y) <= halfSize.Y 
-										and math.abs(localPos.Z) <= halfSize.Z
-									
-									-- Only hit if inside the box
-									if insideBox then
-										local enemyHealth = world:get(targetEntity, Components.Health)
-										if enemyHealth and enemyHealth.current > 0 then
-											-- Apply damage (targetEntity, damage, damageType, sourceEntity, abilityId)
-											DamageSystem.applyDamage(targetEntity, bashData.damage, "physical", bashData.playerEntity, "ShieldBash")
-											
-											-- Track hit for invincibility grant
-											hitsThisCycle = hitsThisCycle + 1
-											
-											-- Apply knockback
-											local enemyData = world:get(targetEntity, Components.EnemyData)
-											if enemyData and enemyData.model then
-												local enemyRootPart = enemyData.model.PrimaryPart or enemyData.model:FindFirstChild("HumanoidRootPart")
-												if enemyRootPart then
-													-- Calculate knockback direction (away from player)
-													local knockbackDirection = (enemyRootPart.Position - charPos)
-													-- Flatten to horizontal plane
-													knockbackDirection = Vector3.new(knockbackDirection.X, 0, knockbackDirection.Z)
-													if knockbackDirection.Magnitude > 0.1 then
-														knockbackDirection = knockbackDirection.Unit
-														-- Add slight upward component
-														knockbackDirection = Vector3.new(knockbackDirection.X, 0.3, knockbackDirection.Z).Unit
-														local knockbackVelocity = knockbackDirection * bashData.knockbackDistance * 10
-														enemyRootPart.AssemblyLinearVelocity = knockbackVelocity
-													end
-												end
-											end
-											
-											-- Mark enemy as hit (prevent re-hitting same enemy)
-											bashData.hitEnemies[targetEntity] = true
-										end
-									end
-								end
-							end
-						end
-						
-						-- Grant invincibility INSTANTLY for all hits this cycle (stacks by adding durations)
-						if hitsThisCycle > 0 then
-							local invincibilityToAdd = hitsThisCycle * bashData.invincibilityPerHit
-							
-							-- Get current invincibility remaining time
-							local statusEffects = world:get(bashData.playerEntity, Components.StatusEffects)
-							local currentRemaining = 0
-							if statusEffects and statusEffects.invincible then
-								local currentEndTime = statusEffects.invincible.endTime
-								local currentTime = GameTimeSystem.getGameTime()
-								currentRemaining = math.max(0, currentEndTime - currentTime)
-							end
-							
-							-- Add new invincibility to existing (true stacking)
-							local totalDuration = currentRemaining + invincibilityToAdd
-							StatusEffectSystem.grantInvincibility(bashData.playerEntity, totalDuration, false, false, false)
-							
-							print(string.format("[ShieldBash] Hit %d enemies → Added %.2fs invincibility (total: %.2fs)", 
-								hitsThisCycle, invincibilityToAdd, totalDuration))
-						end
-					end
-				end
+			local t = math.clamp(elapsed / bashData.duration, 0, 1)
+			local currentPos = bashData.startPosition + (bashData.direction * (bashData.distance * t))
+			local lastPos = bashData.lastPosition
+			local segment = currentPos - lastPos
+			local samples = {lastPos}
+			if segment.Magnitude > (bashData.hitboxSize.Z * 0.5) then
+				table.insert(samples, lastPos + segment * 0.5)
 			end
+			table.insert(samples, currentPos)
+			
+			for _, samplePos in ipairs(samples) do
+				applyShieldBashHits(bashData, samplePos)
+			end
+			
+			bashData.lastPosition = currentPos
 		end
 	end
 	
@@ -539,22 +443,7 @@ end
 
 -- Public function to check if a player is currently Shield Bashing and absorb damage
 function MobilitySystem.absorbShieldBashDamage(playerEntity: number, damageAmount: number): boolean
-	local currentTime = GameTimeSystem.getGameTime()
-	
-	for _, bashData in ipairs(activeShieldBashes) do
-		if bashData.playerEntity == playerEntity then
-			local elapsed = currentTime - bashData.startTime
-			-- Only absorb damage during active dash (not after completion)
-			if elapsed < bashData.duration then
-				bashData.damageAbsorbed = bashData.damageAbsorbed + damageAmount
-				print(string.format("[ShieldBash] ABSORBED %.1f damage (total: %.1f) | Elapsed: %.3fs/%.2fs", 
-					damageAmount, bashData.damageAbsorbed, elapsed, bashData.duration))
-				return true  -- Damage absorbed
-			end
-		end
-	end
-	
-	return false  -- Not shield bashing or dash ended
+	return false
 end
 
 function MobilitySystem.init(worldRef: any, components: any, dirtyService: any)

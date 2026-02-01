@@ -232,13 +232,6 @@ UpgradeDefs.PassiveStats = {
 		weight = 1.1,
 		effect = "increase",
 	},
-	projectileBounce = {
-		id = "projectileBounce",
-		display = "Projectile Bounce",
-		field = "projectileBounce",
-		weight = 1.0,
-		kind = "count",
-	},
 	moveSpeed = {
 		id = "moveSpeed",
 		display = "Movement Speed",

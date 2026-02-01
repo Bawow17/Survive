@@ -811,6 +811,50 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 	local usedAbilities: {[string]: boolean} = {}
 	local usedPassives: {[string]: boolean} = {}
 	local usedUnlock = false
+	local usedKeys: {[string]: boolean} = {}
+
+	local function getChoiceKey(choice: any): string?
+		if not choice then
+			return nil
+		end
+		if choice.category == "passive" and choice.statId then
+			return "passive:" .. tostring(choice.statId)
+		end
+		if choice.category == "ability" and choice.abilityId then
+			return "ability:" .. tostring(choice.abilityId)
+		end
+		if choice.category == "mobility" and choice.mobilityId then
+			return "mobility:" .. tostring(choice.mobilityId)
+		end
+		if choice.category == "ability_unlock" and choice.abilityId then
+			return "unlock:" .. tostring(choice.abilityId)
+		end
+		if choice.category == "attribute" and choice.attributeId then
+			return "attribute:" .. tostring(choice.abilityId) .. ":" .. tostring(choice.attributeId)
+		end
+		if choice.id then
+			return "id:" .. tostring(choice.id)
+		end
+		return nil
+	end
+
+	local function markChoice(choice: any): boolean
+		local key = getChoiceKey(choice)
+		if key and usedKeys[key] then
+			return false
+		end
+		if key then
+			usedKeys[key] = true
+		end
+		if choice.category == "ability" and choice.abilityId then
+			usedAbilities[choice.abilityId] = true
+		elseif choice.category == "passive" and choice.statId then
+			usedPassives[choice.statId] = true
+		elseif choice.category == "ability_unlock" then
+			usedUnlock = true
+		end
+		return true
+	end
 
 	local function pickAbilityUpgrade(biased: boolean?): any?
 		local available = {}
@@ -853,17 +897,21 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 
 	local attributeChoice = buildAttributeChoice(playerEntity, level)
 	if attributeChoice then
-		table.insert(choices, attributeChoice)
+		if markChoice(attributeChoice) then
+			table.insert(choices, attributeChoice)
+		end
 	end
 
 	if #mobilityChoices > 0 and #choices < count then
 		local mobilityPick = mobilityChoices[RNG:NextInteger(1, #mobilityChoices)]
-		table.insert(choices, mobilityPick)
+		if markChoice(mobilityPick) then
+			table.insert(choices, mobilityPick)
+		end
 	end
 
 	if #ownedAbilities > 0 and #choices < count then
 		local choice = pickAbilityUpgrade(true)
-		if choice then
+		if choice and markChoice(choice) then
 			table.insert(choices, choice)
 		end
 	end
@@ -871,7 +919,10 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 	local remainingSlots = count - #choices
 	local wildSlot = remainingSlots > 0 and RNG:NextInteger(1, remainingSlots) or nil
 	local slotIndex = 0
-	while #choices < count do
+	local attempts = 0
+	local maxAttempts = count * 8
+	while #choices < count and attempts < maxAttempts do
+		attempts += 1
 		slotIndex += 1
 		local isWild = wildSlot and slotIndex == wildSlot
 		local roll = RNG:NextNumber()
@@ -900,19 +951,13 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 			choice = unlockChoices[RNG:NextInteger(1, #unlockChoices)]
 		else
 			choice = buildPassiveUpgradeChoice(playerEntity, upgrades, not isWild)
-			if choice and choice.statId then
-				if usedPassives[choice.statId] then
-					choice = nil
-				else
-					usedPassives[choice.statId] = true
-				end
-			end
+		end
+
+		if choice and not markChoice(choice) then
+			choice = nil
 		end
 
 		if choice then
-			if choice.category == "ability_unlock" then
-				usedUnlock = true
-			end
 			table.insert(choices, choice)
 		else
 			local fallback = buildPassiveUpgradeChoice(playerEntity, upgrades)
@@ -923,10 +968,10 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 				local abilityId = ownedAbilities[RNG:NextInteger(1, #ownedAbilities)]
 				fallback = buildAbilityUpgradeChoice(playerEntity, abilityId, upgrades)
 			end
+			if fallback and not markChoice(fallback) then
+				fallback = nil
+			end
 			if fallback then
-				if fallback.category == "ability_unlock" then
-					usedUnlock = true
-				end
 				table.insert(choices, fallback)
 			else
 				break
@@ -1063,7 +1108,6 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 		luck = 0,
 		powerupChance = 0,
 		projectileCountBonus = upgrades.passives.counts.projectileCount or 0,
-		projectileBounceBonus = upgrades.passives.counts.projectileBounce or 0,
 		activeSpeedBuffs = (world:get(playerEntity, PassiveEffects) or {}).activeSpeedBuffs or {},
 	}
 

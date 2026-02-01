@@ -982,7 +982,6 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		luck = 0,
 		powerupChance = 0,
 		projectileCountBonus = 0,
-		projectileBounceBonus = 0,
 		activeSpeedBuffs = {},  -- Track multiple speed buffs: {levelUp: {mult, endTime}, cloak: {mult, endTime}}
 	}, "PassiveEffects")
 	
