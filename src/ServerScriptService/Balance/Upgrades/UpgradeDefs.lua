@@ -154,6 +154,7 @@ UpgradeDefs.PassiveStats = {
 		max = 0.60,
 		weight = 1.0,
 		effect = "increase",
+		hidden = true, -- rolled via combined Health & Regen upgrade
 	},
 	regen = {
 		id = "regen",
@@ -163,8 +164,16 @@ UpgradeDefs.PassiveStats = {
 		max = 1.20,
 		weight = 1.0,
 		effect = "increase",
-		delayMin = 0.0005, -- 0.05% faster regen delay per roll (min)
-		delayMax = 0.005, -- 0.5% faster regen delay per roll (max)
+		delayMin = 0.01, -- 1% faster regen delay per roll (min)
+		delayMax = 0.08, -- 8% faster regen delay per roll (max)
+		hidden = true, -- rolled via combined Health & Regen upgrade
+	},
+	healthRegen = {
+		id = "healthRegen",
+		display = "Health & Regen",
+		kind = "paired",
+		subStats = {"health", "regen", "armor"},
+		weight = 1.0,
 	},
 	armor = {
 		id = "armor",
@@ -175,6 +184,7 @@ UpgradeDefs.PassiveStats = {
 		weight = 1.2,
 		effect = "increase",
 		softCap = 0.35,
+		hidden = true, -- rolled via combined Health/Regen/Armor upgrade
 	},
 	lifesteal = {
 		id = "lifesteal",
@@ -260,7 +270,7 @@ UpgradeDefs.PassiveStats = {
 	},
 	dashDistance = {
 		id = "dashDistance",
-		display = "Dash Distance",
+		display = "Mobility Distance",
 		field = "mobilityDistanceMultiplier",
 		min = 0.0425,
 		max = 0.17,
@@ -303,6 +313,7 @@ UpgradeDefs.PassiveStats = {
 		max = 0.50,
 		weight = 1.0,
 		effect = "increase",
+		hidden = true, -- driven by Exp Gain upgrade
 	},
 	powerupChance = {
 		id = "powerupChance",

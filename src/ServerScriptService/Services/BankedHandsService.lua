@@ -79,6 +79,7 @@ local function resolveNextHand(playerEntity: number, player: Player?): (any?, {q
 					id = choice.id,
 					name = choice.name,
 					desc = choice.desc,
+					descParts = choice.descParts,
 					category = choice.category,
 					color = choice.color,
 					rarity = choice.rarity,

@@ -386,9 +386,15 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 					local playerPos = hrp.Position
 					local knockbackDirection = (position - playerPos).Unit
 					-- Random knockback distance between min and max
-					local knockbackDistance = KNOCKBACK_MIN_DISTANCE + math.random() * (KNOCKBACK_MAX_DISTANCE - KNOCKBACK_MIN_DISTANCE)
+					local knockbackMin = KNOCKBACK_MIN_DISTANCE
+					local knockbackMax = KNOCKBACK_MAX_DISTANCE
+					if abilityId == "Refractions" then
+						knockbackMin = knockbackMin * 0.2
+						knockbackMax = knockbackMax * 0.2
+					end
+					local knockbackDistance = knockbackMin + math.random() * (knockbackMax - knockbackMin)
 					local knockbackVelocity = knockbackDirection * (knockbackDistance / KNOCKBACK_DURATION)
-					
+
 					DirtyService.setIfChanged(world, targetEntity, Knockback, {
 						velocity = {
 							x = knockbackVelocity.X,

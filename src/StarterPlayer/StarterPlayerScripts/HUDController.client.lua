@@ -37,6 +37,14 @@ overhealFill.Visible = false
 -- CRITICAL: Parent to HPFrame (becomes PlayerGui.MainHUD.TopBarFrame.HPFrame at runtime)
 overhealFill.Parent = hpFrame
 
+-- Match rounded corners with HP fill for seamless rounded UI
+local hpCorner = hpFill:FindFirstChildOfClass("UICorner") or hpFrame:FindFirstChildOfClass("UICorner")
+if hpCorner then
+	local overhealCorner = Instance.new("UICorner")
+	overhealCorner.CornerRadius = hpCorner.CornerRadius
+	overhealCorner.Parent = overhealFill
+end
+
 local bottomBarFrame = mainHud:WaitForChild("BottomBarFrame")
 local expBarFrame = bottomBarFrame:WaitForChild("ExpBarFrame")
 local expFill = expBarFrame:WaitForChild("ExpFill") :: Frame
@@ -51,6 +59,7 @@ local baseHealthColor = hpFill.BackgroundColor3
 local lowHealthColor = Color3.fromRGB(255, 0, 0)
 local flashColor = Color3.fromRGB(255, 120, 120)
 local baseHealthTransparency = 0.2  -- Visible but slightly transparent
+local OVERHEAL_OVERLAP = 10  -- pixels overlap to hide seam between rounded bars
 
 local flashActive = false
 local flashToken = 0
@@ -437,8 +446,8 @@ local function updateHealthUI(current: number, maxHealthValue: number)
 			
 			overhealFill.AnchorPoint = Vector2.new(1, 0)
 			tweenOverheal(
-				UDim2.new(1, 0, 0, 0),  -- Position at right edge
-				UDim2.new(overhealRatio, 0, 1, 0)  -- Size = overheal ratio
+				UDim2.new(1, OVERHEAL_OVERLAP, 0, 0),  -- Push right edge by overlap
+				UDim2.new(overhealRatio, OVERHEAL_OVERLAP * 2, 1, 0)  -- Extend both sides
 			)
 		elseif shouldCompress then
 			-- Mode 2: Compress - Share bar proportionally
@@ -447,8 +456,8 @@ local function updateHealthUI(current: number, maxHealthValue: number)
 			
 			overhealFill.AnchorPoint = Vector2.new(0, 0)
 			tweenOverheal(
-				UDim2.new(compressedHealthRatio, 0, 0, 0),  -- Start where white ends
-				UDim2.new(compressedOverhealRatio, 0, 1, 0)  -- Width = overheal ratio
+				UDim2.new(compressedHealthRatio, -OVERHEAL_OVERLAP, 0, 0),  -- Start slightly inside white
+				UDim2.new(compressedOverhealRatio, OVERHEAL_OVERLAP * 2, 1, 0)  -- Extend both sides
 			)
 		else
 			-- Mode 3: Actual percentages - Yellow starts after white
@@ -456,8 +465,8 @@ local function updateHealthUI(current: number, maxHealthValue: number)
 			
 			overhealFill.AnchorPoint = Vector2.new(0, 0)
 			tweenOverheal(
-				UDim2.new(healthRatio, 0, 0, 0),  -- Start where white ends
-				UDim2.new(overhealRatio, 0, 1, 0)  -- Width = actual overheal %
+				UDim2.new(healthRatio, -OVERHEAL_OVERLAP, 0, 0),  -- Start slightly inside white
+				UDim2.new(overhealRatio, OVERHEAL_OVERLAP * 2, 1, 0)  -- Extend both sides
 			)
 		end
 	else

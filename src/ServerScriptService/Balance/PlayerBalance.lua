@@ -18,7 +18,7 @@ return {
 	BaseInvincibilityFrames = 0.5,  -- Seconds of invincibility after taking damage
 	
 	-- Experience & Progression
-	BaseExpMultiplier = 0.85,  -- Experience gain multiplier
+	BaseExpMultiplier = 1.0,  -- Experience gain multiplier
 	StartingLevel = 1,  -- Level on spawn
 	StartingExperience = 0,  -- Starting exp
 	

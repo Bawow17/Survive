@@ -236,6 +236,11 @@ function AbilityRegistry.grantAbility(
 	if ModelReplicationService then
 		ModelReplicationService.replicateAbility(abilityId)
 	end
+
+	-- Ensure Ability marker component exists so ability systems can pick this player up
+	if not world:has(playerEntity, Components.Ability) then
+		DirtyService.setIfChanged(world, playerEntity, Components.Ability, {}, "Ability")
+	end
 	
 	-- Get or create abilities data
 	local abilityData = world:get(playerEntity, Components.AbilityData)
@@ -322,4 +327,3 @@ end
 AbilityRegistry.init()
 
 return AbilityRegistry
-

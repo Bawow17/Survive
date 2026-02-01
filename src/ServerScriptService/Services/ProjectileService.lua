@@ -82,6 +82,14 @@ type PetalConfig = {
 	role: string?,
 }
 
+type BeamConfig = {
+	length: number,
+	size: Vector3?,
+	offset: Vector3?,
+	rotation: CFrame?,
+	lengthAxis: string?,
+}
+
 type SplitConfig = {
 	count: number,
 	damageMultiplier: number,
@@ -120,6 +128,7 @@ type ProjectileRecord = {
 	collision: CollisionConfig?,
 	orbit: OrbitConfig?,
 	petal: PetalConfig?,
+	beam: BeamConfig?,
 	splitOnHit: SplitConfig?,
 	slowOnHit: SlowConfig?,
 	recipients: {[Player]: boolean},
@@ -132,6 +141,7 @@ type ProjectileRecord = {
 	alwaysStayHorizontal: boolean?,
 	stickToPlayer: boolean?,
 	lastOwnerPos: Vector3?,
+	stickOffset: Vector3?,
 }
 
 local world: any
@@ -267,6 +277,11 @@ local function queueSpawnForPlayer(player: Player, record: ProjectileRecord)
 			stayHorizontal = record.petal.stayHorizontal,
 			alwaysStayHorizontal = record.petal.alwaysStayHorizontal,
 			role = record.petal.role,
+		} or nil,
+		beam = record.beam and {
+			length = record.beam.length,
+			size = record.beam.size,
+			-- offset/rotation are server-only (not needed for client visuals)
 		} or nil,
 	})
 end
@@ -827,6 +842,7 @@ function ProjectileService.spawnProjectile(payload: {
 	alwaysStayHorizontal: boolean?,
 	stickToPlayer: boolean?,
 	petal: PetalConfig?,
+	beam: BeamConfig?,
 	splitOnHit: SplitConfig?,
 	slowOnHit: SlowConfig?,
 }): number?
@@ -886,6 +902,7 @@ function ProjectileService.spawnProjectile(payload: {
 		collision = payload.collision,
 		orbit = payload.orbit,
 		petal = payload.petal,
+		beam = payload.beam,
 		splitOnHit = payload.splitOnHit,
 		slowOnHit = payload.slowOnHit,
 		recipients = {},
@@ -898,6 +915,7 @@ function ProjectileService.spawnProjectile(payload: {
 		alwaysStayHorizontal = payload.alwaysStayHorizontal,
 		stickToPlayer = payload.stickToPlayer,
 		lastOwnerPos = nil,
+		stickOffset = nil,
 	}
 
 	if record.homing then
@@ -905,6 +923,13 @@ function ProjectileService.spawnProjectile(payload: {
 	end
 	if record.orbit then
 		record.orbit.angle = record.orbit.angle or 0
+	end
+	if record.stickToPlayer and record.ownerEntity then
+		local ownerPos = getOwnerPosition(record)
+		if ownerPos then
+			record.lastOwnerPos = ownerPos
+			record.stickOffset = record.origin - ownerPos
+		end
 	end
 
 	projectiles[id] = record
@@ -1122,7 +1147,10 @@ function ProjectileService.step(dt: number)
 
 		local allowCollision, nearestDistSq = shouldSimulateCollision(record, playerPositions)
 		local simInterval = SIM_INTERVAL
-		if record.petal then
+		if record.beam then
+			allowCollision = true
+			simInterval = SIM_INTERVAL
+		elseif record.petal then
 			allowCollision = true
 			simInterval = PETAL_SIM_INTERVAL
 		elseif not allowCollision then
@@ -1136,7 +1164,9 @@ function ProjectileService.step(dt: number)
 		end
 
 		local newPos = record.lastPos
-		if record.petal then
+		if record.beam then
+			newPos = record.lastPos
+		elseif record.petal then
 			local petal = record.petal
 			local ownerEntity = petal.ownerEntity
 			local forceRetarget = ownerEntity and petalRetargetRequests[ownerEntity] or false
@@ -1229,10 +1259,11 @@ function ProjectileService.step(dt: number)
 		end
 
 		if record.stickToPlayer and record.ownerEntity then
-			local ownerPosComp = world:get(record.ownerEntity, Position)
-			if ownerPosComp then
-				local ownerPos = Vector3.new(ownerPosComp.x, ownerPosComp.y, ownerPosComp.z)
-				if record.lastOwnerPos then
+			local ownerPos = getOwnerPosition(record)
+			if ownerPos then
+				if record.stickOffset then
+					newPos = ownerPos + record.stickOffset
+				elseif record.lastOwnerPos then
 					local delta = ownerPos - record.lastOwnerPos
 					newPos = newPos + delta
 				end
@@ -1259,8 +1290,75 @@ function ProjectileService.step(dt: number)
 		end
 
 		if allowCollision and collisionChecks < MAX_COLLISION_CHECKS_PER_TICK and hitBudget > 0 then
-			local segMid = (record.lastPos + newPos) * 0.5
-			local segRadius = (record.lastPos - newPos).Magnitude * 0.5 + record.radius + 6
+			local segmentStart = record.lastPos
+			local segmentEnd = newPos
+			local beamSize: Vector3? = nil
+			local beamOffset: Vector3? = nil
+			local beamRotation: CFrame? = nil
+			local beamLengthAxis = "Z"
+			if record.beam then
+				local beamLength = record.beam.length
+				if typeof(beamLength) ~= "number" or beamLength <= 0 then
+					beamLength = record.speed * record.lifetime
+				end
+				if record.beam.size and typeof(record.beam.size) == "Vector3" then
+					beamSize = record.beam.size
+					if record.beam.lengthAxis == "X" then
+						beamLength = beamSize.X > 0 and beamSize.X or beamLength
+						beamLengthAxis = "X"
+					elseif record.beam.lengthAxis == "Y" then
+						beamLength = beamSize.Y > 0 and beamSize.Y or beamLength
+						beamLengthAxis = "Y"
+					else
+						beamLength = beamSize.Z > 0 and beamSize.Z or beamLength
+						beamLengthAxis = "Z"
+					end
+				end
+				if record.beam.offset and typeof(record.beam.offset) == "Vector3" then
+					beamOffset = record.beam.offset
+				end
+				if record.beam.rotation and typeof(record.beam.rotation) == "CFrame" then
+					beamRotation = record.beam.rotation
+				end
+				if beamSize then
+					local halfLen = 0.5
+					if beamLengthAxis == "X" then
+						halfLen = beamSize.X * 0.5
+					elseif beamLengthAxis == "Y" then
+						halfLen = beamSize.Y * 0.5
+					else
+						halfLen = beamSize.Z * 0.5
+					end
+					local cf = CFrame.lookAt(segmentStart, segmentStart + record.direction)
+					if beamRotation then
+						cf = cf * beamRotation
+					end
+					local center = cf:PointToWorldSpace(beamOffset or Vector3.new(0, 0, 0))
+					local axisDir = cf.LookVector
+					if beamLengthAxis == "X" then
+						axisDir = cf.RightVector
+					elseif beamLengthAxis == "Y" then
+						axisDir = cf.UpVector
+					end
+					segmentStart = center - axisDir * halfLen
+					segmentEnd = center + axisDir * halfLen
+				else
+					segmentEnd = segmentStart + record.direction * beamLength
+				end
+			end
+
+			local segMid = (segmentStart + segmentEnd) * 0.5
+			local thickness = record.radius
+			if beamSize then
+				if beamLengthAxis == "X" then
+					thickness = math.max(beamSize.Y, beamSize.Z) * 0.5
+				elseif beamLengthAxis == "Y" then
+					thickness = math.max(beamSize.X, beamSize.Z) * 0.5
+				else
+					thickness = math.max(beamSize.X, beamSize.Y) * 0.5
+				end
+			end
+			local segRadius = (segmentStart - segmentEnd).Magnitude * 0.5 + thickness + 6
 			local candidates = OctreeSystem.getEnemiesInRadius(segMid, segRadius)
 
 			for _, enemyId in ipairs(candidates) do
@@ -1271,6 +1369,9 @@ function ProjectileService.step(dt: number)
 
 				local hitCooldown = record.hitCooldowns[enemyId]
 				if hitCooldown and hitCooldown > now then
+					continue
+				end
+				if not record.beam and record.hitSet[enemyId] then
 					continue
 				end
 				local entityType = world:get(enemyId, EntityType)
@@ -1288,10 +1389,62 @@ function ProjectileService.step(dt: number)
 				elseif collision and collision.radius then
 					enemyRadius = collision.radius
 				end
-				local closest = closestPointOnSegment(record.lastPos, newPos, enemyPos)
-				local distSq = distanceSq(closest, enemyPos)
-				local hitRadius = record.radius + enemyRadius
-				if distSq <= hitRadius * hitRadius then
+				local hit = false
+				local hitPos = enemyPos
+				if record.beam then
+					local beamLength = (segmentEnd - segmentStart).Magnitude
+					local halfX = record.radius
+					local halfY = record.radius
+					local offset = beamOffset or Vector3.new(0, 0, 0)
+					local halfZ = beamLength * 0.5
+					if beamSize then
+						halfX = beamSize.X * 0.5
+						halfY = beamSize.Y * 0.5
+						halfZ = beamSize.Z * 0.5
+					end
+					local pivot = record.lastPos
+					local cf = CFrame.lookAt(pivot, pivot + record.direction)
+					if beamRotation then
+						cf = cf * beamRotation
+					end
+					local localPos = cf:PointToObjectSpace(enemyPos) - offset
+					local lengthHalf = halfZ
+					local axisHalfA = halfX
+					local axisHalfB = halfY
+					local coordLen = localPos.Z
+					local coordA = localPos.X
+					local coordB = localPos.Y
+					if beamLengthAxis == "X" then
+						lengthHalf = halfX
+						axisHalfA = halfY
+						axisHalfB = halfZ
+						coordLen = localPos.X
+						coordA = localPos.Y
+						coordB = localPos.Z
+					elseif beamLengthAxis == "Y" then
+						lengthHalf = halfY
+						axisHalfA = halfX
+						axisHalfB = halfZ
+						coordLen = localPos.Y
+						coordA = localPos.X
+						coordB = localPos.Z
+					end
+					if math.abs(coordLen) <= (lengthHalf + enemyRadius)
+						and math.abs(coordA) <= (axisHalfA + enemyRadius)
+						and math.abs(coordB) <= (axisHalfB + enemyRadius) then
+						hit = true
+					end
+				else
+					local closest = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
+					local distSq = distanceSq(closest, enemyPos)
+					local hitRadius = record.radius + enemyRadius
+					if distSq <= hitRadius * hitRadius then
+						hit = true
+						hitPos = closest
+					end
+				end
+
+				if hit then
 					if record.collision and record.collision.useRaycast then
 						if not passesRaycastCheck(record.lastPos, enemyPos) then
 							continue
@@ -1306,17 +1459,24 @@ function ProjectileService.step(dt: number)
 							record.slowOnHit.impaleModelPath
 						)
 					end
-					record.hitSet[enemyId] = true
+					if not record.beam then
+						record.hitSet[enemyId] = true
+					end
 					record.hitCooldowns[enemyId] = now + record.hitCooldown
-					record.pierceRemaining -= 1
+					if not record.beam then
+						record.pierceRemaining -= 1
+					end
 					hitBudget -= 1
-					hitPos = closest
+					hitPos = hitPos
 
-					if record.homing then
+					if record.homing and not record.beam then
 						record.homing.targetEntity = nil
 					end
 
-					if record.splitOnHit and not record.splitOnHit.used then
+					if record.beam then
+						-- Beam persists; no despawn or split handling.
+						hit = false
+					elseif record.splitOnHit and not record.splitOnHit.used then
 						record.splitOnHit.used = true
 						spawnSplitProjectiles(record, hitPos, now)
 						hit = true

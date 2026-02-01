@@ -349,6 +349,25 @@ function TargetingService.acquireTarget(ctx: any): {targetEntity: number?, aimPo
 		return { targetEntity = nil, aimPoint = origin + finalDir * maxRange, direction = finalDir, reason = "random" }
 	end
 
+	if mode == 1 then
+		-- Random horizontal direction ONLY; no enemy influence.
+		local angle = math.random() * math.pi * 2
+		local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
+		if dir.Magnitude == 0 then
+			dir = Vector3.new(0, 0, 1)
+		end
+		dir = dir.Unit
+		local finalDir = dir
+		if ctx.alwaysStayHorizontal or (ctx.stayHorizontal and isPlayerGrounded(player)) then
+			finalDir = Vector3.new(dir.X, 0, dir.Z)
+			if finalDir.Magnitude == 0 then
+				finalDir = Vector3.new(0, 0, 1)
+			end
+			finalDir = finalDir.Unit
+		end
+		return { targetEntity = nil, aimPoint = origin + finalDir * maxRange, direction = finalDir, reason = "random_horizontal" }
+	end
+
 	local targetEntity: number? = nil
 	local aimPoint: Vector3? = nil
 
@@ -382,33 +401,7 @@ function TargetingService.acquireTarget(ctx: any): {targetEntity: number?, aimPo
 		targetEntity, aimPoint = pickBestTarget(ctx, origin, maxRange)
 	end
 
-	if mode == 1 then
-		local angle = math.random() * math.pi * 2
-		local horizontal = Vector3.new(math.cos(angle), 0, math.sin(angle))
-		local horizontalDist = maxRange
-		local yDelta = 0
-		if aimPoint then
-			horizontalDist = Vector3.new(aimPoint.X - origin.X, 0, aimPoint.Z - origin.Z).Magnitude
-			if horizontalDist < 1 then
-				horizontalDist = maxRange
-			end
-			yDelta = aimPoint.Y - origin.Y
-		end
-		local dir = horizontal * horizontalDist + Vector3.new(0, yDelta, 0)
-		if dir.Magnitude == 0 then
-			dir = Vector3.new(0, 0, 1)
-		end
-		dir = dir.Unit
-		local finalDir = dir
-		if ctx.alwaysStayHorizontal or (ctx.stayHorizontal and isPlayerGrounded(player)) then
-			finalDir = Vector3.new(dir.X, 0, dir.Z)
-			if finalDir.Magnitude == 0 then
-				finalDir = Vector3.new(0, 0, 1)
-			end
-			finalDir = finalDir.Unit
-		end
-		return { targetEntity = targetEntity, aimPoint = aimPoint or (origin + finalDir * maxRange), direction = finalDir, reason = targetEntity and "random_y" or "random_fallback" }
-	end
+	-- mode 1 handled above (random, no enemy influence)
 
 	if not aimPoint then
 		local forward = getPlayerForward(player)

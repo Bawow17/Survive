@@ -176,6 +176,13 @@ local function formatPercent(value: number): string
 	return string.format("%.1f%%", value * 100)
 end
 
+local passiveStatById: {[string]: any} = {}
+for _, def in pairs(UpgradeDefs.PassiveStats) do
+	if def.id then
+		passiveStatById[def.id] = def
+	end
+end
+
 local function getOwnedAbilities(playerEntity: number): {string}
 	local abilityIds = {}
 	local abilityData = world:get(playerEntity, AbilityData)
@@ -284,6 +291,12 @@ local function pickAbilityStatDefs(abilityBalance: any, upgrades: any, abilityId
 	local statPool = {}
 	local abilityState = ensureAbilityUpgradeState(upgrades, abilityId)
 	for _, def in pairs(UpgradeDefs.AbilityStats) do
+		if abilityBalance and abilityBalance.upgradeStatBlacklist and abilityBalance.upgradeStatBlacklist[def.id] then
+			continue
+		end
+		if abilityBalance and abilityBalance.upgradeStatWhitelist and not abilityBalance.upgradeStatWhitelist[def.id] then
+			continue
+		end
 		local baseValue = abilityBalance[def.field]
 		if typeof(baseValue) ~= "number" then
 			continue
@@ -313,6 +326,15 @@ local function pickPassiveStatDefs(upgrades: any, playerEntity: number): {any}
 	local mobilityData = world and Components and world:get(playerEntity, Components.MobilityData) or nil
 	local equippedMobility = mobilityData and mobilityData.equippedMobility or nil
 	for _, def in pairs(UpgradeDefs.PassiveStats) do
+		if def.hidden then
+			continue
+		end
+		if def.id == "critDamage" then
+			local currentCrit = upgrades.passives.stats.critChance or 0
+			if currentCrit <= 0 then
+				continue
+			end
+		end
 		if def.id == "doubleJumpPower" and equippedMobility ~= "DoubleJump" then
 			continue
 		end
@@ -376,17 +398,50 @@ local function rollStatValues(selectedStats: {any}, rarity: any): ({[string]: nu
 	local budget = rarity.budget
 	for i, def in ipairs(percentStats) do
 		local allocated = budget * (allocations[i] / weightSum)
-		local denom = (def.max or 0.0001) * (def.weight or 1)
-		local progress = clamp01(allocated / denom)
-		local rollValue = lerp(def.min or 0, def.max or 0, progress)
-		rolls[def.id] = (rolls[def.id] or 0) + rollValue
+		if def.kind == "paired" then
+			local subStats = def.subStats or {}
+			local subWeights = {}
+			local subWeightSum = 0
+			for idx, _ in ipairs(subStats) do
+				local subWeight = RNG:NextNumber(0.75, 1.25)
+				subWeights[idx] = subWeight
+				subWeightSum += subWeight
+			end
+			for idx, subId in ipairs(subStats) do
+				local subDef = passiveStatById[subId]
+				if subDef then
+					local subAllocated = allocated * (subWeights[idx] / math.max(subWeightSum, 1e-6))
+					local denom = (subDef.max or 0.0001) * (subDef.weight or 1)
+					local progress = clamp01(subAllocated / denom)
+					local rollValue = lerp(subDef.min or 0, subDef.max or 0, progress)
+					rolls[subDef.id] = (rolls[subDef.id] or 0) + rollValue
+				end
+			end
+		else
+			local denom = (def.max or 0.0001) * (def.weight or 1)
+			local progress = clamp01(allocated / denom)
+			local rollValue = lerp(def.min or 0, def.max or 0, progress)
+			rolls[def.id] = (rolls[def.id] or 0) + rollValue
+		end
 	end
 
 	return rolls, counts
 end
 
-local function buildStatDescription(statDefs: {any}, rolls: {[string]: number}, counts: {[string]: number}): string
+local function buildStatDescription(statDefs: {any}, rolls: {[string]: number}, counts: {[string]: number}): (string, {any})
 	local parts = {}
+	local textParts = {}
+	local function pushPart(valueText: string, nameText: string, statId: string, score: number?)
+		local text = if valueText ~= "" then string.format("%s %s", valueText, nameText) else nameText
+		table.insert(parts, {
+			text = text,
+			valueText = valueText,
+			nameText = nameText,
+			statId = statId,
+			score = score,
+		})
+		table.insert(textParts, text)
+	end
 	for _, def in ipairs(statDefs) do
 		if def.kind == "count" then
 			local countValue = counts[def.id]
@@ -397,20 +452,103 @@ local function buildStatDescription(statDefs: {any}, rolls: {[string]: number}, 
 				else
 					displayValue = string.format("%.1f", countValue)
 				end
-				table.insert(parts, string.format("+%s %s", displayValue, def.display))
+				pushPart("+" .. displayValue, def.display, def.id, nil)
+			end
+		elseif def.kind == "paired" then
+			local subStats = def.subStats or {}
+			for _, subId in ipairs(subStats) do
+				local subDef = passiveStatById[subId]
+				if subDef then
+					local value = rolls[subDef.id]
+					if value and value > 0 then
+						local score = if subDef.max and subDef.max > 0 then value / subDef.max else nil
+						if subDef.effect == "reduce" then
+							pushPart("-" .. formatPercent(value), subDef.display, subDef.id, score)
+						else
+							pushPart("+" .. formatPercent(value), subDef.display, subDef.id, score)
+						end
+					end
+				end
 			end
 		else
 			local value = rolls[def.id]
 			if value and value > 0 then
+				local score = if def.max and def.max > 0 then value / def.max else nil
 				if def.effect == "reduce" then
-					table.insert(parts, string.format("-%s %s", formatPercent(value), def.display))
+					pushPart("-" .. formatPercent(value), def.display, def.id, score)
 				else
-					table.insert(parts, string.format("+%s %s", formatPercent(value), def.display))
+					pushPart("+" .. formatPercent(value), def.display, def.id, score)
+				end
+				if def.id == "expGain" then
+					pushPart("+" .. formatPercent(value), "Pickup Range", "pickupRange", score)
 				end
 			end
 		end
 	end
-	return table.concat(parts, ", ")
+	return table.concat(textParts, ", "), parts
+end
+
+local function assignPartColors(parts: {any}, baseRarity: any): {any}
+	if not parts or #parts == 0 or not baseRarity then
+		return parts
+	end
+
+	local anyScore = false
+	local ranked = {}
+	for index, part in ipairs(parts) do
+		local score = part.score
+		if typeof(score) == "number" and score > 0 then
+			anyScore = true
+		end
+		table.insert(ranked, {index = index, score = score or 0})
+	end
+
+	local rarityOrder = {
+		UpgradeDefs.Rarities.Common,
+		UpgradeDefs.Rarities.Rare,
+		UpgradeDefs.Rarities.Epic,
+		UpgradeDefs.Rarities.Legendary,
+	}
+	local rarityIndex = {
+		Common = 1,
+		Rare = 2,
+		Epic = 3,
+		Legendary = 4,
+	}
+	local baseIndex = rarityIndex[baseRarity.id] or 1
+
+	if not anyScore then
+		for _, part in ipairs(parts) do
+			part.color = baseRarity.color
+		end
+		return parts
+	end
+
+	table.sort(ranked, function(a, b)
+		return a.score > b.score
+	end)
+
+	for rank, entry in ipairs(ranked) do
+		local targetIndex = 1
+		if baseIndex <= 1 then
+			targetIndex = 1
+		elseif rank == 1 then
+			targetIndex = baseIndex
+		elseif rank == 2 then
+			if baseIndex >= 3 then
+				targetIndex = 2
+			else
+				targetIndex = 1
+			end
+		else
+			targetIndex = 1
+		end
+
+		local rarity = rarityOrder[targetIndex] or UpgradeDefs.Rarities.Common
+		parts[entry.index].color = rarity.color
+	end
+
+	return parts
 end
 
 local function countSelectedAttributes(playerEntity: number): number
@@ -511,7 +649,8 @@ local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string
 	end
 
 	local rolls, counts = rollStatValues(selected, rarity)
-	local desc = buildStatDescription(selected, rolls, counts)
+	local desc, descParts = buildStatDescription(selected, rolls, counts)
+	assignPartColors(descParts, rarity)
 	local abilityName = ability.balance.Name or abilityId
 
 	local choiceId = HttpService:GenerateGUID(false)
@@ -521,6 +660,7 @@ local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string
 		abilityId = abilityId,
 		name = string.format("%s %s", rarity.id, abilityName),
 		desc = desc,
+		descParts = descParts,
 		color = rarity.color,
 		rarity = rarity.id,
 		level = (abilityState.level or 0) + 1,
@@ -550,7 +690,8 @@ local function buildPassiveUpgradeChoice(playerEntity: number, upgrades: any, bi
 	end
 
 	local rolls, counts = rollStatValues({selectedDef}, rarity)
-	local desc = buildStatDescription({selectedDef}, rolls, counts)
+	local desc, descParts = buildStatDescription({selectedDef}, rolls, counts)
+	assignPartColors(descParts, rarity)
 
 	local choiceId = HttpService:GenerateGUID(false)
 	return {
@@ -559,6 +700,7 @@ local function buildPassiveUpgradeChoice(playerEntity: number, upgrades: any, bi
 		statId = selectedDef.id,
 		name = string.format("%s %s", rarity.id, selectedDef.display),
 		desc = desc,
+		descParts = descParts,
 		color = rarity.color,
 		rarity = rarity.id,
 		level = ((upgrades.passives.levels and upgrades.passives.levels[selectedDef.id]) or 0) + 1,
@@ -812,9 +954,13 @@ local function rebuildAbilityStats(playerEntity: number, abilityId: string, upgr
 	end
 
 	local stats = {}
+	local baseStats = {}
 	for key, value in pairs(baseBalance) do
 		if type(value) == "number" or type(value) == "string" then
 			stats[key] = value
+			if type(value) == "number" then
+				baseStats[key] = value
+			end
 		end
 	end
 
@@ -881,6 +1027,7 @@ local function rebuildAbilityStats(playerEntity: number, abilityId: string, upgr
 		selectedAttribute = abilityRecord.selectedAttribute,
 		attributeColor = abilityRecord.attributeColor,
 		attributeSpecial = abilityRecord.attributeSpecial,
+		baseStats = baseStats,
 	}
 
 	for statName, value in pairs(stats) do
@@ -921,7 +1068,7 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 	}
 
 	for _, def in pairs(UpgradeDefs.PassiveStats) do
-		if def.kind == "count" then
+		if def.kind == "count" or def.kind == "paired" then
 			continue
 		end
 		local rawValue = upgrades.passives.stats[def.id] or 0
@@ -945,6 +1092,9 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 				effects[def.field] = effects[def.field] * (1 - effective)
 			else
 				effects[def.field] = effects[def.field] * (1 + effective)
+			end
+			if def.id == "expGain" then
+				effects.pickupRangeMultiplier = effects.pickupRangeMultiplier * (1 + effective)
 			end
 		else
 			if def.effect == "reduce" then

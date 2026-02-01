@@ -74,14 +74,25 @@ local skipButton = outerWindow:WaitForChild("SkipButton")
 
 -- Get inner window (nested Window.Window structure)
 local window = outerWindow:WaitForChild("Window")
-local choice1 = window:WaitForChild("Choice1")
-local choice2 = window:WaitForChild("Choice2")
-local choice3 = window:WaitForChild("Choice3")
-local choice4 = window:WaitForChild("Choice4")
-local choice5 = window:WaitForChild("Choice5")
+local choiceTemplate = window:WaitForChild("ChoiceExampleFrame") :: Frame
+choiceTemplate.Visible = false
 
--- Table of all choices for easy iteration
-local choices = {choice1, choice2, choice3, choice4, choice5}
+for i = 1, 5 do
+	local existing = window:FindFirstChild("Choice" .. i)
+	if existing and existing ~= choiceTemplate then
+		existing:Destroy()
+	end
+end
+
+local choices: {Frame} = {}
+for i = 1, 5 do
+	local clone = choiceTemplate:Clone()
+	clone.Name = "Choice" .. i
+	clone.LayoutOrder = i
+	clone.Visible = false
+	clone.Parent = window
+	choices[i] = clone
+end
 
 -- Level-up toggle button state (banked hands)
 local levelUpToggleTarget = levelUpToggle.Position
@@ -369,6 +380,7 @@ end
 local function populateChoice(choiceFrame: Frame, upgradeData: any, index: number)
 	local nameLabel = choiceFrame:FindFirstChild("Name")
 	local descLabel = choiceFrame:FindFirstChild("Desc")
+	local descFrame = choiceFrame:FindFirstChild("DescFrame")
 	local rarityLabel = choiceFrame:FindFirstChild("Rarity")
 	local levelLabel = choiceFrame:FindFirstChild("Level")
 	local button = choiceFrame:FindFirstChild("Button")
@@ -405,8 +417,182 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 		nameLabel.TextColor3 = nameColor
 	end
 	
+	local descText = displayDesc or ""
 	if descLabel then
-		descLabel.Text = displayDesc or ""
+		descLabel.Text = ""
+	end
+	if descFrame and descFrame:IsA("Frame") then
+		local grid = descFrame:FindFirstChildOfClass("UIGridLayout")
+		local templateRow = descFrame:FindFirstChild("ExampleDesc")
+		local templateLabel = templateRow and templateRow:FindFirstChild("Desc") or nil
+		local templateValue = templateRow and templateRow:FindFirstChild("Value") or nil
+		local isAbilityUnlock = upgradeData and upgradeData.category == "ability_unlock"
+		local isMobility = upgradeData and upgradeData.category == "mobility"
+		local isSingleLine = isAbilityUnlock or isMobility
+		if templateLabel then
+			templateLabel.Text = ""
+		end
+		if templateValue then
+			templateValue.Text = ""
+		end
+		if templateRow and templateRow:IsA("Frame") then
+			templateRow.Visible = false
+		end
+		for _, child in ipairs(descFrame:GetChildren()) do
+			if (child:IsA("Frame") and child ~= templateRow) or (child:IsA("TextLabel") and child ~= templateLabel and child ~= templateValue) then
+				child:Destroy()
+			end
+		end
+
+		local parts = {}
+		local partsData = upgradeData and upgradeData.descParts
+		if partsData and #partsData > 0 then
+			for _, part in ipairs(partsData) do
+				table.insert(parts, {
+					nameText = part.nameText or part.text or "",
+					valueText = part.valueText or "",
+					color = part.color,
+				})
+			end
+		else
+			local shouldSplit = descText:find(",") ~= nil
+			if isSingleLine then
+				shouldSplit = false
+			end
+			if shouldSplit then
+				local statLike = false
+				for _, part in ipairs(string.split(descText, ",")) do
+					local trimmed = part:gsub("^%s+", ""):gsub("%s+$", "")
+					if trimmed ~= "" then
+						table.insert(parts, { raw = trimmed })
+						if trimmed:match("^[%+%-]") then
+							statLike = true
+						elseif trimmed:find("%%") or trimmed:find("x") then
+							statLike = true
+						end
+					end
+				end
+				if not statLike then
+					table.clear(parts)
+					shouldSplit = false
+				end
+			end
+			if not shouldSplit then
+				if descText ~= "" then
+					table.insert(parts, { raw = descText })
+				end
+			end
+		end
+
+		if #parts == 0 then
+			descFrame.Visible = false
+		else
+			descFrame.Visible = true
+			local columns = 1
+			local minRows = isSingleLine and 1 or 3
+			local rows = math.max(minRows, #parts)
+			if grid then
+				grid.CellSize = UDim2.new(1 / columns, 0, 1 / rows, 0)
+			end
+			for _, part in ipairs(parts) do
+				local valueText = ""
+				local nameText = ""
+				local rowColor = part.color
+				if part.nameText then
+					nameText = part.nameText
+					valueText = part.valueText or ""
+				elseif part.raw then
+					local rawText = part.raw
+					nameText = rawText
+				if not isSingleLine then
+					local leading = rawText:match("^%s*([%+%-]?%d+%.?%d*%%?)%s*(.+)$")
+					if leading then
+						valueText = rawText:match("^%s*([%+%-]?%d+%.?%d*%%?)")
+							nameText = rawText:match("^%s*[%+%-]?%d+%.?%d*%%?%s*(.+)$") or ""
+						end
+					end
+				end
+
+				local row: Frame
+				local nameLabel: TextLabel
+				local valueLabel: TextLabel
+				if templateRow and templateRow:IsA("Frame") then
+					row = templateRow:Clone()
+					row.Visible = true
+					row.Parent = descFrame
+					nameLabel = row:FindFirstChild("Desc") :: TextLabel
+					valueLabel = row:FindFirstChild("Value") :: TextLabel
+				else
+					row = Instance.new("Frame")
+					row.BackgroundTransparency = 1
+					row.Size = UDim2.new(1, 0, 1, 0)
+					row.Parent = descFrame
+
+					nameLabel = Instance.new("TextLabel")
+					nameLabel.BackgroundTransparency = 1
+					nameLabel.Font = Enum.Font.Gotham
+					nameLabel.TextSize = 14
+					nameLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
+					nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+					nameLabel.Size = UDim2.new(0.6, 0, 1, 0)
+					nameLabel.Parent = row
+
+					valueLabel = Instance.new("TextLabel")
+					valueLabel.BackgroundTransparency = 1
+					valueLabel.Font = Enum.Font.Gotham
+					valueLabel.TextSize = 14
+					valueLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
+					valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+					valueLabel.Size = UDim2.new(0.35, 0, 1, 0)
+					valueLabel.Position = UDim2.new(0.65, 0, 0, 0)
+					valueLabel.Parent = row
+				end
+
+				if nameLabel then
+					nameLabel.TextScaled = true
+					nameLabel.TextWrapped = true
+					nameLabel.Text = nameText
+					nameLabel.Visible = true
+					if rowColor then
+						nameLabel.TextColor3 = rowColor
+					end
+					if isSingleLine then
+						nameLabel.Size = UDim2.new(1, 0, 1, 0)
+						nameLabel.TextXAlignment = Enum.TextXAlignment.Center
+						local existingConstraint = nameLabel:FindFirstChildOfClass("UITextSizeConstraint")
+						if existingConstraint then
+							existingConstraint:Destroy()
+						end
+					else
+						if not nameLabel:FindFirstChildOfClass("UITextSizeConstraint") then
+							local nameConstraint = Instance.new("UITextSizeConstraint")
+							nameConstraint.MaxTextSize = 30
+							nameConstraint.Parent = nameLabel
+						end
+					end
+				end
+
+				if valueLabel then
+					valueLabel.TextScaled = true
+					valueLabel.TextWrapped = true
+					valueLabel.Text = valueText
+					valueLabel.Visible = not isSingleLine
+					if rowColor and valueLabel.Visible then
+						valueLabel.TextColor3 = rowColor
+					end
+					if not valueLabel:FindFirstChildOfClass("UITextSizeConstraint") then
+						local valueConstraint = Instance.new("UITextSizeConstraint")
+						valueConstraint.MaxTextSize = 30
+						valueConstraint.Parent = valueLabel
+					end
+					if isAbilityUnlock then
+						valueLabel.Text = ""
+					end
+				end
+			end
+		end
+	elseif descLabel then
+		descLabel.Text = descText
 	end
 
 	if rarityLabel then

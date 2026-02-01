@@ -54,6 +54,11 @@ type PetalPayload = {
 	role: string?,
 }
 
+type BeamPayload = {
+	length: number?,
+	size: Vector3?,
+}
+
 type ProjectileRecord = {
 	id: number,
 	kind: string,
@@ -73,10 +78,12 @@ type ProjectileRecord = {
 	orbit: OrbitPayload?,
 	homing: HomingPayload?,
 	petal: PetalPayload?,
+	beam: BeamPayload?,
 	lastSimTime: number?,
 	lastPos: Vector3?,
 	lastHomingUpdate: number?,
 	lastOwnerPos: Vector3?,
+	stickOffset: Vector3?,
 	model: Model?,
 	parts: {BasePart}?,
 	primary: BasePart?,
@@ -718,9 +725,11 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 				orbit = typeof(data.orbit) == "table" and data.orbit or nil,
 				homing = typeof(data.homing) == "table" and data.homing or nil,
 				petal = typeof(data.petal) == "table" and data.petal or nil,
+				beam = typeof(data.beam) == "table" and data.beam or nil,
 				lastSimTime = now,
 				lastPos = initialPos,
 				lastOwnerPos = nil,
+				stickOffset = nil,
 			}
 			activeProjectiles[id] = record
 		else
@@ -741,9 +750,11 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			record.orbit = typeof(data.orbit) == "table" and data.orbit or record.orbit
 			record.homing = typeof(data.homing) == "table" and data.homing or record.homing
 			record.petal = typeof(data.petal) == "table" and data.petal or record.petal
+			record.beam = typeof(data.beam) == "table" and data.beam or record.beam
 			record.lastSimTime = now
 			record.lastPos = initialPos
 			record.lastOwnerPos = nil
+			record.stickOffset = nil
 		end
 
 		if record.orbit and not record.orbit.ownerUserId then
@@ -751,6 +762,18 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 		end
 		if record.petal and not record.petal.ownerUserId then
 			record.petal.ownerUserId = record.ownerUserId
+		end
+
+		if record.stickToPlayer and record.ownerUserId then
+			local ownerRoot = getOwnerRootPart(record.ownerUserId)
+			if ownerRoot then
+				record.lastOwnerPos = ownerRoot.Position
+				if record.kind == "Refractions" then
+					record.stickOffset = Vector3.new(0, 0, 0)
+				else
+					record.stickOffset = origin - ownerRoot.Position
+				end
+			end
 		end
 
 		ensureModel(record, initialPos)
@@ -874,7 +897,11 @@ RunService.Heartbeat:Connect(function(dt: number)
 			if record.stickToPlayer and record.ownerUserId then
 				local ownerRoot = getOwnerRootPart(record.ownerUserId)
 				if ownerRoot then
-					if record.lastOwnerPos then
+					if record.kind == "Refractions" then
+						pos = ownerRoot.Position
+					elseif record.stickOffset then
+						pos = ownerRoot.Position + record.stickOffset
+					elseif record.lastOwnerPos then
 						pos = pos + (ownerRoot.Position - record.lastOwnerPos)
 					end
 					record.lastOwnerPos = ownerRoot.Position

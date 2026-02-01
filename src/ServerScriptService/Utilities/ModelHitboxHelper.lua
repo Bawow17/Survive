@@ -58,4 +58,43 @@ function ModelHitboxHelper.getModelHitboxData(modelPath: string): (Vector3?, Vec
 	return nil, nil
 end
 
+-- Returns: hitboxSize (Vector3?), hitboxOffset (Vector3?), hitboxRotation (CFrame?)
+function ModelHitboxHelper.getModelHitboxTransform(modelPath: string): (Vector3?, Vector3?, CFrame?)
+	if not modelPath then
+		return nil, nil, nil
+	end
+
+	local current: Instance? = game
+	for _, partName in ipairs(string.split(modelPath, ".")) do
+		if not current then
+			return nil, nil, nil
+		end
+		current = current:FindFirstChild(partName)
+	end
+
+	if not current or not current:IsA("Model") then
+		return nil, nil, nil
+	end
+
+	local model: Model = current
+	local hitbox = model:FindFirstChild("Hitbox") or model:FindFirstChild("hitbox")
+	if not hitbox then
+		for _, descendant in ipairs(model:GetDescendants()) do
+			if descendant:IsA("BasePart") and (descendant.Name == "Hitbox" or descendant.Name == "hitbox") then
+				hitbox = descendant
+				break
+			end
+		end
+	end
+
+	if hitbox and hitbox:IsA("BasePart") then
+		local pivot = model:GetPivot()
+		local localCf = pivot:ToObjectSpace(hitbox.CFrame)
+		local rotation = CFrame.fromMatrix(Vector3.new(0, 0, 0), localCf.RightVector, localCf.UpVector, localCf.LookVector)
+		return hitbox.Size, localCf.Position, rotation
+	end
+
+	return nil, nil, nil
+end
+
 return ModelHitboxHelper

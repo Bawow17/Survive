@@ -21,7 +21,7 @@ return {
 	projectileSpeed = 100, -- studs per second
 	penetration = 3, -- amount of enemies it can hit before destroying (0 = destroy on first hit)
 	duration = 1.5, -- lifetime of the projectile in seconds
-	cooldown = 0.9, -- cooldown in seconds between casts
+	cooldown = 0.85, -- cooldown in seconds between casts
 	
 	-- Targeting configuration
 	-- 0 = random direction

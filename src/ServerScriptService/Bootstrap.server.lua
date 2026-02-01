@@ -875,6 +875,10 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 			}, "AbilityCooldown")
 			end
 		end
+		-- Ensure Ability marker exists whenever AbilityData exists (needed for ability systems)
+		if abilityData and not world:has(existingEntity, Components.Ability) then
+			setComponent(existingEntity, Components.Ability, {}, "Ability")
+		end
 		
 		-- CRITICAL FIX: Preserve mobility upgrades on reconnect (issue: Shield Bash sometimes resets to Dash)
 		-- Only restore starter dash if player has NEVER had a mobility upgrade (should not happen after level 15)

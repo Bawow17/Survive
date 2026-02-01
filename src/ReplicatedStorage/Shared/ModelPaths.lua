@@ -17,6 +17,7 @@ local ModelPaths = {
         FireBall = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.FireBall.FireBall",
         FireBallExplosion = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.FireBall.Explosion",
         IceShard = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard.IceShard",
+        Refractions = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.Refractions.Refractions",
         -- Additional projectile types will be added when replicated
     },
     
