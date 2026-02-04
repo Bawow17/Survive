@@ -170,6 +170,16 @@ function DeathSystem.triggerPlayerDeath(playerEntity: number, player: Player)
 	-- Start server-side body fade (replicates to all clients)
 	local DeathBodyFadeSystem = require(game.ServerScriptService.ECS.Systems.DeathBodyFadeSystem)
 	DeathBodyFadeSystem.startFade(player)
+
+	-- Despawn all visuals owned by this player (petals, beams, projectiles, clones)
+	local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
+	ProjectileService.despawnOwnedProjectiles(playerEntity)
+
+	local IceShardSystem = require(game.ServerScriptService.Abilities.IceShard.System)
+	IceShardSystem.clearPetalState(playerEntity)
+
+	local AfterimageCloneSystem = require(game.ServerScriptService.ECS.Systems.AfterimageCloneSystem)
+	AfterimageCloneSystem.despawnClones(playerEntity)
 	
 	-- Team wipe is now handled by GameStateManager.step() at 3fps
 end
@@ -431,4 +441,3 @@ function DeathSystem.isPlayerDead(playerEntity: number): boolean
 end
 
 return DeathSystem
-

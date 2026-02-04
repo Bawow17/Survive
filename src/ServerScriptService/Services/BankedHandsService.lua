@@ -72,7 +72,7 @@ local function resolveNextHand(playerEntity: number, player: Player?): (any?, {q
 	while #hands.queue > 0 do
 		local hand = hands.queue[1]
 		if not hand.choices then
-			hand.choices = UpgradeSystem.selectUpgradeChoices(playerEntity, hand.toLevel, 5)
+			hand.choices = UpgradeSystem.selectUpgradeChoices(playerEntity, hand.toLevel, 6)
 			hand.clientChoices = {}
 			for index, choice in ipairs(hand.choices) do
 				hand.clientChoices[index] = {

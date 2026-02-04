@@ -77,7 +77,9 @@ local window = outerWindow:WaitForChild("Window")
 local choiceTemplate = window:WaitForChild("ChoiceExampleFrame") :: Frame
 choiceTemplate.Visible = false
 
-for i = 1, 5 do
+local CHOICE_COUNT = 6
+
+for i = 1, CHOICE_COUNT do
 	local existing = window:FindFirstChild("Choice" .. i)
 	if existing and existing ~= choiceTemplate then
 		existing:Destroy()
@@ -85,7 +87,7 @@ for i = 1, 5 do
 end
 
 local choices: {Frame} = {}
-for i = 1, 5 do
+for i = 1, CHOICE_COUNT do
 	local clone = choiceTemplate:Clone()
 	clone.Name = "Choice" .. i
 	clone.LayoutOrder = i
@@ -407,7 +409,7 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 	if nameLabel then
 		nameLabel.Text = displayName or "Unknown"
 		local nameColor = Color3.fromRGB(255, 255, 255)
-		if upgradeData and (upgradeData.category == "ability" or upgradeData.category == "attribute" or upgradeData.category == "ability_unlock") then
+		if upgradeData then
 			if upgradeData.color then
 				nameColor = upgradeData.color
 			elseif upgradeData.data and upgradeData.data.color then
@@ -428,7 +430,8 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 		local templateValue = templateRow and templateRow:FindFirstChild("Value") or nil
 		local isAbilityUnlock = upgradeData and upgradeData.category == "ability_unlock"
 		local isMobility = upgradeData and upgradeData.category == "mobility"
-		local isSingleLine = isAbilityUnlock or isMobility
+		local isAttribute = upgradeData and upgradeData.category == "attribute"
+		local isSingleLine = isAbilityUnlock or isMobility or isAttribute
 		if templateLabel then
 			templateLabel.Text = ""
 		end
@@ -661,7 +664,7 @@ BankedHandsShow.OnClientEvent:Connect(function(data: any)
 	titleLabel.Text = string.format("Level up: %d > %d!", fromLevel, toLevel)
 	
 	local choicesData = data.choices or {}
-	for i = 1, 5 do
+	for i = 1, CHOICE_COUNT do
 		populateChoice(choices[i], choicesData[i], i)
 	end
 	
@@ -730,8 +733,8 @@ GamePaused.OnClientEvent:Connect(function(data: any)
 			debugPausedPosition = character.PrimaryPart.Position
 		end
 		
-		-- Populate all 5 choice buttons
-		for i = 1, 5 do
+		-- Populate all choice buttons
+		for i = 1, CHOICE_COUNT do
 			local upgradeData = upgradeChoices[i]
 			populateChoice(choices[i], upgradeData, i)
 		end

@@ -475,38 +475,10 @@ function MagicBoltSystem.step(dt: number)
 								cooldowns = cooldowns
 							}, "AbilityCooldown")
 							
-							-- PLAYER ANIMATION: Trigger animation when clones shoot
-							-- Check if clones just shot (cooldown was reset)
+							-- MagicBolt no longer triggers cast animations (even for clones)
+							-- Keep last shot time updated for clone logic
 							local cloneJustShot = (firstClone.cooldown or 0) > (cloneStats.cooldown * 0.9)
 							if cloneJustShot and lastCloneShot ~= firstClone.lastShot then
-								-- Calculate animation loop count based on projectile count
-								local burstCount = cloneStats.projectileCount or 1
-								
-								-- Get animation config from unified Config
-								local animationData = nil
-								if Config.animations then
-									animationData = {
-										animationIds = Config.animations.animationIds,
-										loopFrame = Config.animations.loopFrame,
-										totalFrames = Config.animations.totalFrames,
-										duration = Config.animations.duration,
-										animationPriority = Config.animations.animationPriority,
-										anticipation = Config.animations.anticipation,
-									}
-								end
-								
-								-- Get damage stats for animation priority
-								local damageStats = world:get(entity, Components.AbilityDamageStats) or {}
-								
-								-- Notify client to play casting animation (even though clones shoot)
-								AbilityCastRemote:FireClient(player, MAGIC_BOLT_ID, cloneStats.cooldown, MAGIC_BOLT_NAME, {
-									projectileCount = burstCount,  -- Number of animation loops
-									pulseInterval = math.max(firstClone.pulseInterval or cloneStats.pulseInterval or 0, 0.01),
-									damageStats = damageStats,
-									animationData = animationData,
-								})
-								
-								-- Update last shot time
 								clonesData.lastCloneShot = firstClone.lastShot
 								DirtyService.setIfChanged(world, entity, AfterimageClones, clonesData, "AfterimageClones")
 							end
@@ -581,40 +553,8 @@ function MagicBoltSystem.step(dt: number)
 			if cooldown.remaining <= 0 and not pulseActive then
 				local success = castMagicBolt(entity, player)
 				if success then
-					-- Get damage stats for animation priority
-					local damageStats = world:get(entity, Components.AbilityDamageStats) or {}
-					
-					-- Calculate animation loop count (number of bursts, not total projectiles)
-					-- 1 initial burst + (projectileCount - 1) pulse bursts if projectileCount > 1
-					local burstCount = 1  -- Always at least 1 burst (initial cast)
-					if stats.projectileCount > 1 then
-						burstCount = stats.projectileCount  -- Total bursts = projectileCount
-					end
-					
-					-- Get animation config from unified Config
-					local animationData = nil
-					if Config.animations then
-						animationData = {
-							animationIds = Config.animations.animationIds,
-							loopFrame = Config.animations.loopFrame,
-							totalFrames = Config.animations.totalFrames,
-							duration = Config.animations.duration,
-							animationPriority = Config.animations.animationPriority,
-							anticipation = Config.animations.anticipation,
-						}
-					end
-					
-					-- Notify client of ability cast with animation data
-					local animationPulseInterval = stats.pulseInterval or 0
-					if stats.projectileCount > 1 then
-						animationPulseInterval = math.max(animationPulseInterval, 0.01)
-					end
-					AbilityCastRemote:FireClient(player, MAGIC_BOLT_ID, stats.cooldown, MAGIC_BOLT_NAME, {
-						projectileCount = burstCount,  -- Number of animation loops
-						pulseInterval = animationPulseInterval,
-						damageStats = damageStats,
-						animationData = animationData,  -- Send all animation config from server
-					})
+					-- Notify client only for cooldown UI (no MagicBolt animations)
+					AbilityCastRemote:FireClient(player, MAGIC_BOLT_ID, stats.cooldown, MAGIC_BOLT_NAME)
 					
 					-- Update this ability's cooldown
 					cooldowns[MAGIC_BOLT_ID] = {

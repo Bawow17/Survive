@@ -7,6 +7,7 @@ local HttpService = game:GetService("HttpService")
 
 local AbilityRegistry = require(game.ServerScriptService.Abilities.AbilityRegistry)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
+local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local UpgradeDefs = require(game.ServerScriptService.Balance.Upgrades.UpgradeDefs)
 local DashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Dash)
 local ShieldBashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.ShieldBash)
@@ -102,6 +103,12 @@ local function parseModifier(value: any, baseValue: number): number
 		return baseValue + num
 	end
 
+	local mulNum = str:match("^%*(%d+%.?%d*)$")
+	if mulNum then
+		local num = tonumber(mulNum)
+		return baseValue * num
+	end
+
 	warn("[UpgradeSystem] Could not parse modifier:", value)
 	return baseValue
 end
@@ -157,14 +164,14 @@ local function ensureAbilityUpgradeState(upgrades: any, abilityId: string): any
 	return abilityState
 end
 
-local function applySoftCap(rawValue: number, cap: number?): number
+local function applySoftCap(rawValue: number, cap: number?, curveK: number?): number
 	if not cap or cap <= 0 then
 		return rawValue
 	end
 	if rawValue <= 0 then
 		return 0
 	end
-	local k = UpgradeDefs.SoftCaps.curveK
+	local k = curveK or UpgradeDefs.SoftCaps.curveK
 	return cap * (1 - math.exp(-k * rawValue / cap))
 end
 
@@ -173,7 +180,11 @@ local function lerp(a: number, b: number, t: number): number
 end
 
 local function formatPercent(value: number): string
-	return string.format("%.1f%%", value * 100)
+	local percent = value * 100
+	if percent < 1 then
+		return string.format("%.2f%%", percent)
+	end
+	return string.format("%.1f%%", percent)
 end
 
 local passiveStatById: {[string]: any} = {}
@@ -182,6 +193,15 @@ for _, def in pairs(UpgradeDefs.PassiveStats) do
 		passiveStatById[def.id] = def
 	end
 end
+
+local countStatFields: {[string]: boolean} = {}
+for _, def in pairs(UpgradeDefs.AbilityStats) do
+	if def.kind == "count" and type(def.field) == "string" then
+		countStatFields[def.field] = true
+	end
+end
+countStatFields.projectileCount = true
+countStatFields.shotAmount = true
 
 local function getOwnedAbilities(playerEntity: number): {string}
 	local abilityIds = {}
@@ -209,9 +229,9 @@ end
 local function getLuckValue(playerEntity: number): number
 	local effects = world:get(playerEntity, PassiveEffects)
 	if effects and typeof(effects.luck) == "number" then
-		return effects.luck
+		return 1 + effects.luck
 	end
-	return 0
+	return 1
 end
 
 local function getRarityWeights(luckValue: number): {[string]: number}
@@ -287,6 +307,57 @@ local function weightedPick(list: {any}, weightFn: (any) -> number): (any?, numb
 	return list[#list], #list
 end
 
+local function rollAbilityStatCount(rarity: any, poolSize: number): number
+	local rarityId = rarity and rarity.id or "Common"
+	if poolSize <= 1 then
+		return 1
+	end
+
+	-- Legendary: exactly 1/3 chance for 1, 2, or 3 stats
+	if rarityId == "Legendary" then
+		local roll = RNG:NextNumber()
+		if roll < (1 / 3) then
+			return 1
+		elseif roll < (2 / 3) then
+			return math.min(2, poolSize)
+		else
+			return math.min(3, poolSize)
+		end
+	end
+
+	local weights = UpgradeDefs.AbilityStatCountWeights and UpgradeDefs.AbilityStatCountWeights[rarityId]
+	if not weights then
+		local minStats = math.min(rarity.minStats or 1, poolSize)
+		local maxStats = math.min(rarity.maxStats or minStats, poolSize)
+		return RNG:NextInteger(minStats, maxStats)
+	end
+
+	local choices = {}
+	local total = 0
+	for count = 1, 3 do
+		if count <= poolSize then
+			local w = weights[count] or 0
+			if w > 0 then
+				total += w
+				table.insert(choices, {count = count, weight = w, cumulative = total})
+			end
+		end
+	end
+
+	if total <= 0 then
+		return math.min(1, poolSize)
+	end
+
+	local roll = RNG:NextNumber() * total
+	for _, entry in ipairs(choices) do
+		if roll <= entry.cumulative then
+			return entry.count
+		end
+	end
+
+	return choices[#choices].count
+end
+
 local function pickAbilityStatDefs(abilityBalance: any, upgrades: any, abilityId: string): {any}
 	local statPool = {}
 	local abilityState = ensureAbilityUpgradeState(upgrades, abilityId)
@@ -335,13 +406,7 @@ local function pickPassiveStatDefs(upgrades: any, playerEntity: number): {any}
 				continue
 			end
 		end
-		if def.id == "doubleJumpPower" and equippedMobility ~= "DoubleJump" then
-			continue
-		end
-		if def.id == "dashDistance" and equippedMobility ~= "Dash" and equippedMobility ~= "ShieldBash" then
-			continue
-		end
-		if def.id == "grappleDistance" and equippedMobility ~= "Grapple" then
+		if def.id == "dashDistance" and not equippedMobility then
 			continue
 		end
 		if def.id == "mobilityCooldown" and not equippedMobility then
@@ -387,40 +452,49 @@ local function rollStatValues(selectedStats: {any}, rarity: any): ({[string]: nu
 		return rolls, counts
 	end
 
-	local allocations = {}
-	local weightSum = 0
-	for i = 1, #percentStats do
-		local weight = RNG:NextNumber(0.75, 1.25)
-		allocations[i] = weight
-		weightSum += weight
+	local rarityId = rarity and rarity.id or "Common"
+	local baseBias = {
+		Common = 2.2,
+		Rare = 1.6,
+		Epic = 1.25,
+		Legendary = 1.0,
+	}
+	local bias = baseBias[rarityId] or 1.6
+	local statCountPenalty = 0.35 * math.max(#percentStats - 1, 0)
+	local exponent = bias + statCountPenalty
+
+	local function rollPercent(def: any): number
+		local maxValue = (def.rarityMax and def.rarityMax[rarityId]) or def.max or 0.0001
+		local minValue = (def.rarityMin and def.rarityMin[rarityId]) or def.min or 0
+		if maxValue < minValue then
+			minValue = maxValue
+		end
+
+		local roll = RNG:NextNumber()
+		local t = roll ^ exponent
+		local minRollT = (rarity and rarity.minRollT) or 0
+		if minRollT > 0 then
+			t = minRollT + (1 - minRollT) * t
+		end
+		local value = lerp(minValue, maxValue, t)
+		if def.hardCap then
+			value = math.min(value, maxValue)
+		end
+		return value
 	end
 
-	local budget = rarity.budget
-	for i, def in ipairs(percentStats) do
-		local allocated = budget * (allocations[i] / weightSum)
+	for _, def in ipairs(percentStats) do
 		if def.kind == "paired" then
 			local subStats = def.subStats or {}
-			local subWeights = {}
-			local subWeightSum = 0
-			for idx, _ in ipairs(subStats) do
-				local subWeight = RNG:NextNumber(0.75, 1.25)
-				subWeights[idx] = subWeight
-				subWeightSum += subWeight
-			end
-			for idx, subId in ipairs(subStats) do
+			for _, subId in ipairs(subStats) do
 				local subDef = passiveStatById[subId]
 				if subDef then
-					local subAllocated = allocated * (subWeights[idx] / math.max(subWeightSum, 1e-6))
-					local denom = (subDef.max or 0.0001) * (subDef.weight or 1)
-					local progress = clamp01(subAllocated / denom)
-					local rollValue = lerp(subDef.min or 0, subDef.max or 0, progress)
+					local rollValue = rollPercent(subDef)
 					rolls[subDef.id] = (rolls[subDef.id] or 0) + rollValue
 				end
 			end
 		else
-			local denom = (def.max or 0.0001) * (def.weight or 1)
-			local progress = clamp01(allocated / denom)
-			local rollValue = lerp(def.min or 0, def.max or 0, progress)
+			local rollValue = rollPercent(def)
 			rolls[def.id] = (rolls[def.id] or 0) + rollValue
 		end
 	end
@@ -551,6 +625,51 @@ local function assignPartColors(parts: {any}, baseRarity: any): {any}
 	return parts
 end
 
+local function trimStatRolls(rolls: {[string]: number}, counts: {[string]: number}, maxStats: number): ({[string]: number}, {[string]: number})
+	local entries = {}
+	for statId, value in pairs(rolls) do
+		table.insert(entries, {id = statId, value = math.abs(value), kind = "roll"})
+	end
+	for statId, value in pairs(counts) do
+		table.insert(entries, {id = statId, value = math.abs(value), kind = "count"})
+	end
+
+	if #entries <= maxStats then
+		return rolls, counts
+	end
+
+	table.sort(entries, function(a, b)
+		return a.value > b.value
+	end)
+
+	local keepRolls: {[string]: boolean} = {}
+	local keepCounts: {[string]: boolean} = {}
+	for i = 1, math.min(maxStats, #entries) do
+		local entry = entries[i]
+		if entry.kind == "count" then
+			keepCounts[entry.id] = true
+		else
+			keepRolls[entry.id] = true
+		end
+	end
+
+	local trimmedRolls: {[string]: number} = {}
+	for statId, value in pairs(rolls) do
+		if keepRolls[statId] then
+			trimmedRolls[statId] = value
+		end
+	end
+
+	local trimmedCounts: {[string]: number} = {}
+	for statId, value in pairs(counts) do
+		if keepCounts[statId] then
+			trimmedCounts[statId] = value
+		end
+	end
+
+	return trimmedRolls, trimmedCounts
+end
+
 local function countSelectedAttributes(playerEntity: number): number
 	local selectionCount = 0
 	local attributeSelections = world:get(playerEntity, AttributeSelections)
@@ -587,7 +706,7 @@ local function getAvailableAttributesForAbility(playerEntity: number, abilityId:
 	end
 
 	local abilityLevel = abilityRecord.level or 0
-	if abilityLevel < 10 then
+	if abilityLevel < 15 then
 		return available
 	end
 
@@ -627,9 +746,7 @@ local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string
 		return nil
 	end
 
-	local minStats = math.min(rarity.minStats or 1, #statPool)
-	local maxStats = math.min(rarity.maxStats or minStats, #statPool)
-	local statCount = RNG:NextInteger(minStats, maxStats)
+	local statCount = rollAbilityStatCount(rarity, #statPool)
 
 	local selected = {}
 	local pool = table.clone(statPool)
@@ -649,6 +766,7 @@ local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string
 	end
 
 	local rolls, counts = rollStatValues(selected, rarity)
+	rolls, counts = trimStatRolls(rolls, counts, 3)
 	local desc, descParts = buildStatDescription(selected, rolls, counts)
 	assignPartColors(descParts, rarity)
 	local abilityName = ability.balance.Name or abilityId
@@ -658,7 +776,7 @@ local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string
 		id = choiceId,
 		category = "ability",
 		abilityId = abilityId,
-		name = string.format("%s %s", rarity.id, abilityName),
+		name = abilityName,
 		desc = desc,
 		descParts = descParts,
 		color = rarity.color,
@@ -698,7 +816,7 @@ local function buildPassiveUpgradeChoice(playerEntity: number, upgrades: any, bi
 		id = choiceId,
 		category = "passive",
 		statId = selectedDef.id,
-		name = string.format("%s %s", rarity.id, selectedDef.display),
+		name = selectedDef.display,
 		desc = desc,
 		descParts = descParts,
 		color = rarity.color,
@@ -801,7 +919,7 @@ local function buildMobilityChoices(playerEntity: number): {any}
 end
 
 function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number, count: number): {any}
-	count = count or 5
+	count = count or 6
 	local upgrades = ensureUpgradeState(playerEntity)
 	local ownedAbilities = getOwnedAbilities(playerEntity)
 	local unlockChoices = buildUnlockChoices(playerEntity)
@@ -896,35 +1014,36 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 	end
 
 	local attributeChoice = buildAttributeChoice(playerEntity, level)
+	local biasedTarget = math.min(3, count)
+	local randomTarget = count - biasedTarget
+	local biasedChoices = {}
+	local randomChoices = {}
+
+	local function addChoiceTo(list: {any}, choice: any?): boolean
+		if not choice then
+			return false
+		end
+		if not markChoice(choice) then
+			return false
+		end
+		table.insert(list, choice)
+		return true
+	end
+
 	if attributeChoice then
-		if markChoice(attributeChoice) then
-			table.insert(choices, attributeChoice)
+		if randomTarget > 0 then
+			addChoiceTo(randomChoices, attributeChoice)
+		elseif biasedTarget > 0 then
+			addChoiceTo(biasedChoices, attributeChoice)
 		end
 	end
 
-	if #mobilityChoices > 0 and #choices < count then
+	if #mobilityChoices > 0 and #randomChoices < randomTarget then
 		local mobilityPick = mobilityChoices[RNG:NextInteger(1, #mobilityChoices)]
-		if markChoice(mobilityPick) then
-			table.insert(choices, mobilityPick)
-		end
+		addChoiceTo(randomChoices, mobilityPick)
 	end
 
-	if #ownedAbilities > 0 and #choices < count then
-		local choice = pickAbilityUpgrade(true)
-		if choice and markChoice(choice) then
-			table.insert(choices, choice)
-		end
-	end
-
-	local remainingSlots = count - #choices
-	local wildSlot = remainingSlots > 0 and RNG:NextInteger(1, remainingSlots) or nil
-	local slotIndex = 0
-	local attempts = 0
-	local maxAttempts = count * 8
-	while #choices < count and attempts < maxAttempts do
-		attempts += 1
-		slotIndex += 1
-		local isWild = wildSlot and slotIndex == wildSlot
+	local function pickChoice(biased: boolean, isWild: boolean?): any?
 		local roll = RNG:NextNumber()
 		local pickCategory: string
 		if roll < 0.55 and #ownedAbilities > 0 then
@@ -939,27 +1058,25 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 
 		local choice: any? = nil
 		if pickCategory == "ability" and #ownedAbilities > 0 then
-			choice = pickAbilityUpgrade(not isWild)
+			choice = pickAbilityUpgrade(biased and not isWild)
 			if not choice then
 				if #unlockChoices > 0 and not usedUnlock and RNG:NextNumber() < 0.35 then
 					choice = unlockChoices[RNG:NextInteger(1, #unlockChoices)]
 				else
-					choice = buildPassiveUpgradeChoice(playerEntity, upgrades, not isWild)
+					choice = buildPassiveUpgradeChoice(playerEntity, upgrades, biased and not isWild)
 				end
 			end
 		elseif pickCategory == "unlock" and #unlockChoices > 0 then
 			choice = unlockChoices[RNG:NextInteger(1, #unlockChoices)]
 		else
-			choice = buildPassiveUpgradeChoice(playerEntity, upgrades, not isWild)
+			choice = buildPassiveUpgradeChoice(playerEntity, upgrades, biased and not isWild)
 		end
 
 		if choice and not markChoice(choice) then
 			choice = nil
 		end
 
-		if choice then
-			table.insert(choices, choice)
-		else
+		if not choice then
 			local fallback = buildPassiveUpgradeChoice(playerEntity, upgrades)
 			if not fallback and #unlockChoices > 0 and not usedUnlock then
 				fallback = unlockChoices[RNG:NextInteger(1, #unlockChoices)]
@@ -971,10 +1088,80 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 			if fallback and not markChoice(fallback) then
 				fallback = nil
 			end
-			if fallback then
-				table.insert(choices, fallback)
+			choice = fallback
+		end
+
+		return choice
+	end
+
+	local function fillChoices(target: number, biased: boolean, list: {any})
+		local attempts = 0
+		local maxAttempts = target * 10
+		local wildSlot = target > 0 and RNG:NextInteger(1, target) or nil
+		local slotIndex = 0
+		while #list < target and attempts < maxAttempts do
+			attempts += 1
+			slotIndex += 1
+			local isWild = wildSlot and slotIndex == wildSlot
+			local choice = pickChoice(biased, isWild)
+			if choice then
+				table.insert(list, choice)
 			else
 				break
+			end
+		end
+	end
+
+	fillChoices(biasedTarget, true, biasedChoices)
+	if #biasedChoices < biasedTarget then
+		fillChoices(biasedTarget, false, biasedChoices)
+	end
+
+	fillChoices(randomTarget, false, randomChoices)
+
+	for _, choice in ipairs(biasedChoices) do
+		table.insert(choices, choice)
+	end
+	for _, choice in ipairs(randomChoices) do
+		table.insert(choices, choice)
+	end
+
+	-- Final safety: if we still have fewer than requested, fill with unique passives.
+	if #choices < count then
+		local statPool = pickPassiveStatDefs(upgrades, playerEntity)
+		local availablePassives = {}
+		for _, def in ipairs(statPool) do
+			if def.id and not usedPassives[def.id] then
+				table.insert(availablePassives, def)
+			end
+		end
+
+		while #choices < count and #availablePassives > 0 do
+			local pickIndex = RNG:NextInteger(1, #availablePassives)
+			local def = table.remove(availablePassives, pickIndex)
+			if def then
+				local rarity = rollRarity(playerEntity)
+				local rolls, counts = rollStatValues({def}, rarity)
+				local desc, descParts = buildStatDescription({def}, rolls, counts)
+				assignPartColors(descParts, rarity)
+
+				local choice = {
+					id = HttpService:GenerateGUID(false),
+					category = "passive",
+					statId = def.id,
+					name = def.display,
+					desc = desc,
+					descParts = descParts,
+					color = rarity.color,
+					rarity = rarity.id,
+					level = ((upgrades.passives.levels and upgrades.passives.levels[def.id]) or 0) + 1,
+					rolls = rolls,
+					counts = counts,
+				}
+
+				if markChoice(choice) then
+					table.insert(choices, choice)
+				end
 			end
 		end
 	end
@@ -1016,13 +1203,15 @@ local function rebuildAbilityStats(playerEntity: number, abilityId: string, upgr
 				local rawBonus = abilityState.counts[def.id] or 0
 				local maxBonus = math.floor(baseCount * (UpgradeDefs.SoftCaps.countMaxMultiplier - 1) + 0.0001)
 				local appliedBonus = math.min(maxBonus, rawBonus)
-				stats[def.field] = math.max(0, math.floor(baseCount + appliedBonus + 0.0001))
+				local rawCount = baseCount + appliedBonus
+				stats[def.field .. "Raw"] = math.min(baseCount + maxBonus, rawCount)
+				stats[def.field] = math.max(0, math.floor(rawCount + 0.0001))
 			end
 		else
 			local baseValue = baseBalance[def.field]
 			if typeof(baseValue) == "number" then
 				local rawValue = abilityState.stats[def.id] or 0
-				local effective = applySoftCap(rawValue, def.softCap)
+				local effective = applySoftCap(rawValue, def.softCap, def.curveK)
 				if def.effect == "reduce" then
 					stats[def.field] = baseValue * (1 - effective)
 				else
@@ -1048,16 +1237,39 @@ local function rebuildAbilityStats(playerEntity: number, abilityId: string, upgr
 			local attributeData = attributesModule[selectedAttribute]
 			if attributeData and attributeData.stats then
 				for statName, modifier in pairs(attributeData.stats) do
+					local rawKey = statName .. "Raw"
 					local currentValue = stats[statName] or baseBalance[statName] or 0
+					local currentRaw = stats[rawKey] or currentValue
+					local newValue = currentValue
+					local newRaw = currentRaw
+					local isCountStat = countStatFields[statName] == true
+
 					if type(modifier) == "string" and modifier:match("^%*") then
 						local multiplier = tonumber(modifier:match("^%*(%d+%.?%d*)$"))
 						if multiplier then
-							stats[statName] = currentValue * multiplier
+							if stats[rawKey] ~= nil then
+								stats[statName .. "Multiplier"] = (stats[statName .. "Multiplier"] or 1) * multiplier
+							end
+							newValue = currentValue * multiplier
+							newRaw = currentRaw * multiplier
 						else
-							stats[statName] = parseModifier(modifier, currentValue)
+							newValue = parseModifier(modifier, currentValue)
+							newRaw = parseModifier(modifier, currentRaw)
 						end
 					else
-						stats[statName] = parseModifier(modifier, currentValue)
+						newValue = parseModifier(modifier, currentValue)
+						newRaw = parseModifier(modifier, currentRaw)
+					end
+
+					if stats[rawKey] ~= nil then
+						stats[rawKey] = newRaw
+						stats[statName] = math.floor(newRaw + 0.0001)
+					else
+						stats[statName] = newValue
+					end
+
+					if isCountStat then
+						stats[statName .. "IgnoreCap"] = true
 					end
 				end
 			end
@@ -1116,7 +1328,7 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 			continue
 		end
 		local rawValue = upgrades.passives.stats[def.id] or 0
-		local effective = applySoftCap(rawValue, def.softCap)
+		local effective = applySoftCap(rawValue, def.softCap, def.curveK)
 
 		if def.field == "damageMultiplier"
 			or def.field == "cooldownMultiplier"
@@ -1421,7 +1633,7 @@ end
 
 function UpgradeSystem.getAvailableUpgrades(playerEntity: number)
 	return {
-		choices = UpgradeSystem.selectUpgradeChoices(playerEntity, 1, 5),
+		choices = UpgradeSystem.selectUpgradeChoices(playerEntity, 1, 6),
 	}
 end
 
@@ -1441,6 +1653,10 @@ function UpgradeSystem.step(dt: number)
 			rebuildAllPlayerStats(entity)
 		end
 	end
+end
+
+function UpgradeSystem.rebuildPlayerStats(playerEntity: number)
+	rebuildAllPlayerStats(playerEntity)
 end
 
 return UpgradeSystem

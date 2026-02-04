@@ -35,6 +35,7 @@ local ZombieAISystem = require(game.ServerScriptService.ECS.Systems.ZombieAISyst
 local ChargerAISystem = require(game.ServerScriptService.ECS.Systems.ChargerAISystem)
 local EnemyRepulsionSystem = require(game.ServerScriptService.ECS.Systems.EnemyRepulsionSystem)
 local EnemySpawner = require(game.ServerScriptService.ECS.Systems.EnemySpawner)
+local PlayerPressureSystem = require(game.ServerScriptService.ECS.Systems.PlayerPressureSystem)
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
@@ -246,6 +247,7 @@ function ECSWorldService.Initialize()
 	-- Initialize Upgrade systems (before ExpSystem, as it depends on them)
 	UpgradeSystem.init(world, Components, DirtyService)
 	PassiveEffectSystem.init(world, Components, DirtyService)
+	PlayerPressureSystem.init(world, Components, DirtyService)
 	
 	-- Initialize Status Effect system (before ExpSystem, as it depends on it)
 	StatusEffectSystem.init(world, Components, DirtyService)
@@ -427,7 +429,7 @@ local function getDirectionToNearestPlayer(spawnPos: Vector3): {x: number, y: nu
 	return {x = 0, y = 0, z = 1}
 end
 
-function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner: any?): any
+function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner: any?, scaling: any?): any
 	local entity = ECSWorldService.CreateEntity("Enemy", position, owner)
 	if not entity then
 		return nil
@@ -442,30 +444,19 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 	
 	local visualPath = enemyConfig.modelPath
 
-	-- Apply global health scaling based on game time
-	local EasingUtils = require(game.ServerScriptService.Balance.EasingUtils)
-	local gameTime = GameTimeSystem.getGameTime()
-	local healthScaling = EasingUtils.evaluate(EnemyBalance.GlobalHealthScaling, gameTime)
-	
-	-- Apply multiplayer health scaling (configurable per player)
-	local Players = game:GetService("Players")
-	local playerCount = #Players:GetPlayers()
-	local healthPerPlayer = EnemyBalance.Multiplayer.HealthPerPlayer or 0.66
-	local multiplayerHealthScale = 1 + healthPerPlayer * math.max(0, playerCount - 1)
-	
-	local baseHealth = enemyConfig.baseHealth * (EnemyBalance.HealthMultiplier or 1) * (GlobalBalance.HealthMultiplier or 1) * healthScaling * multiplayerHealthScale
-	
-	-- Debug: Log multiplayer scaling for first few enemies
-	if DEBUG then
-		local debugCount = workspace:GetAttribute("MultiplayerHealthScalingDebug") or 0
-		if debugCount < 3 then
-			workspace:SetAttribute("MultiplayerHealthScalingDebug", debugCount + 1)
-			print(string.format("[CreateEnemy] %s | Players: %d | Health: %.1f (base: %.1f, multiplayer: %.2fx)", 
-				enemyType, playerCount, baseHealth, enemyConfig.baseHealth, multiplayerHealthScale))
-		end
-	end
-	local baseDamage = enemyConfig.baseDamage * (EnemyBalance.DamageMultiplier or 1)
-	local baseSpeed = enemyConfig.baseSpeed
+	-- Adaptive scaling (per-player snapshot)
+	local scalingHealth = (scaling and scaling.healthMult) or 1.0
+	local scalingDamage = (scaling and scaling.damageMult) or 1.0
+	local scalingSpeed = (scaling and scaling.speedMult) or 1.0
+
+	local baseHealth = enemyConfig.baseHealth
+		* (EnemyBalance.HealthMultiplier or 1)
+		* (GlobalBalance.HealthMultiplier or 1)
+		* scalingHealth
+	local baseDamage = enemyConfig.baseDamage
+		* (EnemyBalance.DamageMultiplier or 1)
+		* scalingDamage
+	local baseSpeed = enemyConfig.baseSpeed * scalingSpeed
 
 	setComponent(entity, EntityType, {
 		type = "Enemy",
@@ -488,7 +479,19 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 	}, "AI")
 	setComponent(entity, AttackCooldown, { remaining = 0, max = enemyConfig.attackCooldown }, "AttackCooldown")
 	setComponent(entity, Visual, { modelPath = visualPath, visible = true }, "Visual")
-	setComponent(entity, Target, { id = nil }, "Target")
+	setComponent(entity, Target, { id = owner }, "Target")
+
+	-- Owner/aggro metadata for adaptive targeting/exp
+	setComponent(entity, Components.EnemyOwner, { id = owner }, "EnemyOwner")
+	setComponent(entity, Components.EnemyAggro, {
+		owner = owner,
+		target = owner,
+		damageByPlayer = {},
+		threatByPlayer = {},
+		lastThreatTime = GameTimeSystem.getGameTime(),
+		lastSwitchTime = 0,
+		nextSwitchThreshold = (EnemyBalance.Aggro and EnemyBalance.Aggro.MinDamageFractionToSwitch) or 0.30,
+	}, "EnemyAggro")
 	
 	-- Add repulsion component for enemy separation
 	if EnemyBalance.EnableRepulsion then
@@ -1145,6 +1148,10 @@ local function stepWorld(dt: number)
 	-- Enemy slow debuffs (expire/cleanup before AI)
 	debug.profilebegin("EnemySlow")
 	EnemySlowSystem.step(dt)
+	debug.profileend()
+
+	debug.profilebegin("PlayerPressure")
+	PlayerPressureSystem.step(dt)
 	debug.profileend()
 	
 	debug.profilebegin("ZombieAI")

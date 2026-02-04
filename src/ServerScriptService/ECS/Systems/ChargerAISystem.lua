@@ -25,7 +25,6 @@ local DamageSystem
 local StatusEffectSystem
 local GameTimeSystem
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
-local EasingUtils = require(game.ServerScriptService.Balance.EasingUtils)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 
 -- Component references
@@ -163,12 +162,12 @@ function ChargerAISystem.onPlayerPaused(playerEntity: number)
 	
 	local affectedEnemies = {}
 	
-	-- Chargers don't use Target component - freeze ALL chargers
-	-- They use OctreeSystem for targeting, so we can't filter by target
-	-- Instead, freeze all chargers (they'll retarget naturally via OctreeSystem)
-	-- Use cached query for performance (JECS best practice)
-	for entity, entityType, ai in entityTypeAIQuery do
+	-- Freeze chargers currently targeting this player
+	for entity, entityType, ai, target in entityTypeAIQuery do
 		if entityType.type == "Enemy" and (ai.behaviorType == "Charger") then
+			if target and target.id ~= playerEntity then
+				continue
+			end
 			-- Store original speed (use balance base speed if already frozen)
 			local originalSpeed = ai.speed
 			if originalSpeed == 0 then
@@ -265,9 +264,9 @@ function ChargerAISystem.init(worldRef: any, components: any, dirtyService: any)
 	
 	-- Create cached queries for performance (JECS best practice)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing
-	chargerQuery = world:query(Components.Position, Components.Velocity, Components.AI, Components.ChargerState, Components.FacingDirection, Components.EntityType):without(Components.DeathAnimation):cached()
+	chargerQuery = world:query(Components.Position, Components.Velocity, Components.AI, Components.ChargerState, Components.FacingDirection, Components.EntityType, Components.Target):without(Components.DeathAnimation):cached()
 	playerQueryCached = world:query(Components.Position, Components.PlayerStats):cached()
-	entityTypeAIQuery = world:query(Components.EntityType, Components.AI):cached()
+	entityTypeAIQuery = world:query(Components.EntityType, Components.AI, Components.Target):cached()
 end
 
 -- Helper functions (same pattern as ZombieAISystem)
@@ -555,7 +554,7 @@ function ChargerAISystem.step(dt: number)
 	-- Never modify components during JECS query iteration!
 	local chargers = {}
 	
-	for entity, position, velocity, ai, chargerState, facingDir, entityType in chargerQuery do
+	for entity, position, velocity, ai, chargerState, facingDir, entityType, target in chargerQuery do
 		if entityType.type ~= "Enemy" then continue end
 		if not ai.behaviorType or ai.behaviorType ~= "Charger" then continue end
 		
@@ -566,7 +565,14 @@ function ChargerAISystem.step(dt: number)
 			ai = ai,
 			chargerState = chargerState,
 			facingDir = facingDir,
+			target = target,
 		})
+	end
+
+	-- Build player position map once per step
+	local players = {}
+	for playerEntity, playerPos in playerQueryCached do
+		players[playerEntity] = playerPos
 	end
 	
 	-- Process collected Chargers (safe to modify components now)
@@ -606,50 +612,50 @@ function ChargerAISystem.step(dt: number)
 		-- Convert position to Vector3
 		local myPos = Vector3.new(position.x, position.y, position.z)
 		
-		-- Find nearest player (filters out paused players automatically)
-		local playerPos: Vector3? = OctreeSystem.getNearestPlayerPosition(myPos)
+		-- Prefer assigned target; fallback to nearest non-paused player
+		local targetId = chargerData.target and chargerData.target.id or nil
+		if targetId and not players[targetId] then
+			targetId = nil
+		end
+		if targetId and PauseSystem and PauseSystem.isPlayerPaused(targetId) then
+			targetId = nil
+		end
+		if targetId and StatusEffectSystem and StatusEffectSystem.hasSpawnProtection(targetId) then
+			targetId = nil
+		end
+		if not targetId then
+			targetId = findNearestNonPausedPlayer(entity)
+		end
+		
+		if not targetId then
+			setVelocity(entity, { x = 0, y = 0, z = 0 })
+			continue
+		end
+		
+		local playerPos = players[targetId]
 		if not playerPos then
 			setVelocity(entity, { x = 0, y = 0, z = 0 })
 			continue
 		end
 		
+		-- Persist target if it changed
+		if chargerData.target == nil or chargerData.target.id ~= targetId then
+			world:set(entity, _Target, { id = targetId })
+			DirtyService.mark(entity, "Target")
+		end
+		
 		local now = getGameTime()
 		local currentTime = tick()
-		local toPlayer = Vector3.new((playerPos :: Vector3).X - myPos.X, 0, (playerPos :: Vector3).Z - myPos.Z)
+		local playerPosVec = Vector3.new(playerPos.x, playerPos.y, playerPos.z)
+		local toPlayer = Vector3.new(playerPosVec.X - myPos.X, 0, playerPosVec.Z - myPos.Z)
 		local dist = toPlayer.Magnitude
 		local distSq = dist * dist
 		
-		-- Calculate current move speed with scaling
-		local baseSpeed = balance.baseSpeed or 27
+		-- Calculate current move speed (already scaled at spawn)
+		local baseSpeed = (ai and ai.speed) or balance.baseSpeed or 27
 		local approachSpeed = baseSpeed
-		
-		-- Apply global and lifetime scaling
-		local gameTime = GameTimeSystem.getGameTime()
-		local globalSpeedMult = EasingUtils.evaluate(EnemyBalance.GlobalMoveSpeedScaling, gameTime)
-		local spawnTime = world:get(entity, Components.SpawnTime)
-		local lifetimeSpeedMult = 1.0
-		if spawnTime then
-			local entityLifetime = gameTime - spawnTime.time
-			
-			-- Subtract total paused time from lifetime (enemies don't age while paused)
-			local pausedTime = world:get(entity, Components.EnemyPausedTime)
-			if pausedTime then
-				entityLifetime = entityLifetime - pausedTime.totalPausedTime
-				entityLifetime = math.max(0, entityLifetime)  -- Never negative
-			end
-			
-			lifetimeSpeedMult = EasingUtils.evaluate(EnemyBalance.LifetimeMoveSpeedScaling, entityLifetime)
-		end
-		approachSpeed = approachSpeed * globalSpeedMult * lifetimeSpeedMult
 		local slowMultiplier = EnemySlowSystem.getSlowMultiplier(entity)
 		approachSpeed = approachSpeed * slowMultiplier
-		
-		-- CRITICAL: Update AI component with scaled speed (for persistence + sync)
-		if ai.speed ~= approachSpeed then
-			ai.speed = approachSpeed
-			world:set(entity, _AI, ai)
-			DirtyService.mark(entity, "AI")
-		end
 		
 		-- Apply cooldown speed penalty
 		if chargerState.state == S_COOLDOWN then
@@ -757,7 +763,7 @@ function ChargerAISystem.step(dt: number)
 				-- Apply pathfinding if in Advanced Mode
 				if pathfindingState.mode == "advanced" and pathfindingState.obstacleDetected then
 					-- Check if player is above
-					local playerY = (playerPos :: Vector3).Y
+					local playerY = playerPosVec.Y
 					local chargerY = myPos.Y
 					local verticalDiff = playerY - chargerY
 					
@@ -968,7 +974,7 @@ function ChargerAISystem.step(dt: number)
 				-- Apply pathfinding if in Advanced Mode
 				if pathfindingState.mode == "advanced" and pathfindingState.obstacleDetected then
 					-- Check if player is above
-					local playerY = (playerPos :: Vector3).Y
+					local playerY = playerPosVec.Y
 					local chargerY = myPos.Y
 					local verticalDiff = playerY - chargerY
 					

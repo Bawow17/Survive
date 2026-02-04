@@ -181,7 +181,9 @@ local initialComponents = {
 	DeathAnimation = true,
 	MobilityData = true,
 	MobilityCooldown = true,
+	SessionStats = true,
 	PassiveEffects = true,  -- Need for mobility multipliers on client
+	BuffState = true,  -- Needed for powerup buffs (ArcaneRune, etc.)
 }
 
 -- Component tracking (legacy - all components now sync every frame)
@@ -1148,6 +1150,7 @@ function SyncSystem.init(worldRef: any, components: any, dirtyService: any, remo
 		HitFlash = Components.HitFlash,
 		Knockback = Components.Knockback,
 		DeathAnimation = Components.DeathAnimation,
+		SessionStats = Components.SessionStats,
 		PowerupData = Components.PowerupData,  -- Has ownerId for per-player Health powerups
 		Overheal = Components.Overheal,
 		BuffState = Components.BuffState,
@@ -1202,6 +1205,9 @@ function SyncSystem.markForInitialSync(entity: number)
 	end
 	if world:has(entity, componentLookup.Lifetime) then
 		DirtyService.mark(entity, "Lifetime")
+	end
+	if world:has(entity, componentLookup.BuffState) then
+		DirtyService.mark(entity, "BuffState")
 	end
 end
 

@@ -1055,6 +1055,51 @@ local function despawnProjectile(record: ProjectileRecord, reason: string, impac
 	profInc("ProjectileService.Despawned", 1)
 end
 
+function ProjectileService.despawnOwnedProjectiles(ownerEntity: number)
+	if not ownerEntity then
+		return
+	end
+
+	local removedIds: {[number]: boolean} = {}
+	local ids = table.clone(projectileList)
+	for _, id in ipairs(ids) do
+		local record = projectiles[id]
+		if record then
+			local petalOwner = record.petal and record.petal.ownerEntity or nil
+			local orbitOwner = record.orbit and record.orbit.ownerEntity or nil
+			if record.ownerEntity == ownerEntity or petalOwner == ownerEntity or orbitOwner == ownerEntity then
+				removedIds[record.id] = true
+				despawnProjectile(record, "owner_died", nil)
+			end
+		end
+	end
+
+	-- Remove any pending spawns for removed projectiles
+	for player, payloads in pairs(pendingSpawns) do
+		local write = 1
+		for read = 1, #payloads do
+			local entry = payloads[read]
+			if entry and not removedIds[entry.id] then
+				payloads[write] = entry
+				write += 1
+			end
+		end
+		for i = write, #payloads do
+			payloads[i] = nil
+		end
+	end
+
+	-- Clear active explosions owned by the player
+	for i = #activeExplosions, 1, -1 do
+		local explosion = activeExplosions[i]
+		if explosion and (explosion.ownerEntity == ownerEntity or explosion.retargetOwnerEntity == ownerEntity) then
+			table.remove(activeExplosions, i)
+		end
+	end
+
+	petalRetargetRequests[ownerEntity] = nil
+end
+
 function ProjectileService.step(dt: number)
 	local now = getSimTime()
 	if #projectileList == 0 and #activeExplosions == 0 then

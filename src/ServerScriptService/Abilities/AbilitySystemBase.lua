@@ -182,11 +182,18 @@ function AbilitySystemBase.getAbilityStats(playerEntity: number, abilityId: stri
 			stats.penetration = math.max(0, math.floor(stats.penetration * passiveEffects.penetrationMultiplier + 0.0001))
 		end
 
-		-- Apply projectile count bonus (cap at 5x base)
+		-- Apply projectile count bonus (cap at 5x base, unless attribute already exceeds cap)
 		if stats.projectileCount and passiveEffects.projectileCountBonus then
 			local baseCount = baseBalance.projectileCount or stats.projectileCount
+			local rawBase = stats.projectileCountRaw or stats.projectileCount
+			local bonusMultiplier = stats.projectileCountMultiplier or 1
 			local maxCount = math.floor(baseCount * UpgradeDefs.SoftCaps.countMaxMultiplier + 0.0001)
-			stats.projectileCount = math.min(maxCount, math.floor(stats.projectileCount + passiveEffects.projectileCountBonus + 0.0001))
+			local rawCount = rawBase + (passiveEffects.projectileCountBonus * bonusMultiplier)
+			if stats.projectileCountIgnoreCap or rawBase > maxCount then
+				stats.projectileCount = math.floor(rawCount + 0.0001)
+			else
+				stats.projectileCount = math.min(maxCount, math.floor(rawCount + 0.0001))
+			end
 		end
 	end
 	
@@ -544,39 +551,13 @@ function AbilitySystemBase.calculateTargetingDirection(
 		).Unit
 
 	elseif targetingMode == 1 then
-		-- Random X/Z direction, but aim for closest enemy's Y position
-		if targetPosition then
-			-- Create random horizontal direction (normalized on X/Z plane)
-			local angle = math.random() * math.pi * 2
-			local horizontalDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
-			
-			-- Calculate horizontal distance and Y distance separately
-			local horizontalDistance = Vector3.new(
-				targetPosition.X - playerPosition.X,
-				0,
-				targetPosition.Z - playerPosition.Z
-			).Magnitude
-			
-		-- If there's a horizontal distance, use it; otherwise use a default range
-		if horizontalDistance < 1 then
-			horizontalDistance = (targetingStats and targetingStats.targetingRange) or 100
-		end
-			
-			-- Calculate Y component based on height difference
-			local yDistance = targetPosition.Y - playerPosition.Y
-			
-			-- Build final direction: random horizontal + calculated vertical
-			local finalDirection = horizontalDirection * horizontalDistance + Vector3.new(0, yDistance, 0)
-			direction = finalDirection.Unit
-		else
-			-- Fallback to random horizontal direction
-			local angle = math.random() * math.pi * 2
-			direction = Vector3.new(
-				math.cos(angle),
-				0,
-				math.sin(angle)
-			).Unit
-		end
+		-- Random horizontal direction only (no enemy influence)
+		local angle = math.random() * math.pi * 2
+		direction = Vector3.new(
+			math.cos(angle),
+			0,
+			math.sin(angle)
+		).Unit
 
 	elseif targetingMode == 2 then
 		-- Direct targeting with CONSERVATIVE prediction

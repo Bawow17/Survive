@@ -85,17 +85,22 @@ return {
 		Phase1 = {
 			name = "Fast (Linear)",
 			ratio = 0.35,  -- First 35% of max upgrades
-			expPerLevel = 90,  -- Linear: +100 exp per level
+			expPerLevel = 70,  -- Linear: +100 exp per level
 		},
 		Phase2 = {
 			name = "Medium (Gentle Exponential)",
 			ratio = 0.45,  -- Next 45% of max upgrades
-			scaling = 1.07,  -- 1.1x multiplier per level
+			scaling = 1.02,  -- 1.02x multiplier per level
 		},
 		Phase3 = {
 			name = "Grindy (Quadratic)",
 			ratio = 0.20,  -- Final 20% of max upgrades
-			baseMultiplier = 1.5,  -- Quadratic scaling base
+			baseMultiplier = 1.12,  -- Quadratic scaling base
+			linearFactor = 0.02, -- Additional linear growth per level in Phase 3
+			dampingStart = 40, -- start damping late levels
+			dampingEnd = 100, -- full damping by this level
+			dampingScale = 0.6, -- reduce late-level growth by this factor
+			maxGrowthPerLevel = 0.04, -- cap per-level growth in late phase
 		},
 	},
 	
@@ -113,8 +118,8 @@ return {
 		SpawnDelay = 2,  -- Wait 0.5s after player joins before spawning orbs
 		
 		-- Number of orbs to spawn
-		MinOrbs = 60,   -- Minimum orbs
-		MaxOrbs = 80,  -- Maximum orbs (random between min/max)
+		MinOrbs = 120,   -- Minimum orbs
+		MaxOrbs = 160,  -- Maximum orbs (random between min/max)
 		
 		-- Spawn radius around player
 		MinRadius = 25,  -- Minimum distance from player (studs)

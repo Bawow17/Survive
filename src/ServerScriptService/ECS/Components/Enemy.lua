@@ -40,4 +40,10 @@ EnemyComponents.EnemyPausedTime = world:component()
 -- EnemySlow component - Tracks slow debuff state (duration + multiplier)
 EnemyComponents.EnemySlow = world:component()
 
+-- EnemyOwner component - Player entity this enemy is spawned for
+EnemyComponents.EnemyOwner = world:component()
+
+-- EnemyAggro component - Tracks per-player damage/threat for target switching
+EnemyComponents.EnemyAggro = world:component()
+
 return EnemyComponents

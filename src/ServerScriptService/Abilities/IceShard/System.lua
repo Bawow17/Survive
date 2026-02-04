@@ -360,6 +360,12 @@ local function updateFrozenPetals(playerEntity: number, player: Player, stats: a
 	end
 end
 
+local function clearPetalState(playerEntity: number)
+	if petalStateByEntity[playerEntity] then
+		petalStateByEntity[playerEntity] = nil
+	end
+end
+
 -- Perform a IceShard burst (finds target and spawns projectiles)
 local function performIceShardBurst(playerEntity: number, player: Player, statsOverride: any?, attributeOverride: string?): boolean
 	-- Get player position (prefers character position)
@@ -694,5 +700,7 @@ function IceShardSystem.step(dt: number)
 	end
 
 end
+
+IceShardSystem.clearPetalState = clearPetalState
 
 return IceShardSystem

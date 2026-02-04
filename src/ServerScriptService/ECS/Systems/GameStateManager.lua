@@ -95,6 +95,33 @@ local function clearAfterimagesAttribute(playerEntity: number)
 	end
 end
 
+local function clearAllAbilityAttributes(playerEntity: number)
+	if not world or not Components then
+		return
+	end
+
+	local attributeSelections = world:get(playerEntity, Components.AttributeSelections)
+	if attributeSelections then
+		world:remove(playerEntity, Components.AttributeSelections)
+	end
+
+	local abilityData = world:get(playerEntity, Components.AbilityData)
+	if abilityData and abilityData.abilities then
+		local abilityChanged = false
+		for _, record in pairs(abilityData.abilities) do
+			if record and record.selectedAttribute then
+				record.selectedAttribute = nil
+				record.attributeColor = nil
+				record.attributeSpecial = nil
+				abilityChanged = true
+			end
+		end
+		if abilityChanged then
+			DirtyService.setIfChanged(world, playerEntity, Components.AbilityData, {abilities = abilityData.abilities}, "AbilityData")
+		end
+	end
+end
+
 function GameStateManager.init(worldRef, components, dirtyService, ecsWorldService)
 	world = worldRef
 	Components = components
@@ -282,6 +309,9 @@ function GameStateManager.addPlayerToGame(player: Player)
 	-- Initialize session stats tracking for this player
 	local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
 	SessionStatsTracker.onPlayerAdded(playerEntity)
+
+	-- Ensure ability damage stats exist for UI tracking
+	DirtyService.setIfChanged(world, playerEntity, Components.AbilityDamageStats, {}, "AbilityDamageStats")
 	
 	-- Grant spawn protection
 	if StatusEffectSystem then
@@ -532,6 +562,7 @@ function GameStateManager.resetGame()
 	for player, data in pairs(playersInGame) do
 		if data.entity then
 			clearAfterimagesAttribute(data.entity)
+			clearAllAbilityAttributes(data.entity)
 			ECSWorldService.DestroyEntity(data.entity)
 		end
 	end
@@ -602,6 +633,16 @@ function handleStartCleanup(player: Player)
 	end
 	for _, entity in ipairs(entitiesToDestroy.afterimageClones) do
 		ECSWorldService.DestroyEntity(entity)
+	end
+
+	-- Clear ALL ability attributes and rebuild stats so colors/stats reset on wipe
+	local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
+	for player, data in pairs(playersInGame) do
+		if data and data.entity then
+			clearAfterimagesAttribute(data.entity)
+			clearAllAbilityAttributes(data.entity)
+			UpgradeSystem.rebuildPlayerStats(data.entity)
+		end
 	end
 	
 	-- Manually fire despawn events to all clients to ensure they're removed

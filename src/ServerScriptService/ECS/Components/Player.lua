@@ -47,6 +47,9 @@ PlayerComponents.MagnetSession = world:component()
 -- AbilityDamageStats component - Tracks total damage dealt by each ability (session-persistent)
 PlayerComponents.AbilityDamageStats = world:component()
 
+-- SessionStats component - Tracks total damage/kills/deaths for UI (session-persistent)
+PlayerComponents.SessionStats = world:component()
+
 -- Mobility system components
 -- MobilityData component - Tracks which mobility ability is equipped
 PlayerComponents.MobilityData = world:component()
@@ -65,5 +68,8 @@ PlayerComponents.PendingLevelUps = world:component()
 
 -- BankedHands component - Queue of level-up hands (no pause)
 PlayerComponents.BankedHands = world:component()
+
+-- PlayerPower component - Cached power score + pressure for adaptive enemy scaling
+PlayerComponents.PlayerPower = world:component()
 
 return PlayerComponents

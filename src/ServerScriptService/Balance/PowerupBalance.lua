@@ -47,8 +47,8 @@ return {
 	},
 	
 	-- Spawn chances
-	AmbientPowerupChance = 0.0053,  -- chance to spawn powerup instead of exp
-	EnemyDropPowerupChance = 0.008,  -- chance enemy drops powerup
+	AmbientPowerupChance = 0.00106,  -- chance to spawn powerup instead of exp (5x rarer)
+	EnemyDropPowerupChance = 0.0016,  -- chance enemy drops powerup (5x rarer)
 	
 	-- Powerup type weights (equal distribution)
 	PowerupWeights = {
@@ -79,4 +79,3 @@ return {
 	-- Display names
 	InvincibilityDisplayName = "Invincibility",
 }
-

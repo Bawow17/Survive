@@ -227,6 +227,20 @@ local function cleanupClones(playerEntity: number)
 	world:remove(playerEntity, AfterimageClones)
 end
 
+local function despawnClonesKeepComponent(playerEntity: number)
+	local clonesData = world:get(playerEntity, AfterimageClones)
+	if not clonesData or not clonesData.clones then
+		return
+	end
+	for _, cloneInfo in ipairs(clonesData.clones) do
+		if world:contains(cloneInfo.entity) then
+			world:despawn(cloneInfo.entity)
+		end
+	end
+	clonesData.clones = {}
+	DirtyService.setIfChanged(world, playerEntity, AfterimageClones, clonesData, "AfterimageClones")
+end
+
 -- Step function (called every frame)
 function AfterimageCloneSystem.step(_dt: number)
 	if not world then
@@ -285,6 +299,6 @@ end
 
 -- Export cleanup function for use in player removal
 AfterimageCloneSystem.cleanupClones = cleanupClones
+AfterimageCloneSystem.despawnClones = despawnClonesKeepComponent
 
 return AfterimageCloneSystem
-

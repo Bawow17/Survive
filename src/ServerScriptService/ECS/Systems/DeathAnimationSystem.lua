@@ -57,11 +57,12 @@ function DeathAnimationSystem.step(_dt: number)
 	
 	-- Check for entities that have completed death animation using cached query
 	for entity, deathAnim in deathQuery do
-		-- Entity should be destroyed immediately after flash completes + fade duration
-		local flashDuration = (deathAnim.flashEndTime - deathAnim.startTime)
-		local fadeDuration = deathAnim.duration
-		local totalDuration = flashDuration + fadeDuration -- No buffer, destroy immediately after fade
-		local destroyTime = deathAnim.startTime + totalDuration
+		-- Entity should be destroyed immediately after fade completes (post-hit flash)
+		local fadeDuration = deathAnim.duration or 0
+		local flashEndTime = deathAnim.flashEndTime or deathAnim.startTime or 0
+		local startTime = deathAnim.startTime or 0
+		local effectiveStart = math.max(startTime, flashEndTime)
+		local destroyTime = effectiveStart + fadeDuration
 		
 		if currentTime >= destroyTime then
 			-- Return poolable entities to their pools instead of destroying

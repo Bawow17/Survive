@@ -45,6 +45,18 @@ local function resetEnemyEntity(entity: number, enemyType: string, position: Vec
 		id = nil,
 		position = { x = 0, y = 0, z = 0 },
 	})
+
+	-- Owner/aggro defaults (overwritten by CreateEnemy)
+	world:set(entity, Components.EnemyOwner, { id = owner })
+	world:set(entity, Components.EnemyAggro, {
+		owner = owner,
+		target = owner,
+		damageByPlayer = {},
+		threatByPlayer = {},
+		lastThreatTime = 0,
+		lastSwitchTime = 0,
+		nextSwitchThreshold = 0.30,
+	})
 	
 	-- Initialize optional components
 	world:set(entity, Components.Lifetime, { remaining = 300, max = 300 })
@@ -168,6 +180,12 @@ function EnemyPool.release(entity: number)
 		end
 		if world:has(entity, Components.EnemySlow) then
 			world:remove(entity, Components.EnemySlow)
+		end
+		if world:has(entity, Components.EnemyOwner) then
+			world:remove(entity, Components.EnemyOwner)
+		end
+		if world:has(entity, Components.EnemyAggro) then
+			world:remove(entity, Components.EnemyAggro)
 		end
 		
 		-- Return to pool

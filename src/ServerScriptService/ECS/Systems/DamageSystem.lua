@@ -4,6 +4,8 @@
 
 local DamageSystem = {}
 
+local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
+
 local world: any
 local Components: any
 local DirtyService: any
@@ -19,6 +21,7 @@ local HitFlash: any
 local Knockback: any
 local DeathAnimation: any
 local PassiveEffects: any
+local EnemyAggro: any
 
 local RNG = Random.new()
 
@@ -34,7 +37,7 @@ local KNOCKBACK_DURATION = 0.2
 
 -- OPTIMIZATION PHASE 3: Ensure HitFlash plays before death fade
 -- Buffer time between HitFlash end and death fade start
-local DEATH_ANIMATION_BUFFER = 0.05  -- 50ms buffer for client to render HitFlash
+local DEATH_ANIMATION_BUFFER = 0.12  -- Allow HitFlash to be visible before death fade
 
 local function isPlayerSourceEntity(sourceEntity: number?): boolean
 	if not sourceEntity then
@@ -48,6 +51,24 @@ local function isPlayerSourceEntity(sourceEntity: number?): boolean
 	return sourceStats and sourceStats.player ~= nil
 end
 
+local function normalizeCritChance(rawChance: number?): number
+	if typeof(rawChance) ~= "number" then
+		return 0
+	end
+	local critChance = rawChance
+	if critChance > 1 then
+		if critChance <= 100 then
+			critChance = critChance / 100
+		else
+			critChance = 1
+		end
+	end
+	return math.clamp(critChance, 0, 1)
+end
+
+-- Pseudo-random distribution to smooth crit streaks without changing average rate.
+local critAccumulators: {[number]: number} = {}
+
 function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	world = worldRef
 	Components = components
@@ -60,6 +81,7 @@ function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	Knockback = Components.Knockback
 	DeathAnimation = Components.DeathAnimation
 	PassiveEffects = Components.PassiveEffects
+	EnemyAggro = Components.EnemyAggro
 end
 
 -- Set EnemyExpDropSystem reference (called after it's initialized)
@@ -100,6 +122,106 @@ local function findClosestPlayer(position: Vector3): Player?
 	return closestPlayer
 end
 
+local function updateEnemyAggro(enemyEntity: number, sourceEntity: number, appliedDamage: number, maxHealth: number)
+	if not EnemyAggro or not world then
+		return
+	end
+	local aggro = world:get(enemyEntity, EnemyAggro)
+	if not aggro then
+		return
+	end
+
+	local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
+	local now = GameTimeSystem.getGameTime()
+	local aggroConfig = EnemyBalance.Aggro or {}
+	local threatTau = aggroConfig.ThreatTau or 4.0
+	local decay = math.exp(-(now - (aggro.lastThreatTime or now)) / math.max(0.01, threatTau))
+
+	local threatByPlayer = aggro.threatByPlayer or {}
+	for id, threat in pairs(threatByPlayer) do
+		local newThreat = threat * decay
+		if newThreat <= 0.001 then
+			threatByPlayer[id] = nil
+		else
+			threatByPlayer[id] = newThreat
+		end
+	end
+
+	aggro.lastThreatTime = now
+	aggro.threatByPlayer = threatByPlayer
+
+	local damageByPlayer = aggro.damageByPlayer or {}
+	damageByPlayer[sourceEntity] = (damageByPlayer[sourceEntity] or 0) + appliedDamage
+	aggro.damageByPlayer = damageByPlayer
+
+	threatByPlayer[sourceEntity] = (threatByPlayer[sourceEntity] or 0) + appliedDamage
+
+	if aggro.owner == nil and aggro.target ~= nil then
+		aggro.owner = aggro.target
+	end
+
+	local currentTarget = aggro.target or aggro.owner
+	if currentTarget and StatusEffectSystem and StatusEffectSystem.hasSpawnProtection(currentTarget) then
+		aggro.target = nil
+		currentTarget = nil
+	end
+	local currentDamage = currentTarget and damageByPlayer[currentTarget] or 0
+
+	local topPlayer = currentTarget
+	local topDamage = currentDamage
+	for id, dmg in pairs(damageByPlayer) do
+		if StatusEffectSystem and StatusEffectSystem.hasSpawnProtection(id) then
+			continue
+		end
+		if dmg > topDamage then
+			topDamage = dmg
+			topPlayer = id
+		end
+	end
+
+	local minFrac = aggroConfig.MinDamageFractionToSwitch or 0.30
+	local switchThreshold = aggro.nextSwitchThreshold or minFrac
+	if topPlayer and not currentTarget then
+		aggro.target = topPlayer
+		currentTarget = topPlayer
+		local targetComp = world:get(enemyEntity, Components.Target)
+		if targetComp then
+			targetComp.id = topPlayer
+			world:set(enemyEntity, Components.Target, targetComp)
+		else
+			world:set(enemyEntity, Components.Target, { id = topPlayer })
+		end
+		DirtyService.mark(enemyEntity, "Target")
+	end
+	if topPlayer and currentTarget and topPlayer ~= currentTarget and maxHealth > 0 then
+		if topDamage >= maxHealth * switchThreshold and topDamage > currentDamage then
+			local cooldown = aggroConfig.SwitchCooldown or 1.2
+			if not aggro.lastSwitchTime or (now - aggro.lastSwitchTime) >= cooldown then
+				local currentThreat = threatByPlayer[currentTarget] or 0
+				local candidateThreat = threatByPlayer[topPlayer] or 0
+				local margin = aggroConfig.ThreatMargin or 0.2
+				if candidateThreat >= currentThreat * (1 + margin) then
+					aggro.target = topPlayer
+					aggro.lastSwitchTime = now
+					aggro.nextSwitchThreshold = math.min(1.0, switchThreshold + minFrac)
+
+					local targetComp = world:get(enemyEntity, Components.Target)
+					if targetComp then
+						targetComp.id = topPlayer
+						world:set(enemyEntity, Components.Target, targetComp)
+					else
+						world:set(enemyEntity, Components.Target, { id = topPlayer })
+					end
+					DirtyService.mark(enemyEntity, "Target")
+				end
+			end
+		end
+	end
+
+	world:set(enemyEntity, EnemyAggro, aggro)
+	DirtyService.mark(enemyEntity, "EnemyAggro")
+end
+
 -- Apply damage to an entity with all feedback effects
 -- sourceEntity: optional player entity that dealt the damage (for ability tracking)
 -- abilityId: optional ability identifier (for damage stat tracking)
@@ -132,13 +254,21 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	end
 
 	-- Apply player offensive modifiers (crit)
+	local wasCrit = false
 	if isEnemy and sourceEntity and isPlayerSourceEntity(sourceEntity) then
 		local sourceEffects = world:get(sourceEntity, PassiveEffects)
 		if sourceEffects then
-			local critChance = sourceEffects.critChance or 0
-			if critChance > 0 and RNG:NextNumber() < critChance then
-				local critDamage = sourceEffects.critDamage or 0
-				damageAmount = damageAmount * (2 + critDamage)
+			local critChance = normalizeCritChance(sourceEffects.critChance)
+			if critChance > 0 then
+				local acc = critAccumulators[sourceEntity] or 0
+				acc += critChance
+				if RNG:NextNumber() < acc then
+					local critDamage = sourceEffects.critDamage or 0
+					damageAmount = damageAmount * (2 + critDamage)
+					wasCrit = true
+					acc -= 1
+				end
+				critAccumulators[sourceEntity] = acc
 			end
 		end
 	end
@@ -164,11 +294,14 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	
 	-- Track ability damage for player sources (only count damage to enemies)
 	if sourceEntity and abilityId and isEnemy and isPlayerSourceEntity(sourceEntity) then
-		local damageStats = world:get(sourceEntity, Components.AbilityDamageStats)
-		if not damageStats then
-			damageStats = {}
+		local currentStats = world:get(sourceEntity, Components.AbilityDamageStats)
+		local damageStats = {}
+		if currentStats and typeof(currentStats) == "table" then
+			for key, value in pairs(currentStats) do
+				damageStats[key] = value
+			end
 		end
-		
+
 		-- Accumulate damage for this ability
 		damageStats[abilityId] = (damageStats[abilityId] or 0) + damageAmount
 		DirtyService.setIfChanged(world, sourceEntity, Components.AbilityDamageStats, damageStats, "AbilityDamageStats")
@@ -177,13 +310,21 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	-- Track session damage for player sources (damage to enemies)
 	if sourceEntity and isEnemy and isPlayerSourceEntity(sourceEntity) then
 		local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
-		SessionStatsTracker.trackDamage(sourceEntity, damageAmount)
+		SessionStatsTracker.trackDamage(sourceEntity, damageAmount, abilityId)
 	end
 	
 	-- Get health component
 	local health = world:get(targetEntity, Health)
 	if not health then
 		return false, false
+	end
+
+	-- Update per-enemy aggro tracking (player damage only)
+	if isEnemy and sourceEntity and isPlayerSourceEntity(sourceEntity) then
+		local appliedDamage = math.min(damageAmount, health.current)
+		if appliedDamage > 0 then
+			updateEnemyAggro(targetEntity, sourceEntity, appliedDamage, health.max)
+		end
 	end
 	
 	-- Apply damage to overheal first (for players)
@@ -362,19 +503,27 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 		end
 	end
 	
-	-- Trigger hit flash VFX
+	-- Trigger hit flash VFX (skip for nuke)
 	local currentTime = tick()
-	local existingFlash = world:get(targetEntity, HitFlash)
-	local hitCount = existingFlash and existingFlash.hitCount or 0
-	
-	DirtyService.setIfChanged(world, targetEntity, HitFlash, {
-		endTime = currentTime + HIT_FLASH_DURATION,
-		hitCount = hitCount + 1
-	}, "HitFlash")
+	local flashEndTime = currentTime
+	if damageType ~= "nuke" then
+		local existingFlash = world:get(targetEntity, HitFlash)
+		local hitCount = existingFlash and existingFlash.hitCount or 0
+		flashEndTime = currentTime + HIT_FLASH_DURATION
+		if existingFlash and typeof(existingFlash.endTime) == "number" then
+			flashEndTime = math.max(flashEndTime, existingFlash.endTime)
+		end
+		
+		DirtyService.setIfChanged(world, targetEntity, HitFlash, {
+			endTime = flashEndTime,
+			hitCount = hitCount + 1,
+			crit = wasCrit,
+		}, "HitFlash")
+	end
 	
 	-- Apply knockback (if not already in death animation)
 	local deathAnim = world:get(targetEntity, DeathAnimation)
-	if not deathAnim then
+	if not deathAnim and damageType ~= "nuke" then
 		local entityPos = world:get(targetEntity, Position)
 		if entityPos then
 			local position = Vector3.new(entityPos.x, entityPos.y, entityPos.z)
@@ -414,11 +563,28 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 		-- For players: Let Roblox handle death/respawn, ECS cleanup happens in CharacterAdded
 		-- For enemies: Trigger death animation and exp drop
 		if not isPlayer then
+			-- Nuke kills: no hit/death animation, despawn immediately after exp drop
+			if damageType == "nuke" then
+				if EnemyExpDropSystem then
+					local entityPos = world:get(targetEntity, Position)
+					if entityPos then
+						local pos = Vector3.new(entityPos.x, entityPos.y, entityPos.z)
+						EnemyExpDropSystem.onEnemyDeath(targetEntity, pos, health.max)
+					end
+				end
+				local EnemyPool = require(game.ServerScriptService.ECS.EnemyPool)
+				local SyncSystem = require(game.ServerScriptService.ECS.Systems.SyncSystem)
+				SyncSystem.queueDespawn(targetEntity)
+				EnemyPool.release(targetEntity)
+				return died, applied
+			end
+
 			-- Death animation starts AFTER hit flash completes
+			local deathStartTime = flashEndTime + DEATH_ANIMATION_BUFFER
 			DirtyService.setIfChanged(world, targetEntity, DeathAnimation, {
-				startTime = currentTime + HIT_FLASH_DURATION + DEATH_ANIMATION_BUFFER, -- Start after HitFlash
+				startTime = deathStartTime, -- Start after HitFlash
 				duration = 0.2, -- Fade duration
-				flashEndTime = currentTime + HIT_FLASH_DURATION
+				flashEndTime = flashEndTime,
 			}, "DeathAnimation")
 			
 			-- Track kill for player sources

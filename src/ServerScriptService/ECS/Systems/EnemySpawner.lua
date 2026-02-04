@@ -5,7 +5,6 @@
 local Workspace = game:GetService("Workspace")
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
-local EasingUtils = require(game.ServerScriptService.Balance.EasingUtils)
 local EnemyRegistry = require(game.ServerScriptService.Enemies.EnemyRegistry)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
@@ -23,8 +22,10 @@ local QueryPool: any
 
 local PlayerStats: any
 local Position: any
+local Level: any
+local PlayerPower: any
 
-local spawnAccumulator = 0 -- Accumulates enemies to spawn
+local playerSpawnAccumulators: {[number]: number} = {}
 local initialDelayAccumulator = 0
 local hasInitialDelayPassed = false
 local zombieSpawnCounter = 0 -- Track total zombie spawns for debug messages
@@ -221,10 +222,12 @@ function EnemySpawner.init(worldRef: any, components: any, ecsWorldService: any,
 
 	PlayerStats = Components.PlayerStats
 	Position = Components.Position
+	Level = Components.Level
+	PlayerPower = Components.PlayerPower
 	
 	-- Create cached queries for performance (CRITICAL FIX)
 	enemyCountQuery = world:query(Components.EntityType):cached()
-	playerPositionQuery = world:query(Components.Position, Components.PlayerStats):cached()
+	playerPositionQuery = world:query(Components.Position, Components.PlayerStats, Components.Level):cached()
 	
 	-- Build enemy type weights
 	rebuildEnemyWeights()
@@ -304,6 +307,115 @@ local function getRandomSpawnPosition(playerPos: {x: number, y: number, z: numbe
 	local offsetZ = math.sin(angle) * distance
 
     return Vector3.new(playerPos.x + offsetX, playerPos.y, playerPos.z + offsetZ)
+end
+
+local function getPlayerScaling(playerEntity: number, levelValue: number): any
+	local pressureState = world:get(playerEntity, PlayerPower)
+
+	local ratioByStat = {
+		health = 1.0,
+		damage = 1.0,
+		speed = 1.0,
+		spawn = 1.0,
+	}
+
+	if pressureState and typeof(pressureState.pressure) == "table" then
+		local pressureStats = pressureState.pressure
+		local health = pressureStats.health
+		local damage = pressureStats.damage
+		local speed = pressureStats.speed
+		local spawn = pressureStats.spawn
+
+		local function normalizeRatio(value: any): number
+			if typeof(value) ~= "number" then
+				return 1.0
+			end
+			if value ~= value or value == math.huge or value == -math.huge then
+				return 1.0
+			end
+			if value <= 0 then
+				return 1.0
+			end
+			return value
+		end
+
+		ratioByStat.health = normalizeRatio(health)
+		ratioByStat.damage = normalizeRatio(damage)
+		ratioByStat.speed = normalizeRatio(speed)
+		ratioByStat.spawn = normalizeRatio(spawn)
+	end
+
+	local function quadRamp(value: number, startValue: number, endValue: number): number
+		if endValue <= startValue then
+			return 1
+		end
+		local t = math.clamp((value - startValue) / (endValue - startValue), 0, 1)
+		return t * t
+	end
+
+	local function computeTimeScale(statConfig: any, minutes: number): number
+		if not statConfig then
+			return 1
+		end
+		local timeCfg = EnemyBalance.TimeScaling or {}
+		if not timeCfg.Enabled then
+			return 1
+		end
+		local earlyMinutes = timeCfg.EarlyMinutes or 0
+		local postMinutes = timeCfg.PostMinutes or earlyMinutes
+		local postRamp = timeCfg.PostRamp or 10
+		local mult = 1
+
+		local earlyScale = statConfig.EarlyScale or 0
+		if earlyMinutes > 0 and earlyScale > 0 then
+			local t = quadRamp(minutes, 0, earlyMinutes)
+			mult = mult * (1 + earlyScale * t)
+		end
+
+		local postScale = statConfig.PostScale or 0
+		if postScale > 0 then
+			local t = quadRamp(minutes, postMinutes, postMinutes + postRamp)
+			mult = mult * (1 + postScale * t)
+		end
+
+		local postGrowth = statConfig.PostGrowth or 0
+		local postExponent = statConfig.PostExponent or 1
+		if postGrowth > 0 and minutes > postMinutes then
+			local t = (minutes - postMinutes) / math.max(postRamp, 1)
+			mult = mult * ((1 + postGrowth * t) ^ postExponent)
+		end
+
+		return mult
+	end
+
+	local healthMult = ratioByStat.health
+	local damageMult = ratioByStat.damage
+	local speedMult = ratioByStat.speed
+	local spawnMult = ratioByStat.spawn
+
+	local timeCfg = EnemyBalance.TimeScaling or {}
+	if timeCfg.Enabled then
+		local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
+		local minutes = GameTimeSystem.getGameTime() / 60
+		healthMult = healthMult * computeTimeScale(timeCfg.Health, minutes)
+		damageMult = damageMult * computeTimeScale(timeCfg.Damage, minutes)
+		speedMult = speedMult * computeTimeScale(timeCfg.Speed, minutes)
+		spawnMult = spawnMult * computeTimeScale(timeCfg.Spawn, minutes)
+	end
+
+	local baseSpawn = EnemyBalance.BaseSpawnRatePerPlayer or 2.5
+	local spawnRate = baseSpawn * spawnMult
+	if typeof(spawnRate) ~= "number" or spawnRate ~= spawnRate or spawnRate <= 0 then
+		spawnRate = baseSpawn
+	end
+
+	return {
+		ratio = ratioByStat,
+		healthMult = healthMult,
+		damageMult = damageMult,
+		speedMult = speedMult,
+		spawnRate = spawnRate,
+	}
 end
 
 -- Count enemies within a sector (angular wedge) of the spawn ring
@@ -409,6 +521,63 @@ local function countEnemiesNearPosition(position: Vector3, radius: number): numb
 	end
 	
 	return count
+end
+
+local function getSpawnPositionForPlayer(ownerPos: {x: number, y: number, z: number}, otherPlayers: {Vector3}): Vector3?
+	local placement = EnemyBalance.SpawnPlacement or {}
+	local samples = placement.Samples or 8
+	local desiredRadius = placement.DesiredRadius or ((EnemyBalance.MinSpawnRadius + EnemyBalance.MaxSpawnRadius) * 0.5)
+	local minRadius = EnemyBalance.MinSpawnRadius or 90
+	local maxRadius = EnemyBalance.MaxSpawnRadius or 170
+	local avoidRadius = placement.AvoidOtherPlayersRadius or 60
+	local weightOwner = placement.WeightOwner or 1.0
+	local weightOthers = placement.WeightOthers or 4.0
+	local weightDensity = placement.WeightDensity or 0.0
+	local densityRadius = placement.DensityRadius or 30
+
+	local bestPos: Vector3? = nil
+	local bestCost = math.huge
+	local ownerVec = Vector3.new(ownerPos.x, ownerPos.y, ownerPos.z)
+	local angleOffset = math.random() * math.pi * 2
+
+	for i = 1, samples do
+		local angle = angleOffset + (i - 1) * (math.pi * 2 / samples)
+		local distance = minRadius + math.random() * (maxRadius - minRadius)
+		local offsetX = math.cos(angle) * distance
+		local offsetZ = math.sin(angle) * distance
+		local candidate = Vector3.new(ownerPos.x + offsetX, ownerPos.y, ownerPos.z + offsetZ)
+
+		local grounded = getGroundedPosition(candidate, 0)
+		if grounded then
+			local distToOwner = (grounded - ownerVec).Magnitude
+			local cost = math.abs(distToOwner - desiredRadius) * weightOwner
+
+			if #otherPlayers > 0 then
+				local nearestOther = math.huge
+				for _, otherPos in ipairs(otherPlayers) do
+					local dist = (grounded - otherPos).Magnitude
+					if dist < nearestOther then
+						nearestOther = dist
+					end
+				end
+				if nearestOther < avoidRadius then
+					cost += (avoidRadius - nearestOther) * weightOthers
+				end
+			end
+
+			if weightDensity > 0 then
+				local density = countEnemiesNearPosition(grounded, densityRadius)
+				cost += density * weightDensity
+			end
+
+			if cost < bestCost then
+				bestCost = cost
+				bestPos = grounded
+			end
+		end
+	end
+
+	return bestPos
 end
 
 -- Get spawn position with sector-based distribution and density checking
@@ -538,6 +707,12 @@ end
 
 function EnemySpawner.setEnabled(enabled: boolean)
 	spawnEnabled = enabled
+	if enabled then
+		-- Reset any stuck nuke state so spawns resume after wipes/restarts.
+		nukeActive = false
+		nukeEndTime = 0
+		nukeRestoreEndTime = 0
+	end
 end
 
 function EnemySpawner.step(dt: number)
@@ -565,34 +740,7 @@ function EnemySpawner.step(dt: number)
 	end
 	spawnCheckAccumulator -= SPAWN_CHECK_INTERVAL
 
-	-- Accumulate enemies to spawn based on scaled spawn rate (uses game time)
-	-- Subtract initial delay so scaling starts from 0 when spawning actually begins
-	local gameTime = GameTimeSystem.getGameTime()
-	local adjustedTime = math.max(0, gameTime - EnemyBalance.InitialSpawnDelay)
-	local baseSpawnRate = EasingUtils.evaluate(EnemyBalance.EnemiesPerSecondScaling, adjustedTime)
-	
-	-- Multiplayer scaling: scale by number of IN-GAME players only
-	local playerCount = 0
 	local GameStateManager = require(game.ServerScriptService.ECS.Systems.GameStateManager)
-	local Players = game:GetService("Players")
-	
-	for _ in playerPositionQuery do
-		-- Only count players who are actually in the game (not in menu or wipe screen)
-		local entity = _
-		local playerStats = world:get(entity, PlayerStats)
-		if playerStats and playerStats.player then
-			if GameStateManager.isPlayerInGame(playerStats.player) then
-				playerCount = playerCount + 1
-			end
-		end
-	end
-	
-	local playerMultiplier = math.max(1, playerCount) * (EnemyBalance.Multiplayer.EnemiesPerPlayer or 1.0)
-	local spawnRate = baseSpawnRate * playerMultiplier
-	
-	local adjustedSpawnRate = spawnRate * nukeMultiplier  -- Apply nuke multiplier
-	spawnAccumulator += adjustedSpawnRate * SPAWN_CHECK_INTERVAL
-
 	-- Count current enemies using cached query
 	local enemyCount = 0
 	for entity, entityType in enemyCountQuery do
@@ -603,86 +751,127 @@ function EnemySpawner.step(dt: number)
 
 	-- Get player positions using cached query
 	local playerPositions = {}
-	for entity, position, playerStats in playerPositionQuery do
+	local activePlayers: {[number]: boolean} = {}
+	for entity, position, playerStats, levelComp in playerPositionQuery do
 		if playerStats and playerStats.player and playerStats.player.Parent then
 			-- Skip players not in the game (in menu or wipe screen)
 			if not GameStateManager.isPlayerInGame(playerStats.player) then
-				continue
+				-- Fallback: if the overall state is InGame, allow spawning even if the tracking table is out of sync.
+				if GameStateManager.getCurrentState() ~= "InGame" then
+					continue
+				end
 			end
 			
 			-- Skip paused players in individual pause mode (don't spawn enemies for them)
 			if not GameOptions.GlobalPause then
-				local cooldownsFrozen = playerStats.player:GetAttribute("CooldownsFrozen")
-				if cooldownsFrozen then
-					continue  -- Don't spawn enemies for paused players
+				local pauseState = world:get(entity, Components.PlayerPauseState)
+				if pauseState and pauseState.isPaused then
+					continue
 				end
+				-- If a stale CooldownsFrozen flag exists without a pause state, don't block spawns.
 			end
 			
+			local levelValue = (levelComp and levelComp.current) or playerStats.level or 1
+			local scaling = getPlayerScaling(entity, levelValue)
+			local posVec = Vector3.new(position.x, position.y, position.z)
+
 			table.insert(playerPositions, {
 				entity = entity,
 				position = position,
-				stats = playerStats
+				positionVec = posVec,
+				stats = playerStats,
+				level = levelValue,
+				scaling = scaling,
 			})
+			activePlayers[entity] = true
 		end
 	end
 
 	if #playerPositions == 0 then
-		-- No players, reset accumulator to prevent spawning when players join
-		spawnAccumulator = 0
+		-- No players, reset accumulators to prevent spawning when players join
+		table.clear(playerSpawnAccumulators)
 		return
 	end
-	
-	-- Debug: Check if player positions are valid
-	for i, playerData in ipairs(playerPositions) do
-		if not playerData.position then
-			warn("[EnemySpawner] Player", i, "has nil position:", playerData)
+
+	-- Clear accumulators for players who left
+	for entity in pairs(playerSpawnAccumulators) do
+		if not activePlayers[entity] then
+			playerSpawnAccumulators[entity] = nil
 		end
 	end
 
-	-- Spawn enemies while we have accumulated spawns and haven't reached the cap
-	while spawnAccumulator >= 1 and enemyCount < EnemyBalance.MaxEnemies do
-		spawnAccumulator = spawnAccumulator - 1
+	-- Build per-player other-position lists once
+	for _, playerData in ipairs(playerPositions) do
+		local others = {}
+		for _, otherData in ipairs(playerPositions) do
+			if otherData.entity ~= playerData.entity then
+				table.insert(others, otherData.positionVec)
+			end
+		end
+		playerData.otherPositions = others
+	end
 
-		-- Select enemy type based on weights
-		local enemyType = selectRandomEnemyType()
-		
-		-- Ensure enemy model is replicated before spawning to prevent invisible enemies
-		local replicationSuccess = ModelReplicationService.replicateEnemy(enemyType)
-		if not replicationSuccess then
-			warn(string.format("[EnemySpawner] Failed to replicate %s model, skipping spawn this frame", enemyType))
-			-- Don't decrement accumulator; retry next spawn interval
-			spawnAccumulator = spawnAccumulator + 1
-			break  -- Exit spawn loop, will retry on next interval
+	-- Global spawn budget (prevents player count explosion)
+	local totalSpawnRate = 0
+	for _, playerData in ipairs(playerPositions) do
+		totalSpawnRate += (playerData.scaling.spawnRate or 0)
+	end
+
+	local maxSpawnsPerSecond = EnemyBalance.SpawnBudget.MaxSpawnsPerSecond or totalSpawnRate
+	local globalSpawnScale = 1.0
+	if totalSpawnRate > 0 and totalSpawnRate > maxSpawnsPerSecond then
+		globalSpawnScale = maxSpawnsPerSecond / totalSpawnRate
+	end
+
+
+	for _, playerData in ipairs(playerPositions) do
+		local acc = playerSpawnAccumulators[playerData.entity] or 0
+		acc += (playerData.scaling.spawnRate or 0) * nukeMultiplier * globalSpawnScale * SPAWN_CHECK_INTERVAL
+		playerSpawnAccumulators[playerData.entity] = acc
+	end
+
+	-- Spawn enemies per player, respecting global caps
+	local maxSpawnThisTick = EnemyBalance.SpawnBudget.MaxSpawnsPerTick or 12
+	local spawnedThisTick = 0
+	local maxEnemies = EnemyBalance.MaxEnemies or 275
+
+	for _, playerData in ipairs(playerPositions) do
+		if enemyCount >= maxEnemies or spawnedThisTick >= maxSpawnThisTick then
+			break
 		end
 
-		-- Pick a random player to spawn near
-		local targetPlayer = playerPositions[math.random(1, #playerPositions)]
-		
-		-- Safety check for player position
-		if not targetPlayer or not targetPlayer.position then
-			continue
-		end
-		
-		-- Use density-aware spawn position selection (with sector-based distribution)
-		local groundedPos, localDensity, sectorInfo = getDensityAwareSpawnPosition(targetPlayer.position)
-		
-		-- Skip spawn if no valid ground found within +/- 20 studs
-		if not groundedPos then
-			continue
-		end
-		
-		-- Debug logging for first 10 spawns
-		if zombieSpawnCounter < 10 then
-			-- Spawned successfully
+		local acc = playerSpawnAccumulators[playerData.entity] or 0
+		while acc >= 1 and enemyCount < maxEnemies and spawnedThisTick < maxSpawnThisTick do
+			acc -= 1
+
+			-- Select enemy type based on weights
+			local enemyType = selectRandomEnemyType()
+
+			-- Ensure enemy model is replicated before spawning to prevent invisible enemies
+			local replicationSuccess = ModelReplicationService.replicateEnemy(enemyType)
+			if not replicationSuccess then
+				warn(string.format("[EnemySpawner] Failed to replicate %s model, skipping spawn this frame", enemyType))
+				acc += 1
+				break
+			end
+
+			-- Choose spawn position around the owner, biased away from other players
+			local groundedPos = getSpawnPositionForPlayer(playerData.position, playerData.otherPositions or {})
+			if not groundedPos then
+				continue
+			end
+
+			local finalSpawnPos = adjustSpawnHeightForEnemy(groundedPos, enemyType)
+			local enemyEntity = ECSWorldService.CreateEnemy(enemyType, finalSpawnPos, playerData.entity, playerData.scaling)
+
+			if enemyEntity then
+				enemyCount += 1
+				zombieSpawnCounter += 1
+				spawnedThisTick += 1
+			end
 		end
 
-		local finalSpawnPos = adjustSpawnHeightForEnemy(groundedPos, enemyType)
-		local enemyEntity = ECSWorldService.CreateEnemy(enemyType, finalSpawnPos, nil)
-
-		if enemyEntity then
-			enemyCount = enemyCount + 1
-			zombieSpawnCounter = zombieSpawnCounter + 1
-		end
+		playerSpawnAccumulators[playerData.entity] = acc
 	end
 end
 

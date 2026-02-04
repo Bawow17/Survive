@@ -6,7 +6,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local OctreeSystem = require(script.Parent.OctreeSystem)
 local GameTimeSystem = require(script.Parent.GameTimeSystem)
-local EasingUtils = require(game.ServerScriptService.Balance.EasingUtils)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local ObstacleRaycastCache = require(game.ServerScriptService.ECS.Systems.ObstacleRaycastCache)
@@ -373,6 +372,11 @@ local function findNearestNonPausedPlayer(enemyEntity: number): number?
 			continue
 		end
 		
+		-- Skip players with spawn protection (not all invincibility)
+		if StatusEffectSystem and StatusEffectSystem.hasSpawnProtection(playerEntity) then
+			continue
+		end
+		
 		local dx = playerPos.x - enemyPos.x
 		local dz = playerPos.z - enemyPos.z
 		local distSq = dx * dx + dz * dz
@@ -463,7 +467,7 @@ function ZombieAISystem.onPlayerUnpaused(playerEntity: number)
 				
 				-- Retarget back to unpaused player
 				local currentTarget = world:get(enemyEntity, Target)
-				if currentTarget and currentTarget.id ~= playerEntity then
+				if currentTarget and currentTarget.id ~= playerEntity and not (StatusEffectSystem and StatusEffectSystem.hasSpawnProtection(playerEntity)) then
 					setTarget(enemyEntity, playerEntity)
 				end
 				
@@ -809,9 +813,18 @@ function ZombieAISystem.step(dt: number)
 			continue
 		end
 
-		-- Always find the nearest player for facing calculations
-		local nearestPlayerId = findNearestPlayer(enemyPosition, players)
-		
+		-- Prefer assigned target, fallback to nearest player
+		local nearestPlayerId = (target and target.id) or nil
+		if nearestPlayerId and not players[nearestPlayerId] then
+			nearestPlayerId = nil
+		end
+		if nearestPlayerId and StatusEffectSystem and StatusEffectSystem.hasSpawnProtection(nearestPlayerId) then
+			nearestPlayerId = nil
+		end
+		if not nearestPlayerId then
+			nearestPlayerId = findNearestPlayer(enemyPosition, players)
+		end
+
 		if not nearestPlayerId then
 			setVelocity(enemyEntity, { x = 0, y = 0, z = 0 })
 			continue
@@ -862,46 +875,38 @@ function ZombieAISystem.step(dt: number)
 				end
 			end
 		end
+
+		-- If target has spawn protection, immediately retarget to a valid player
+		if StatusEffectSystem and StatusEffectSystem.hasSpawnProtection(nearestPlayerId) then
+			local newTarget = findNearestPlayer(enemyPosition, players)
+			if not newTarget then
+				setTarget(enemyEntity, nil)
+				setVelocity(enemyEntity, {x = 0, y = 0, z = 0})
+				continue
+			end
+			nearestPlayerId = newTarget
+			targetPosition = players[nearestPlayerId]
+			if not targetPosition then
+				setTarget(enemyEntity, nil)
+				setVelocity(enemyEntity, {x = 0, y = 0, z = 0})
+				continue
+			end
+			dx = targetPosition.x - enemyPosition.x
+			dz = targetPosition.z - enemyPosition.z
+			distSq = dx * dx + dz * dz
+			distance = math.sqrt(distSq)
+		end
 		
 		setTarget(enemyEntity, nearestPlayerId)
 
 		-- Calculate movement velocity (will be modified by repulsion system)
 		local newVelocity = { x = 0, y = 0, z = 0 }
 		if distSq > 0 and distance > 0 then
-			-- Get ORIGINAL base speed from AI balance (not from ai.speed to avoid compounding)
-			local baseSpeed = (ai and ai.balance and ai.balance.baseSpeed) or 8
-			
-			-- Apply global overtime speed multiplier (based on game time)
-			local gameTime = GameTimeSystem.getGameTime()
-			local globalSpeedMult = EasingUtils.evaluate(EnemyBalance.GlobalMoveSpeedScaling, gameTime)
-			
-			-- Apply per-enemy lifetime speed multiplier (based on individual spawn time)
-			local spawnTime = world:get(enemyEntity, Components.SpawnTime)
-			local lifetimeSpeedMult = 1.0
-			if spawnTime then
-				local entityLifetime = gameTime - spawnTime.time
-				
-				-- Subtract total paused time from lifetime (enemies don't age while paused)
-				local pausedTime = world:get(enemyEntity, Components.EnemyPausedTime)
-				if pausedTime then
-					entityLifetime = entityLifetime - pausedTime.totalPausedTime
-					entityLifetime = math.max(0, entityLifetime)  -- Never negative
-				end
-				
-				lifetimeSpeedMult = EasingUtils.evaluate(EnemyBalance.LifetimeMoveSpeedScaling, entityLifetime)
-			end
-			
-			-- Calculate final speed with both multipliers
-			local finalSpeed = baseSpeed * globalSpeedMult * lifetimeSpeedMult
+			-- Use AI speed set at spawn (already scaled for owner pressure)
+			local baseSpeed = (ai and ai.speed) or (ai and ai.balance and ai.balance.baseSpeed) or 8
+			local finalSpeed = baseSpeed
 			local slowMultiplier = EnemySlowSystem.getSlowMultiplier(enemyEntity)
 			finalSpeed = finalSpeed * slowMultiplier
-			
-			-- CRITICAL: Update AI component with scaled speed (for persistence + sync)
-			if ai.speed ~= finalSpeed then
-				ai.speed = finalSpeed
-				world:set(enemyEntity, AI, ai)
-				DirtyService.mark(enemyEntity, "AI")
-			end
 			
 			-- Base direction towards player
 			local baseDirectionX = dx / distance

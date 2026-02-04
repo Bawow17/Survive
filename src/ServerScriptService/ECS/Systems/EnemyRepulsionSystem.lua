@@ -153,7 +153,9 @@ function EnemyRepulsionSystem.init(worldRef: any, components: any, dirtyService:
     EntityTypeComponent = Components.EntityType
     
     -- Create cached queries for performance (CRITICAL FIX - was creating new queries every frame!)
-    enemyQuery = world:query(Components.Position, Components.Velocity, Components.AI, Components.Repulsion, Components.EntityType):cached()
+    enemyQuery = world:query(Components.Position, Components.Velocity, Components.AI, Components.Repulsion, Components.EntityType)
+        :without(Components.DeathAnimation)
+        :cached()
     playerQuery = world:query(Components.Position, Components.PlayerStats):cached()
 end
 

@@ -8,33 +8,41 @@ UpgradeDefs.Rarities = {
 		id = "Common",
 		weight = 0.55,
 		budget = 0.08,
+		powerWeight = 1.0,
 		color = Color3.fromRGB(235, 235, 235),
 		minStats = 1,
 		maxStats = 1,
+		minRollT = 0.0,
 	},
 	Rare = {
 		id = "Rare",
 		weight = 0.30,
 		budget = 0.125,
+		powerWeight = 1.35,
 		color = Color3.fromRGB(110, 170, 255),
 		minStats = 1,
 		maxStats = 2,
+		minRollT = 0.1,
 	},
 	Epic = {
 		id = "Epic",
-		weight = 0.10,
+		weight = 0.0683333, -- tuned for ~13.67% epic at base luck (epic mult = 2.0)
 		budget = 0.275,
+		powerWeight = 1.8,
 		color = Color3.fromRGB(200, 120, 255),
 		minStats = 2,
 		maxStats = 3,
+		minRollT = 0.2,
 	},
 	Legendary = {
 		id = "Legendary",
-		weight = 0.05,
+		weight = 0.0066667, -- ~1 legendary per 75 cards at base luck (after luck scaling)
 		budget = 0.45,
+		powerWeight = 2.5,
 		color = Color3.fromRGB(255, 190, 80),
 		minStats = 3,
 		maxStats = 3,
+		minRollT = 0.3,
 	},
 }
 
@@ -44,10 +52,21 @@ UpgradeDefs.Luck = {
 	maxLegendaryMultiplier = 2.0,
 }
 
+-- Ability-only: how many stats can roll per upgrade by rarity.
+-- Legendary must be an even 1/3 chance each (1, 2, or 3 stats).
+UpgradeDefs.AbilityStatCountWeights = {
+	Common = { [1] = 1.0, [2] = 0.0, [3] = 0.0 },
+	Rare = { [1] = 0.75, [2] = 0.22, [3] = 0.03 },
+	Epic = { [1] = 0.2, [2] = 0.6, [3] = 0.2 },
+	Legendary = { [1] = 1.0, [2] = 1.0, [3] = 1.0 }, -- equal weight; handled specially in UpgradeSystem
+}
+
 UpgradeDefs.SoftCaps = {
 	dangerousCap = 0.50,
 	countMaxMultiplier = 5.0,
 	curveK = 1.6,
+	mobilityDistanceCap = 0.30,
+	mobilityDistanceCurveK = 2.6,
 }
 
 UpgradeDefs.AbilityStats = {
@@ -71,16 +90,6 @@ UpgradeDefs.AbilityStats = {
 		effect = "increase",
 		kind = "percent",
 	},
-	attackSpeed = {
-		id = "attackSpeed",
-		display = "Cooldown",
-		field = "pulseInterval",
-		min = 0.025,
-		max = 0.10,
-		weight = 1.0,
-		effect = "reduce",
-		kind = "percent",
-	},
 	cooldownReduction = {
 		id = "cooldownReduction",
 		display = "Cooldown Reduction",
@@ -96,16 +105,9 @@ UpgradeDefs.AbilityStats = {
 		id = "projectileCount",
 		display = "Projectile Count",
 		field = "projectileCount",
-		weight = 1.0,
-		kind = "count",
-	},
-	shotAmount = {
-		id = "shotAmount",
-		display = "Shot Count",
-		field = "shotAmount",
-		weight = 1.0, -- same chance as projectile count
-		increment = 0.5, -- half the value of projectile count upgrades
-		legendaryIncrement = 1.0,
+		weight = 0.6,
+		increment = 0.5,
+		legendaryIncrement = 1.7,
 		kind = "count",
 	},
 }
@@ -124,10 +126,17 @@ UpgradeDefs.PassiveStats = {
 		id = "critChance",
 		display = "Crit Chance",
 		field = "critChance",
-		min = 0.02125,
+		min = 0.025,
 		max = 0.085,
 		weight = 1.2,
 		effect = "increase",
+		hardCap = true,
+		rarityMax = {
+			Common = 0.04,
+			Rare = 0.055,
+			Epic = 0.07,
+			Legendary = 0.085,
+		},
 		softCap = UpgradeDefs.SoftCaps.dangerousCap,
 	},
 	critDamage = {
@@ -143,7 +152,9 @@ UpgradeDefs.PassiveStats = {
 		id = "projectileCount",
 		display = "Projectile Count",
 		field = "projectileCount",
-		weight = 1.0,
+		weight = 0.4,
+		increment = 0.3,
+		legendaryIncrement = 1.0,
 		kind = "count",
 	},
 	health = {
@@ -193,6 +204,7 @@ UpgradeDefs.PassiveStats = {
 		min = 0.0001,
 		max = 0.0005,
 		weight = 0.4,
+		rollWeight = 1000,
 		effect = "increase",
 	},
 	abilitySize = {
@@ -252,32 +264,17 @@ UpgradeDefs.PassiveStats = {
 		effect = "reduce",
 		softCap = UpgradeDefs.SoftCaps.dangerousCap,
 	},
-	doubleJumpPower = {
-		id = "doubleJumpPower",
-		display = "Double Jump Power",
-		field = "mobilityVerticalMultiplier",
-		min = 0.0425,
-		max = 0.17,
-		weight = 1.0,
-		effect = "increase",
-	},
 	dashDistance = {
 		id = "dashDistance",
 		display = "Mobility Distance",
 		field = "mobilityDistanceMultiplier",
-		min = 0.0425,
-		max = 0.17,
+		min = 0.03,
+		max = 0.09,
 		weight = 1.0,
 		effect = "increase",
-	},
-	grappleDistance = {
-		id = "grappleDistance",
-		display = "Grapple Distance",
-		field = "grappleDistanceMultiplier",
-		min = 0.0425,
-		max = 0.17,
-		weight = 1.0,
-		effect = "increase",
+		softCap = UpgradeDefs.SoftCaps.mobilityDistanceCap,
+		curveK = UpgradeDefs.SoftCaps.mobilityDistanceCurveK,
+		hardCap = true,
 	},
 	luck = {
 		id = "luck",
@@ -307,15 +304,6 @@ UpgradeDefs.PassiveStats = {
 		weight = 1.0,
 		effect = "increase",
 		hidden = true, -- driven by Exp Gain upgrade
-	},
-	powerupChance = {
-		id = "powerupChance",
-		display = "Powerup Chance",
-		field = "powerupChance",
-		min = 0.0025,
-		max = 0.01,
-		weight = 1.0,
-		effect = "increase",
 	},
 }
 

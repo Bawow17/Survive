@@ -13,6 +13,8 @@ local Components: any
 local ECSWorldService: any
 local ExpSinkSystem: any
 local PickupService: any
+local EnemyAggro: any
+local PassiveEffects: any
 
 -- Use Random.new() for better randomization
 local RNG = Random.new()
@@ -93,6 +95,8 @@ function EnemyExpDropSystem.init(worldRef: any, components: any, ecsWorldService
 	ECSWorldService = ecsWorldService
 	ExpSinkSystem = expSinkSystem
 	PickupService = pickupService
+	EnemyAggro = Components.EnemyAggro
+	PassiveEffects = Components.PassiveEffects
 end
 
 -- Pick random orb type based on enemy drop weights
@@ -162,7 +166,35 @@ function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vec
 	end
 	
 	-- Roll for powerup drop chance (skip if nuke kill)
-	local shouldDropPowerup = not nukeKill and ItemBalance.PowerupSpawnEnabled and (RNG:NextNumber() < PowerupBalance.EnemyDropPowerupChance)
+	local baseChance = PowerupBalance.EnemyDropPowerupChance
+	local bonusChance = 0
+	if EnemyAggro then
+		local aggro = world:get(enemyEntity, EnemyAggro)
+		local ownerEntity = aggro and aggro.owner or nil
+		if ownerEntity and PassiveEffects then
+			local effects = world:get(ownerEntity, PassiveEffects)
+			if effects and effects.powerupChance then
+				bonusChance = effects.powerupChance
+			end
+		elseif aggro and aggro.damageByPlayer then
+			local topPlayer = nil
+			local topDamage = 0
+			for playerEntity, dmg in pairs(aggro.damageByPlayer) do
+				if dmg > topDamage then
+					topDamage = dmg
+					topPlayer = playerEntity
+				end
+			end
+			if topPlayer and PassiveEffects then
+				local effects = world:get(topPlayer, PassiveEffects)
+				if effects and effects.powerupChance then
+					bonusChance = effects.powerupChance
+				end
+			end
+		end
+	end
+	local finalChance = math.clamp(baseChance + bonusChance, 0, 1)
+	local shouldDropPowerup = not nukeKill and ItemBalance.PowerupSpawnEnabled and (RNG:NextNumber() < finalChance)
 	
 	if shouldDropPowerup then
 		-- Drop powerup instead of exp
@@ -196,7 +228,7 @@ function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vec
 			ECSWorldService.CreatePowerup(powerupType, groundedPosition, nil)
 		end
 	else
-		-- Drop exp orb normally
+		-- Drop exp orb normally (owner + eligible contributors)
 		-- Calculate HP scaling multiplier (every 100 HP = 1.005x)
 		local hpMultiplier = ItemBalance.EnemyDrops.HPScaling ^ (maxHP / 100)
 		
@@ -212,28 +244,64 @@ function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vec
 		if not groundedPosition then
 			return
 		end
-		
-		-- MULTIPLAYER: Spawn one orb per player (each player sees their own orb)
-		local Players = game:GetService("Players")
-		for _, player in ipairs(Players:GetPlayers()) do
-			local playerEntity = nil
-			
-			-- Find player entity from Components.PlayerStats
-			for entity, stats in world:query(Components.PlayerStats) do
-				if stats.player == player then
-					playerEntity = entity
-					break
+
+		local aggro = EnemyAggro and world:get(enemyEntity, EnemyAggro) or nil
+		local ownerEntity = aggro and aggro.owner or nil
+		local damageByPlayer = aggro and aggro.damageByPlayer or {}
+
+		-- Build player list from ECS
+		local playersByEntity = {}
+		for entity, stats in world:query(Components.PlayerStats) do
+			if stats and stats.player then
+				playersByEntity[entity] = stats.player
+			end
+		end
+
+		-- If owner missing or invalid, fall back to top damage dealer
+		if ownerEntity and not playersByEntity[ownerEntity] then
+			ownerEntity = nil
+		end
+		if ownerEntity == nil then
+			local topPlayer = nil
+			local topDamage = 0
+			for playerEntity, dmg in pairs(damageByPlayer) do
+				if dmg > topDamage then
+					topDamage = dmg
+					topPlayer = playerEntity
 				end
 			end
-			
-			if playerEntity then
-				-- Check if exp-sink should absorb this for this player
-				if ExpSinkSystem.shouldAbsorb(playerEntity) then
-					ExpSinkSystem.depositExp(scaledExp, playerEntity)
-				else
-					-- Spawn pickup for this specific player
-					if PickupService then
-						PickupService.spawnExpPickup(orbType, groundedPosition, playerEntity, scaledExp)
+			ownerEntity = topPlayer
+		end
+
+		-- Owner gets 100% exp
+		if ownerEntity and playersByEntity[ownerEntity] then
+			if ExpSinkSystem.shouldAbsorb(ownerEntity) then
+				ExpSinkSystem.depositExp(scaledExp, ownerEntity)
+			else
+				if PickupService then
+					PickupService.spawnExpPickup(orbType, groundedPosition, ownerEntity, scaledExp)
+				end
+			end
+		end
+
+		-- Other contributors: 25% -> 75% based on % damage (>=30%)
+		for playerEntity, dmg in pairs(damageByPlayer) do
+			if playerEntity ~= ownerEntity and playersByEntity[playerEntity] then
+				if maxHP > 0 then
+					local ratio = dmg / maxHP
+					if ratio >= 0.30 then
+						local clamped = math.clamp(ratio, 0.30, 1.0)
+						local bonus = 0.25 + ((clamped - 0.30) / 0.70) * 0.50
+						local bonusExp = math.floor(scaledExp * bonus)
+						if bonusExp > 0 then
+							if ExpSinkSystem.shouldAbsorb(playerEntity) then
+								ExpSinkSystem.depositExp(bonusExp, playerEntity)
+							else
+								if PickupService then
+									PickupService.spawnExpPickup(orbType, groundedPosition, playerEntity, bonusExp)
+								end
+							end
+						end
 					end
 				end
 			end

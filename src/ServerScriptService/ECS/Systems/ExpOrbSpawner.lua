@@ -18,6 +18,7 @@ local PickupService: any
 
 local Position: any
 local PlayerStats: any
+local PassiveEffects: any
 
 local spawnAccumulator = 0
 local initialDelayAccumulator = 0
@@ -134,6 +135,7 @@ function ExpOrbSpawner.init(worldRef: any, components: any, ecsWorldService: any
 
 	Position = Components.Position
 	PlayerStats = Components.PlayerStats
+	PassiveEffects = Components.PassiveEffects
 	
 	-- Create cached queries
 	orbCountQuery = world:query(Components.EntityType):cached()
@@ -306,8 +308,16 @@ function ExpOrbSpawner.step(dt: number)
 		
 		local spawnPosVector = getRandomSpawnPosition(targetPlayer.position)
 		
-		-- Roll for powerup spawn chance
-		local shouldSpawnPowerup = ItemBalance.PowerupSpawnEnabled and (RNG:NextNumber() < PowerupBalance.AmbientPowerupChance)
+		-- Roll for powerup spawn chance (includes player's powerup chance bonus)
+		local bonusChance = 0
+		if PassiveEffects then
+			local effects = world:get(targetPlayer.entity, PassiveEffects)
+			if effects and effects.powerupChance then
+				bonusChance = effects.powerupChance
+			end
+		end
+		local finalChance = math.clamp(PowerupBalance.AmbientPowerupChance + bonusChance, 0, 1)
+		local shouldSpawnPowerup = ItemBalance.PowerupSpawnEnabled and (RNG:NextNumber() < finalChance)
 		
 		if shouldSpawnPowerup then
 			-- Spawn powerup instead of exp orb

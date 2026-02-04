@@ -119,9 +119,31 @@ local function calculateExpRequired(level: number): number
 	local phase2EndExp = (ItemBalance.BaseExpRequired + (phase1End - 1) * phases.Phase1.expPerLevel) 
 						* (phases.Phase2.scaling ^ phase2LastLevel)
 	
-	return math.floor(
-		phase2EndExp * (phases.Phase3.baseMultiplier ^ phase3Index) * (1 + phase3Index * 0.1)
-	)
+	local linearFactor = phases.Phase3.linearFactor or 0.1
+	local base = phase2EndExp * (phases.Phase3.baseMultiplier ^ phase3Index) * (1 + phase3Index * linearFactor)
+	local dampingStart = phases.Phase3.dampingStart
+	local dampingEnd = phases.Phase3.dampingEnd
+	local dampingScale = phases.Phase3.dampingScale or 1
+	if dampingStart and dampingEnd and dampingEnd > dampingStart and level >= dampingStart then
+		local t = math.clamp((level - dampingStart) / (dampingEnd - dampingStart), 0, 1)
+		local damp = 1 - (1 - dampingScale) * t
+		base = base * damp
+	end
+	local maxGrowthPerLevel = phases.Phase3.maxGrowthPerLevel
+	if maxGrowthPerLevel and phase3Index > 0 then
+		local prevIndex = phase3Index - 1
+		local prevBase = phase2EndExp * (phases.Phase3.baseMultiplier ^ prevIndex) * (1 + prevIndex * linearFactor)
+		if dampingStart and dampingEnd and dampingEnd > dampingStart and (level - 1) >= dampingStart then
+			local tPrev = math.clamp(((level - 1) - dampingStart) / (dampingEnd - dampingStart), 0, 1)
+			local dampPrev = 1 - (1 - dampingScale) * tPrev
+			prevBase = prevBase * dampPrev
+		end
+		local cap = prevBase * (1 + maxGrowthPerLevel)
+		if base > cap then
+			base = cap
+		end
+	end
+	return math.floor(base)
 end
 
 function ExpSystem.getExpRequired(level: number): number

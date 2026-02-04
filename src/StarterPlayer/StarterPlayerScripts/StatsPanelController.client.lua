@@ -17,7 +17,11 @@ local remotes = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS
 local entitySync = remotes:WaitForChild("EntitySync")
 local entityUpdate = remotes:WaitForChild("EntityUpdate")
 local entityUpdateUnreliable = remotes:FindFirstChild("EntityUpdateUnreliable")
+local entityDespawn = remotes:FindFirstChild("EntityDespawn")
 local requestInitialSync = remotes:WaitForChild("RequestInitialSync")
+local powerupEffectUpdate = ReplicatedStorage:WaitForChild("RemoteEvents"):FindFirstChild("PowerupEffectUpdate")
+local buffDurationUpdate = ReplicatedStorage:WaitForChild("RemoteEvents"):FindFirstChild("BuffDurationUpdate")
+local gameTimeUpdate = ReplicatedStorage:WaitForChild("RemoteEvents"):FindFirstChild("GameTimeUpdate")
 
 local playerEntityId: number? = nil
 local playerComponentState: {[string]: any} = {}
@@ -28,6 +32,8 @@ local sharedComponents: {[string]: {[number]: any}} = {
 	Visual = {},
 	ItemData = {},
 	AbilityData = {},
+	AbilityDamageStats = {},
+	SessionStats = {},
 }
 
 local function shallowCopy<T>(original: {[any]: T}): {[any]: T}
@@ -105,6 +111,7 @@ end
 local needsRefresh = false
 local lastRefresh = 0
 local REFRESH_INTERVAL = 0.25
+local serverGameTime: number? = nil
 
 local function handlePlayerEntityData(entityId: number, entityData: {[string]: any})
 	local entityType = entityData.EntityType
@@ -146,8 +153,10 @@ local function processSnapshot(snapshot: any)
 		local direct = entities[playerEntityId] or entities[tostring(playerEntityId)]
 		if typeof(direct) == "table" then
 			handlePlayerEntityData(playerEntityId, resolveEntityData(direct))
+			return
 		end
-		return
+		playerEntityId = nil
+		table.clear(playerComponentState)
 	end
 
 	for entityId, data in pairs(entities) do
@@ -174,6 +183,10 @@ local function processUpdates(message: any)
 			local direct = entities[playerEntityId] or entities[tostring(playerEntityId)]
 			if typeof(direct) == "table" then
 				handlePlayerEntityData(playerEntityId, resolveEntityData(direct))
+				entities = nil
+			else
+				playerEntityId = nil
+				table.clear(playerComponentState)
 			end
 		else
 			for entityId, data in pairs(entities) do
@@ -227,6 +240,45 @@ entitySync.OnClientEvent:Connect(processSnapshot)
 entityUpdate.OnClientEvent:Connect(processUpdates)
 if entityUpdateUnreliable and entityUpdateUnreliable:IsA("UnreliableRemoteEvent") then
 	entityUpdateUnreliable.OnClientEvent:Connect(processUpdates)
+end
+if entityDespawn and entityDespawn:IsA("RemoteEvent") then
+	entityDespawn.OnClientEvent:Connect(function(despawns: any)
+		if not playerEntityId then
+			return
+		end
+		if typeof(despawns) == "table" then
+			for _, entityId in ipairs(despawns) do
+				if entityId == playerEntityId then
+					playerEntityId = nil
+					table.clear(playerComponentState)
+					needsRefresh = true
+					break
+				end
+			end
+		elseif despawns == playerEntityId then
+			playerEntityId = nil
+			table.clear(playerComponentState)
+			needsRefresh = true
+		end
+	end)
+end
+if powerupEffectUpdate and powerupEffectUpdate:IsA("RemoteEvent") then
+	powerupEffectUpdate.OnClientEvent:Connect(function()
+		needsRefresh = true
+	end)
+end
+if buffDurationUpdate and buffDurationUpdate:IsA("RemoteEvent") then
+	buffDurationUpdate.OnClientEvent:Connect(function()
+		needsRefresh = true
+	end)
+end
+if gameTimeUpdate and gameTimeUpdate:IsA("RemoteEvent") then
+	gameTimeUpdate.OnClientEvent:Connect(function(gameTime: any)
+		if typeof(gameTime) == "number" then
+			serverGameTime = gameTime
+			needsRefresh = true
+		end
+	end)
 end
 
 local function fetchInitialSnapshot()
@@ -283,10 +335,76 @@ local function formatNumber(value: number, decimals: number?): string
 	return string.format(fmt, value)
 end
 
+local function formatInt(value: number?): string
+	local raw = value or 0
+	return tostring(math.floor(raw + 0.0001))
+end
+
+local function normalizeKey(value: any): string
+	local text = string.lower(tostring(value or ""))
+	text = text:gsub("%s+", "")
+	return text
+end
+
+local function getAbilityDamage(damageStats: any, sessionStats: any, abilityId: string, abilityRecord: any): (number, boolean)
+	local found = false
+	if sessionStats and typeof(sessionStats) == "table" then
+		local perAbility = sessionStats.perAbility
+		if perAbility and typeof(perAbility) == "table" then
+			local direct = perAbility[abilityId]
+			if typeof(direct) == "number" then
+				return direct, true
+			end
+			local normalizedId = normalizeKey(abilityId)
+			local nameKey = abilityRecord and (abilityRecord.name or abilityRecord.Name) or nil
+			local normalizedName = normalizeKey(nameKey)
+			for key, value in pairs(perAbility) do
+				if typeof(value) == "number" then
+					local normalizedKey = normalizeKey(key)
+					if normalizedKey == normalizedId then
+						return value, true
+					end
+					if normalizedName ~= "" and normalizedKey == normalizedName then
+						return value, true
+					end
+				end
+			end
+		end
+	end
+	if not damageStats or typeof(damageStats) ~= "table" then
+		return 0, false
+	end
+	local direct = damageStats[abilityId]
+	if typeof(direct) == "number" then
+		return direct, true
+	end
+	local normalizedId = normalizeKey(abilityId)
+	local nameKey = abilityRecord and (abilityRecord.name or abilityRecord.Name) or nil
+	local normalizedName = normalizeKey(nameKey)
+	for key, value in pairs(damageStats) do
+		if typeof(value) == "number" then
+			local normalizedKey = normalizeKey(key)
+			if normalizedKey == normalizedId then
+				return value, true
+			end
+			if normalizedName ~= "" and normalizedKey == normalizedName then
+				return value, true
+			end
+		end
+	end
+	return 0, false
+end
+
 local function formatPercent(value: number, decimals: number?): string
 	local places = decimals or 1
 	local fmt = "%." .. tostring(places) .. "f%%"
 	return string.format(fmt, value * 100)
+end
+
+local function formatCountWithFloor(value: number?, decimals: number?): string
+	local raw = value or 0
+	local floored = math.floor(raw + 0.0001)
+	return string.format("%s (%d)", formatNumber(raw, decimals or 1), floored)
 end
 
 local function formatPercentFromMultiplier(multiplier: number, base: number): string
@@ -300,6 +418,10 @@ end
 
 local function formatMultiplierPercent(multiplier: number): string
 	return string.format("%.1f%%", multiplier * 100)
+end
+
+local function getGameTimeNow(): number
+	return serverGameTime or workspace:GetServerTimeNow()
 end
 
 local function computeBuffMultiplier(buffState: any, field: string, now: number): number
@@ -366,14 +488,24 @@ local function computeAbilityStats(abilityRecord: any, passiveEffects: any, buff
 		if stats.penetration and passiveEffects.penetrationMultiplier then
 			stats.penetration = math.max(0, math.floor(stats.penetration * passiveEffects.penetrationMultiplier + 0.0001))
 		end
-		if stats.projectileCount and passiveEffects.projectileCountBonus then
+		local projectileCountBonus = passiveEffects.projectileCountBonus or 0
+		if stats.projectileCount and projectileCountBonus ~= 0 then
 			local baseCount = baseStats.projectileCount or stats.projectileCount
+			local rawBase = stats.projectileCountRaw or stats.projectileCount
+			local bonusMultiplier = stats.projectileCountMultiplier or 1
 			local maxCount = math.floor(baseCount * UpgradeDefs.SoftCaps.countMaxMultiplier + 0.0001)
-			stats.projectileCount = math.min(maxCount, math.floor(stats.projectileCount + passiveEffects.projectileCountBonus + 0.0001))
+			local rawCount = rawBase + (projectileCountBonus * bonusMultiplier)
+			if rawBase > maxCount then
+				stats.projectileCountRaw = rawCount
+				stats.projectileCount = math.floor(rawCount + 0.0001)
+			else
+				stats.projectileCountRaw = math.min(maxCount, rawCount)
+				stats.projectileCount = math.min(maxCount, math.floor(rawCount + 0.0001))
+			end
 		end
 	end
 
-	local now = workspace:GetServerTimeNow()
+	local now = getGameTimeNow()
 	local damageBuffMult = computeBuffMultiplier(buffState, "damageMultiplier", now)
 	local cooldownBuffMult = computeBuffMultiplier(buffState, "cooldownMultiplier", now)
 
@@ -452,6 +584,10 @@ local function createStatRow(parent: Instance, label: string): TextLabel
 end
 
 local generalRows: {[string]: TextLabel} = {}
+local lastAbilityData: any = nil
+local lastDamageStats: any = nil
+local lastSpellDamageById: {[string]: number} = {}
+local lastTotalDamage: number = 0
 
 local DEFAULT_TEXT_COLOR = Color3.fromRGB(200, 200, 200)
 local BUFF_TEXT_COLOR = Color3.fromRGB(120, 180, 255)
@@ -463,6 +599,11 @@ local function setGeneralRow(id: string, label: string, value: string, highlight
 		generalRows[id] = row
 	end
 	row.Text = value
+	local nameLabel = row.Parent:FindFirstChild("Name")
+	if nameLabel and nameLabel:IsA("TextLabel") then
+		nameLabel.Text = label
+		nameLabel.TextColor3 = highlight and BUFF_TEXT_COLOR or DEFAULT_TEXT_COLOR
+	end
 	if highlight then
 		row.TextColor3 = BUFF_TEXT_COLOR
 	else
@@ -473,12 +614,16 @@ end
 local function updateGeneralStats()
 	local effects = playerComponentState.PassiveEffects or {}
 	local buffState = playerComponentState.BuffState or {}
-	local now = workspace:GetServerTimeNow()
+	local now = getGameTimeNow()
 
 	local damageBuffMult = computeBuffMultiplier(buffState, "damageMultiplier", now)
 	local cooldownBuffMult = computeBuffMultiplier(buffState, "cooldownMultiplier", now)
+	local durationBuffMult = computeBuffMultiplier(buffState, "durationMultiplier", now)
+	local penetrationBuffMult = computeBuffMultiplier(buffState, "penetrationMultiplier", now)
 	local hasDamageBuff = math.abs(damageBuffMult - 1.0) > 1e-4
 	local hasCooldownBuff = math.abs(cooldownBuffMult - 1.0) > 1e-4
+	local hasDurationBuff = math.abs(durationBuffMult - 1.0) > 1e-4
+	local hasPenetrationBuff = math.abs(penetrationBuffMult - 1.0) > 1e-4
 	local hasSpeedBuff = false
 	if effects and typeof(effects.activeSpeedBuffs) == "table" then
 		for _, buffData in pairs(effects.activeSpeedBuffs) do
@@ -510,28 +655,66 @@ local function updateGeneralStats()
 	local finalPickup = basePickup * (effects.pickupRangeMultiplier or 1.0)
 	local finalRegen = baseRegen * (effects.regenMultiplier or 1.0)
 	local finalRegenDelay = baseRegenDelay * (effects.regenDelayMultiplier or 1.0)
+	local finalDurationMult = (effects.durationMultiplier or 1.0) * durationBuffMult
+	local finalPenetrationMult = (effects.penetrationMultiplier or 1.0) * penetrationBuffMult
 
+	-- Health section
 	setGeneralRow("health", "Max Health", formatNumber(finalHealth, 1), false)
-	setGeneralRow("moveSpeed", "Move Speed", formatNumber(finalSpeed, 1), hasSpeedBuff)
-	setGeneralRow("damageMult", "Damage", formatMultiplierPercent(damageMult), hasDamageBuff)
-	setGeneralRow("cooldown", "Cooldown", formatMultiplierPercent(cooldownMult), hasCooldownBuff)
-	setGeneralRow("critChance", "Crit Chance", formatPercent(effects.critChance or 0), false)
-	setGeneralRow("critDamage", "Crit Damage", string.format("x%.2f", 2 + (effects.critDamage or 0)), false)
-	setGeneralRow("armor", "Armor Reduction", formatPercent(effects.armorReduction or 0), false)
+	setGeneralRow("armor", "Armor", formatPercent(effects.armorReduction or 0), false)
 	setGeneralRow("regen", "Regen / sec", formatNumber(finalRegen, 2), false)
 	setGeneralRow("regenDelay", "Regen Delay", formatNumber(finalRegenDelay, 2) .. "s", false)
-	setGeneralRow("lifesteal", "Lifesteal", formatPercent(effects.lifesteal or 0), false)
+	setGeneralRow("lifesteal", "Lifesteal", formatPercent(effects.lifesteal or 0, 2), false)
+
+	-- Damage section
+	setGeneralRow("damageMult", "Damage", formatMultiplierPercent(damageMult), hasDamageBuff)
+	setGeneralRow("critChance", "Crit Chance", formatPercent(effects.critChance or 0), false)
+	setGeneralRow("critDamage", "Crit Damage", string.format("x%.2f", 2 + (effects.critDamage or 0)), false)
+	setGeneralRow("cooldown", "Cooldown", formatMultiplierPercent(cooldownMult), hasCooldownBuff)
 	setGeneralRow("abilitySize", "Ability Size", formatMultiplierPercent(effects.sizeMultiplier or 1.0), false)
-	setGeneralRow("abilityDuration", "Ability Duration", formatMultiplierPercent(effects.durationMultiplier or 1.0), arcaneActive == true)
-	setGeneralRow("penetration", "Penetration", formatMultiplierPercent(effects.penetrationMultiplier or 1.0), arcaneActive == true)
-	setGeneralRow("projectileCountBonus", "Projectile Count Bonus", formatNumber(effects.projectileCountBonus or 0, 1), false)
-	setGeneralRow("shotBonus", "Shot Bonus", formatNumber(effects.shotAmountBonus or 0, 1), false)
+	setGeneralRow("abilityDuration", "Ability Duration", formatMultiplierPercent(finalDurationMult), arcaneActive == true or hasDurationBuff)
+	setGeneralRow("penetration", "Penetration", formatMultiplierPercent(finalPenetrationMult), arcaneActive == true or hasPenetrationBuff)
+	setGeneralRow("projectileCountBonus", "Projectile Count Bonus", formatCountWithFloor(effects.projectileCountBonus or 0, 1), false)
+
+	-- Speed section
+	setGeneralRow("moveSpeed", "Move Speed", formatNumber(finalSpeed, 1), hasSpeedBuff)
+	setGeneralRow("mobilityCooldown", "Mobility Cooldown", formatMultiplierPercent(effects.mobilityCooldownMultiplier or 1.0), false)
+	setGeneralRow("mobilityDistance", "Mobility Distance", formatMultiplierPercent(effects.mobilityDistanceMultiplier or 1.0), hasSpeedBuff)
+
+	-- Utility section
 	setGeneralRow("pickupRange", "Pickup Range", formatNumber(finalPickup, 1), false)
 	setGeneralRow("expGain", "Exp Gain", formatMultiplierPercent(expMult), false)
 	setGeneralRow("luck", "Luck", formatPercent(effects.luck or 0), false)
-	setGeneralRow("powerup", "Powerup Chance", formatPercent(effects.powerupChance or 0), false)
-	setGeneralRow("mobilityCooldown", "Mobility Cooldown", formatMultiplierPercent(effects.mobilityCooldownMultiplier or 1.0), false)
-	setGeneralRow("mobilityDistance", "Mobility Distance", formatMultiplierPercent(effects.mobilityDistanceMultiplier or 1.0), false)
+
+	-- Totals at the bottom
+	local totalDamage = 0
+	local sessionStats = playerComponentState.SessionStats
+	if typeof(sessionStats) == "number" then
+		sessionStats = sharedComponents.SessionStats[sessionStats]
+	end
+	if sessionStats and typeof(sessionStats) == "table" then
+		totalDamage = sessionStats.totalDamage or 0
+	else
+		local damageStats = playerComponentState.AbilityDamageStats
+		if typeof(damageStats) == "number" then
+			damageStats = sharedComponents.AbilityDamageStats[damageStats]
+		end
+		if damageStats == nil then
+			damageStats = lastDamageStats
+		end
+		if damageStats and typeof(damageStats) == "table" then
+			for _, value in pairs(damageStats) do
+				if typeof(value) == "number" then
+					totalDamage += value
+				end
+			end
+		end
+	end
+	if totalDamage > 0 then
+		lastTotalDamage = totalDamage
+	elseif lastTotalDamage > 0 then
+		totalDamage = lastTotalDamage
+	end
+	setGeneralRow("totalDamage", "Total Damage", formatInt(totalDamage), false)
 end
 
 local spellButtons: {[string]: TextButton} = {}
@@ -558,40 +741,64 @@ end
 backButton.Activated:Connect(showSpellList)
 
 local function rebuildDetail(abilityId: string)
+	local abilityData = playerComponentState.AbilityData
+	if typeof(abilityData) == "number" then
+		abilityData = sharedComponents.AbilityData[abilityData]
+	end
 	for _, child in ipairs(detailScroll:GetChildren()) do
 		if child:IsA("Frame") then
 			child:Destroy()
 		end
 	end
-
-	local abilityData = playerComponentState.AbilityData
-	if typeof(abilityData) == "number" then
-		abilityData = sharedComponents.AbilityData[abilityData]
+	detailScroll.Visible = true
+	if not abilityData or not abilityData.abilities then
+		abilityData = lastAbilityData
 	end
 	if not abilityData or not abilityData.abilities then
+		local valueLabel = createStatRow(detailScroll, "No data")
+		valueLabel.Text = "Ability stats not available yet"
 		return
 	end
 	local abilityRecord = abilityData.abilities[abilityId]
 	if not abilityRecord then
+		local valueLabel = createStatRow(detailScroll, "No data")
+		valueLabel.Text = "Ability stats not available yet"
 		return
 	end
 
 	local passiveEffects = playerComponentState.PassiveEffects
 	local buffState = playerComponentState.BuffState
+	local damageStats = playerComponentState.AbilityDamageStats
+	if typeof(damageStats) == "number" then
+		damageStats = sharedComponents.AbilityDamageStats[damageStats]
+	end
+	if damageStats == nil then
+		damageStats = lastDamageStats
+	end
 	local finalStats = computeAbilityStats(abilityRecord, passiveEffects, buffState)
 	local baseStats = abilityRecord.baseStats or {}
 
-	local now = workspace:GetServerTimeNow()
+	local now = getGameTimeNow()
 	local damageBuffMult = computeBuffMultiplier(buffState, "damageMultiplier", now)
 	local cooldownBuffMult = computeBuffMultiplier(buffState, "cooldownMultiplier", now)
 	local hasDamageBuff = math.abs(damageBuffMult - 1.0) > 1e-4
 	local hasCooldownBuff = math.abs(cooldownBuffMult - 1.0) > 1e-4
 	local arcaneBuff = buffState and buffState.buffs and buffState.buffs["ArcaneRune"]
 	local arcaneActive = arcaneBuff and (arcaneBuff.endTime == nil or arcaneBuff.endTime > now) or false
+	local durationBuffMult = computeBuffMultiplier(buffState, "durationMultiplier", now)
+	local penetrationBuffMult = computeBuffMultiplier(buffState, "penetrationMultiplier", now)
+	local speedBuffMult = computeBuffMultiplier(buffState, "projectileSpeedMultiplier", now)
+	local hasDurationBuff = math.abs(durationBuffMult - 1.0) > 1e-4
+	local hasPenetrationBuff = math.abs(penetrationBuffMult - 1.0) > 1e-4
+	local hasSpeedBuff = math.abs(speedBuffMult - 1.0) > 1e-4
 
 	local function addRow(label: string, value: string, highlight: boolean?)
 		local valueLabel = createStatRow(detailScroll, label)
 		valueLabel.Text = value
+		local nameLabel = valueLabel.Parent:FindFirstChild("Name")
+		if nameLabel and nameLabel:IsA("TextLabel") then
+			nameLabel.TextColor3 = highlight and BUFF_TEXT_COLOR or DEFAULT_TEXT_COLOR
+		end
 		if highlight then
 			valueLabel.TextColor3 = BUFF_TEXT_COLOR
 		else
@@ -622,37 +829,50 @@ local function rebuildDetail(abilityId: string)
 		addRow("Cooldown", string.format("%ss (base %ss)", formatNumber(finalStats.cooldown, 2), formatNumber(baseCooldown, 2)), hasCooldownBuff)
 	end
 	if finalStats.projectileSpeed then
-		addRow("Projectile Speed", formatNumber(finalStats.projectileSpeed, 1), arcaneActive == true)
+		addRow("Projectile Speed", formatNumber(finalStats.projectileSpeed, 1), arcaneActive == true or hasSpeedBuff)
 	end
 	if finalStats.projectileCount then
 		if abilityId == "Refractions" then
-			local shots = finalStats.shotAmount or 1
-			local count = finalStats.projectileCount or 1
-			local laserCount = math.max(1, math.floor(count + shots - 1 + 0.0001))
-			addRow("Projectile Bonus", tostring(laserCount), false)
+			local shots = finalStats.shotAmountRaw or finalStats.shotAmount or 1
+			local count = finalStats.projectileCountRaw or finalStats.projectileCount or 1
+			local rawLaser = math.max(1, count + shots - 1)
+			local laserCount = math.max(1, math.floor(rawLaser + 0.0001))
+			addRow("Projectile Bonus", string.format("%s (%d)", formatNumber(rawLaser, 1), laserCount), false)
 		else
-			addRow("Projectile Count", tostring(finalStats.projectileCount), false)
+			local rawCount = finalStats.projectileCountRaw or finalStats.projectileCount
+			addRow("Projectile Count", formatCountWithFloor(rawCount, 1), false)
 		end
 	end
 	if finalStats.shotAmount and abilityId ~= "Refractions" then
-		addRow("Shot Amount", tostring(finalStats.shotAmount), false)
+		local rawShot = finalStats.shotAmountRaw or finalStats.shotAmount
+		addRow("Shot Amount", formatCountWithFloor(rawShot, 1), false)
 	end
 	if finalStats.pulseInterval then
 		addRow("Pulse Interval", formatNumber(finalStats.pulseInterval, 2) .. "s", false)
 	end
 	if finalStats.penetration then
-		addRow("Penetration", tostring(finalStats.penetration), arcaneActive == true)
+		addRow("Penetration", tostring(finalStats.penetration), arcaneActive == true or hasPenetrationBuff)
 	end
 	if finalStats.duration then
-		addRow("Duration", formatNumber(finalStats.duration, 2) .. "s", arcaneActive == true)
+		addRow("Duration", formatNumber(finalStats.duration, 2) .. "s", arcaneActive == true or hasDurationBuff)
 	end
 	if finalStats.scale then
 		addRow("Size", formatNumber(finalStats.scale, 2) .. "x", false)
 	end
+	local sessionStats = playerComponentState.SessionStats
+	if typeof(sessionStats) == "number" then
+		sessionStats = sharedComponents.SessionStats[sessionStats]
+	end
+	local totalDamage, hasValue = getAbilityDamage(damageStats, sessionStats, abilityId, abilityRecord)
+	if hasValue then
+		lastSpellDamageById[abilityId] = totalDamage
+	elseif lastSpellDamageById[abilityId] and lastSpellDamageById[abilityId] > 0 then
+		totalDamage = lastSpellDamageById[abilityId]
+	end
+	addRow("Damage Done", formatInt(totalDamage), false)
 end
 
 local function updateSpellList()
-	clearSpellList()
 	local abilityData = playerComponentState.AbilityData
 	if typeof(abilityData) == "number" then
 		abilityData = sharedComponents.AbilityData[abilityData]
@@ -660,39 +880,64 @@ local function updateSpellList()
 	if not abilityData or not abilityData.abilities then
 		return
 	end
+	lastAbilityData = abilityData
+	local damageStats = playerComponentState.AbilityDamageStats
+	if typeof(damageStats) == "number" then
+		damageStats = sharedComponents.AbilityDamageStats[damageStats]
+	end
+	if damageStats and typeof(damageStats) == "table" then
+		lastDamageStats = damageStats
+	end
 
+	local seen: {[string]: boolean} = {}
 	for abilityId, record in pairs(abilityData.abilities) do
 		if record and record.enabled then
+			local abilityKey = tostring(abilityId)
 			local displayName = record.name or record.Name or abilityId
 			if record.selectedAttribute then
 				displayName = string.format("%s [%s]", displayName, record.selectedAttribute)
 			end
 
-			local button = Instance.new("TextButton")
-			button.Name = abilityId .. "Button"
-			button.Size = UDim2.new(1, 0, 0, 28)
-			button.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-			button.BackgroundTransparency = 0.4
-			button.BorderSizePixel = 0
-			button.Text = displayName
-			button.Font = Enum.Font.GothamMedium
-			button.TextSize = 14
-			button.TextColor3 = Color3.fromRGB(230, 230, 230)
-			button.TextXAlignment = Enum.TextXAlignment.Left
-			button.Parent = spellList
+			local button = spellButtons[abilityKey]
+			if not button then
+				button = Instance.new("TextButton")
+				button.Name = abilityKey .. "Button"
+				button.Size = UDim2.new(1, 0, 0, 28)
+				button.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+				button.BackgroundTransparency = 0.4
+				button.BorderSizePixel = 0
+				button.Font = Enum.Font.GothamMedium
+				button.TextSize = 14
+				button.TextColor3 = Color3.fromRGB(230, 230, 230)
+				button.TextXAlignment = Enum.TextXAlignment.Left
+				button.Parent = spellList
 
-			local padding = Instance.new("UIPadding")
-			padding.PaddingLeft = UDim.new(0.03, 0)
-			padding.PaddingRight = UDim.new(0.03, 0)
-			padding.Parent = button
+				local padding = Instance.new("UIPadding")
+				padding.PaddingLeft = UDim.new(0.03, 0)
+				padding.PaddingRight = UDim.new(0.03, 0)
+				padding.Parent = button
 
-			button.Activated:Connect(function()
-				activeDetailId = abilityId
-				rebuildDetail(abilityId)
-				showSpellDetail()
-			end)
+				button.Activated:Connect(function()
+					activeDetailId = abilityKey
+					rebuildDetail(abilityKey)
+					showSpellDetail()
+				end)
 
-			spellButtons[abilityId] = button
+				spellButtons[abilityKey] = button
+			end
+
+			if button.Text ~= displayName then
+				button.Text = displayName
+			end
+
+			seen[abilityKey] = true
+		end
+	end
+
+	for abilityId, button in pairs(spellButtons) do
+		if not seen[abilityId] then
+			button:Destroy()
+			spellButtons[abilityId] = nil
 		end
 	end
 end
@@ -731,9 +976,6 @@ ContextActionService:BindActionAtPriority(
 
 RunService.Heartbeat:Connect(function()
 	if not screenGui.Enabled then
-		return
-	end
-	if not needsRefresh then
 		return
 	end
 	local now = os.clock()

@@ -57,7 +57,7 @@ local EntityDespawn = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChil
 local RequestInitialSync = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):WaitForChild("RequestInitialSync")
 
 local INTERPOLATION_WINDOW = 0.25 -- default window for slow movement
-local FAST_MOVEMENT_INTERPOLATION_WINDOW = 0.05 -- tighter window for high-speed enemies (dashing)
+local FAST_MOVEMENT_INTERPOLATION_WINDOW = 0.1 -- smoother window for high-speed enemies (dashing)
 local FAST_MOVEMENT_THRESHOLD = 20 -- studs/sec; lowered from 40 to 20 for tighter interpolation
 local HARD_SNAP_THRESHOLD = 30 -- studs; if delta exceeds this, snap immediately (reduced from 50 to prevent teleporting)
 local DEAD_RECKONING_TIMEOUT = 0.1 -- Start prediction after 100ms without update
@@ -133,6 +133,7 @@ type RenderRecord = {
 	impaleToken: number?,
 	impaleFollowPart: BasePart?,
 	impaleFollowOffset: CFrame?,
+	smoothedCFrame: CFrame?,
 }
 
 local renderedEntities: {[string]: RenderRecord} = {}
@@ -658,7 +659,7 @@ local function fadeImpaleModel(model: Model, parts: {BasePart}, duration: number
 end
 
 -- Hit flash and death animation tracking
-local hitFlashHighlights: {[Model]: {highlight: Highlight, endTime: number}} = {}
+local hitFlashHighlights: {[Model]: {highlight: Highlight, endTime: number, isCrit: boolean?}} = {}
 local deathAnimations: {[Model]: {
 	startTime: number,
 	duration: number,
@@ -1229,6 +1230,7 @@ local function handleHitFlash(model: Model, hitFlashData: any)
 	
 	local existing = hitFlashHighlights[model]
 	local currentTime = tick()
+	local isCrit = hitFlashData.crit == true
 	
 	-- ALWAYS use CLIENT time for flash duration (never trust server timestamps)
 	local flashDuration = 0.15  -- Match server-side HIT_FLASH_DURATION
@@ -1237,6 +1239,16 @@ local function handleHitFlash(model: Model, hitFlashData: any)
 	-- If already has highlight, just refresh the timer
 	if existing then
 		existing.endTime = endTime
+		existing.isCrit = existing.isCrit or isCrit
+		if existing.highlight then
+			if existing.isCrit then
+				existing.highlight.FillColor = Color3.fromRGB(255, 60, 60)
+				existing.highlight.OutlineColor = Color3.fromRGB(255, 60, 60)
+			else
+				existing.highlight.FillColor = Color3.new(1, 1, 1)
+				existing.highlight.OutlineColor = Color3.new(1, 1, 1)
+			end
+		end
 		return
 	end
 	
@@ -1245,8 +1257,13 @@ local function handleHitFlash(model: Model, hitFlashData: any)
 	if not highlight then
 		highlight = Instance.new("Highlight")
 		highlight.Name = "HitFlash"
-		highlight.FillColor = Color3.new(1, 1, 1) -- White
-		highlight.OutlineColor = Color3.new(1, 1, 1) -- White
+		if isCrit then
+			highlight.FillColor = Color3.fromRGB(255, 60, 60) -- Red for crit
+			highlight.OutlineColor = Color3.fromRGB(255, 60, 60)
+		else
+			highlight.FillColor = Color3.new(1, 1, 1) -- White
+			highlight.OutlineColor = Color3.new(1, 1, 1)
+		end
 		highlight.FillTransparency = 0.5
 		highlight.OutlineTransparency = 0
 		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -1255,7 +1272,8 @@ local function handleHitFlash(model: Model, hitFlashData: any)
 	
 	hitFlashHighlights[model] = {
 		highlight = highlight,
-		endTime = endTime
+		endTime = endTime,
+		isCrit = isCrit,
 	}
 	
 	-- DIAGNOSTICS: Log HitFlash events (only for first few per game)
@@ -1290,7 +1308,7 @@ local function handleDeathAnimation(model: Model, deathData: any)
 	local now = tick()
 	local flashDuration = 0.15  -- Match HIT_FLASH_DURATION (must match server!)
 	local fadeDuration = deathData.duration or DEATH_FADE_DURATION or 0.5
-	local deathBufferTime = 0.05  -- Match server DEATH_ANIMATION_BUFFER
+	local deathBufferTime = 0.12  -- Match server DEATH_ANIMATION_BUFFER
 	local startTime = now + flashDuration + deathBufferTime  -- Wait for HitFlash + buffer
 	
 	-- CRITICAL FIX: If we're receiving this late (e.g. after pause), start immediately
@@ -2365,15 +2383,7 @@ local function scheduleTransform(entityId: string | number, position: Vector3?, 
 	local targetPosition = position or currentCFrame.Position
 	local targetCFrame = computeTargetCFrame(targetPosition, facingComponent or record.facingDirection, velocityComponent or record.velocity, currentCFrame, record.entityType)
 
-	-- CRITICAL FIX: For enemies, immediately snap to server Y to prevent floating models
-	if record.entityType == "Enemy" and position then
-		local currentPos = currentCFrame.Position
-		-- If Y difference is significant (>2 studs), immediately correct it
-		if math.abs(currentPos.Y - position.Y) > 2 then
-			currentCFrame = CFrame.new(currentPos.X, position.Y, currentPos.Z) * (currentCFrame - currentCFrame.Position)
-			model:PivotTo(currentCFrame)
-		end
-	end
+	-- NOTE: Avoid hard Y snaps for enemies; let interpolation smooth vertical movement.
 
     record.fromCFrame = currentCFrame
     record.toCFrame = targetCFrame
@@ -3849,15 +3859,22 @@ end)
 			newCFrame = fromCFrame:Lerp(toCFrame, alpha)
 		end
 		
-		-- CRITICAL FIX: For enemies, clamp Y to toCFrame Y to prevent floating during rapid zooming
-		if record.entityType == "Enemy" and toCFrame then
-			local targetY = toCFrame.Position.Y
-			local currentY = newCFrame.Position.Y
-			-- If Y is drifting too far from target (>5 studs), snap it back
-			if math.abs(currentY - targetY) > 5 then
-				local pos = newCFrame.Position
-				newCFrame = CFrame.new(pos.X, targetY, pos.Z) * (newCFrame - newCFrame.Position)
-			end
+		-- Enemy smoothing: apply a small exponential filter to reduce jitter (especially at high speeds).
+		if record.entityType == "Enemy" then
+			local lastTick = record.lastRenderTick or now
+			local dt = math.max(now - lastTick, 0)
+			local smoothTau = 0.08
+			local smoothAlpha = dt > 0 and (1 - math.exp(-dt / smoothTau)) or 1
+			local prevCFrame = record.smoothedCFrame or record.currentCFrame or newCFrame
+			local prevPos = prevCFrame.Position
+			local targetPos = newCFrame.Position
+			local smoothedPos = Vector3.new(
+				prevPos.X + (targetPos.X - prevPos.X) * smoothAlpha,
+				prevPos.Y + (targetPos.Y - prevPos.Y) * smoothAlpha,
+				prevPos.Z + (targetPos.Z - prevPos.Z) * smoothAlpha
+			)
+			newCFrame = setCFramePosition(newCFrame, smoothedPos)
+			record.smoothedCFrame = newCFrame
 		end
 
 		local forceRemoval = false

@@ -78,6 +78,8 @@ function BuffSystem.addBuff(
 	}
 	
 	DirtyService.setIfChanged(world, playerEntity, BuffState, buffState, "BuffState")
+	-- Force sync even when mutating existing table in-place
+	DirtyService.mark(playerEntity, "BuffState")
 	
 	-- Refresh player stats to apply buff
 	if PassiveEffectSystem then
@@ -116,6 +118,8 @@ function BuffSystem.removeBuff(playerEntity: number, buffId: string)
 	else
 		DirtyService.setIfChanged(world, playerEntity, BuffState, buffState, "BuffState")
 	end
+	-- Force sync to clear/update buff state on clients
+	DirtyService.mark(playerEntity, "BuffState")
 	
 	-- Refresh player stats to remove buff
 	if PassiveEffectSystem then
@@ -211,6 +215,8 @@ function BuffSystem.step(dt: number)
 			else
 				DirtyService.setIfChanged(world, entity, BuffState, buffState, "BuffState")
 			end
+			-- Force sync to clear/update buff state on clients
+			DirtyService.mark(entity, "BuffState")
 			
 			-- Refresh player stats when buffs expire
 			if PassiveEffectSystem then
@@ -221,4 +227,3 @@ function BuffSystem.step(dt: number)
 end
 
 return BuffSystem
-
