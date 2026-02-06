@@ -157,6 +157,7 @@ local function processSnapshot(snapshot: any)
 		end
 		playerEntityId = nil
 		table.clear(playerComponentState)
+		lastCooldownBaseMult = nil
 	end
 
 	for entityId, data in pairs(entities) do
@@ -187,6 +188,7 @@ local function processUpdates(message: any)
 			else
 				playerEntityId = nil
 				table.clear(playerComponentState)
+				lastCooldownBaseMult = nil
 			end
 		else
 			for entityId, data in pairs(entities) do
@@ -251,6 +253,7 @@ if entityDespawn and entityDespawn:IsA("RemoteEvent") then
 				if entityId == playerEntityId then
 					playerEntityId = nil
 					table.clear(playerComponentState)
+					lastCooldownBaseMult = nil
 					needsRefresh = true
 					break
 				end
@@ -258,6 +261,7 @@ if entityDespawn and entityDespawn:IsA("RemoteEvent") then
 		elseif despawns == playerEntityId then
 			playerEntityId = nil
 			table.clear(playerComponentState)
+			lastCooldownBaseMult = nil
 			needsRefresh = true
 		end
 	end)
@@ -337,7 +341,18 @@ end
 
 local function formatInt(value: number?): string
 	local raw = value or 0
-	return tostring(math.floor(raw + 0.0001))
+	local rounded = math.floor(raw + 0.0001)
+	local sign = ""
+	if rounded < 0 then
+		sign = "-"
+		rounded = -rounded
+	end
+	local text = tostring(rounded)
+	local withCommas = text:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+	if withCommas:sub(1, 1) == "," then
+		withCommas = withCommas:sub(2)
+	end
+	return sign .. withCommas
 end
 
 local function normalizeKey(value: any): string
@@ -485,8 +500,10 @@ local function computeAbilityStats(abilityRecord: any, passiveEffects: any, buff
 		if stats.duration and passiveEffects.durationMultiplier then
 			stats.duration = stats.duration * passiveEffects.durationMultiplier
 		end
-		if stats.penetration and passiveEffects.penetrationMultiplier then
-			stats.penetration = math.max(0, math.floor(stats.penetration * passiveEffects.penetrationMultiplier + 0.0001))
+		if stats.penetration then
+			local penMult = passiveEffects.penetrationMultiplier or 1.0
+			local penBonus = passiveEffects.penetrationBonus or 0
+			stats.penetration = math.max(0, math.floor(stats.penetration * penMult + penBonus + 0.0001))
 		end
 		local projectileCountBonus = passiveEffects.projectileCountBonus or 0
 		if stats.projectileCount and projectileCountBonus ~= 0 then
@@ -588,6 +605,7 @@ local lastAbilityData: any = nil
 local lastDamageStats: any = nil
 local lastSpellDamageById: {[string]: number} = {}
 local lastTotalDamage: number = 0
+local lastCooldownBaseMult: number? = nil
 
 local DEFAULT_TEXT_COLOR = Color3.fromRGB(200, 200, 200)
 local BUFF_TEXT_COLOR = Color3.fromRGB(120, 180, 255)
@@ -639,7 +657,16 @@ local function updateGeneralStats()
 	local arcaneActive = arcaneBuff and (arcaneBuff.endTime == nil or arcaneBuff.endTime > now) or false
 
 	local damageMult = (effects.damageMultiplier or PlayerBalance.BaseDamageMultiplier or 1.0) * damageBuffMult
-	local cooldownMult = (effects.cooldownMultiplier or PlayerBalance.BaseCooldownMultiplier or 1.0) * cooldownBuffMult
+	local baseCooldown = effects.cooldownMultiplier
+	if typeof(baseCooldown) ~= "number" then
+		baseCooldown = PlayerBalance.BaseCooldownMultiplier or 1.0
+		if lastCooldownBaseMult ~= nil then
+			baseCooldown = lastCooldownBaseMult
+		end
+	else
+		lastCooldownBaseMult = baseCooldown
+	end
+	local cooldownMult = baseCooldown * cooldownBuffMult
 	local expMult = effects.expMultiplier or PlayerBalance.BaseExpMultiplier or 1.0
 	local totalSpeedMult = computeTotalSpeedMultiplier(effects)
 
@@ -650,13 +677,15 @@ local function updateGeneralStats()
 	local baseRegenDelay = PlayerBalance.HealthRegenDelay or 0
 
 	local healthMult = effects.healthMultiplier or 1.0
-	local finalHealth = baseHealth * healthMult
+	local healthFlat = effects.healthFlatBonus or 0
+	local finalHealth = baseHealth * healthMult + healthFlat
 	local finalSpeed = baseWalk * totalSpeedMult
 	local finalPickup = basePickup * (effects.pickupRangeMultiplier or 1.0)
-	local finalRegen = baseRegen * (effects.regenMultiplier or 1.0)
+	local regenFlat = effects.regenFlatBonus or 0
+	local finalRegen = (baseRegen * (effects.regenMultiplier or 1.0)) + regenFlat
 	local finalRegenDelay = baseRegenDelay * (effects.regenDelayMultiplier or 1.0)
 	local finalDurationMult = (effects.durationMultiplier or 1.0) * durationBuffMult
-	local finalPenetrationMult = (effects.penetrationMultiplier or 1.0) * penetrationBuffMult
+	local finalPenetrationBonus = (effects.penetrationBonus or 0) * penetrationBuffMult
 
 	-- Health section
 	setGeneralRow("health", "Max Health", formatNumber(finalHealth, 1), false)
@@ -672,7 +701,7 @@ local function updateGeneralStats()
 	setGeneralRow("cooldown", "Cooldown", formatMultiplierPercent(cooldownMult), hasCooldownBuff)
 	setGeneralRow("abilitySize", "Ability Size", formatMultiplierPercent(effects.sizeMultiplier or 1.0), false)
 	setGeneralRow("abilityDuration", "Ability Duration", formatMultiplierPercent(finalDurationMult), arcaneActive == true or hasDurationBuff)
-	setGeneralRow("penetration", "Penetration", formatMultiplierPercent(finalPenetrationMult), arcaneActive == true or hasPenetrationBuff)
+	setGeneralRow("penetration", "Penetration", formatCountWithFloor(finalPenetrationBonus, 1), arcaneActive == true or hasPenetrationBuff)
 	setGeneralRow("projectileCountBonus", "Projectile Count Bonus", formatCountWithFloor(effects.projectileCountBonus or 0, 1), false)
 
 	-- Speed section
@@ -777,6 +806,12 @@ local function rebuildDetail(abilityId: string)
 	end
 	local finalStats = computeAbilityStats(abilityRecord, passiveEffects, buffState)
 	local baseStats = abilityRecord.baseStats or {}
+	if abilityId == "FireBall" and abilityRecord.selectedAttribute == "TheBigOne" then
+		finalStats.projectileCount = 1
+		finalStats.projectileCountRaw = 1
+		finalStats.shotAmount = 1
+		finalStats.shotAmountRaw = 1
+	end
 
 	local now = getGameTimeNow()
 	local damageBuffMult = computeBuffMultiplier(buffState, "damageMultiplier", now)

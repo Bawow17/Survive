@@ -57,11 +57,6 @@ function HealthRegenSystem.step(dt: number)
 		return
 	end
 	
-	-- Check if regen is enabled
-	if PlayerBalance.HealthRegenRate <= 0 then
-		return  -- No regen
-	end
-	
 	local currentTime = GameTimeSystem.getGameTime()
 	
 	-- Process all players
@@ -136,9 +131,14 @@ function HealthRegenSystem.step(dt: number)
 			end
 		end
 		
-		-- Apply regeneration with multiplier
+		-- Apply regeneration with multiplier + flat bonus
 		local passiveRegenMult = passiveEffects and passiveEffects.regenMultiplier or 1.0
-		local regenAmount = PlayerBalance.HealthRegenRate * passiveRegenMult * dt * regenMultiplier
+		local regenFlat = passiveEffects and passiveEffects.regenFlatBonus or 0
+		local regenRate = (PlayerBalance.HealthRegenRate * passiveRegenMult) + regenFlat
+		if regenRate <= 0 then
+			continue
+		end
+		local regenAmount = regenRate * dt * regenMultiplier
 		local newHealth = math.min(health.current + regenAmount, health.max)
 		
 		-- Update ECS health

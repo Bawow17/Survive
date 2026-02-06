@@ -82,6 +82,7 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 	
 	-- Apply health multiplier
 	local healthMult = effects.healthMultiplier or 1.0
+	local healthFlat = effects.healthFlatBonus or 0
 	local baseMaxHealth = player:GetAttribute("BaseMaxHealth")
 	if not baseMaxHealth or baseMaxHealth == 0 then
 		-- Use PlayerBalance default, not humanoid's current value
@@ -89,7 +90,7 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 		player:SetAttribute("BaseMaxHealth", baseMaxHealth)
 	end
 	
-	local newMaxHealth = baseMaxHealth * healthMult
+	local newMaxHealth = baseMaxHealth * healthMult + healthFlat
 	if math.abs(humanoid.MaxHealth - newMaxHealth) > 0.1 then
 		-- Store current health percentage
 		local healthPercent = humanoid.Health / humanoid.MaxHealth

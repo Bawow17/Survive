@@ -9,9 +9,48 @@ EnemyBalance.DamageMultiplier = 1
 -- Enemy spawning settings (adaptive, per-player)
 EnemyBalance.MaxEnemies = 190 -- Global cap
 
--- Player power → pressure smoothing (adaptive scaling)
-EnemyBalance.PlayerPower = {
-	-- Legacy upgrade-level weighting removed; scaling is now raw-stat driven.
+-- Global difficulty coefficient (RoR2-style, Normal)
+EnemyBalance.DifficultyCoeff = {
+	EnemyDifficulty = 1.0,
+	RateMult = 1.8,
+}
+
+-- Difficulty coefficient -> enemy scaling exponents (modest)
+EnemyBalance.DifficultyScaling = {
+	SpawnExponent = 1.8,
+	HealthExponent = 4.0,
+	DamageExponent = 0.65,
+	SpeedExponent = 0.85,
+}
+
+-- Super/Elite tier settings (rarer, stronger)
+EnemyBalance.SuperElite = {
+	StartMinutes = 0,
+	MidMinutes = 25,
+	LateMinutes = 50,
+
+	SuperOdds = { start = 0.01, mid = 0.03, late = 0.06 },
+	EliteOdds = { start = 0.0015, mid = 0.005, late = 0.01 },
+
+	SpawnScale = 1.0,
+
+	SuperMult = { health = 3.2, damage = 2.5, speed = 2.3, size = 1.6 },
+	EliteMult = { health = 4.4, damage = 3.0, speed = 2.5, size = 2.3 },
+
+	SuperExpMult = 2.0,
+	EliteExpMult = 3.0,
+	SuperDropCount = 5,
+	EliteDropCount = 7,
+	SuperOrbWeights = { Purple = 70, Orange = 30 },
+	EliteOrbType = "Purple",
+}
+
+-- Per-player pressure correction (small, clamped)
+EnemyBalance.PressureCorrection = {
+	SpawnClamp = 0.20, -- ±15%
+	StatClamp = 0.12, -- ±10% for HP/Dmg/Speed
+	ChangeThreshold = 0.02,
+	ChangeCooldown = 8.0, -- seconds
 }
 
 EnemyBalance.Pressure = {
@@ -28,7 +67,7 @@ EnemyBalance.RawStatScaling = {
 	AbilityWeight = 0.85, -- abilities contribute at 45% of general stats
 	General = {
 		-- Player offense -> Enemy health/spawn
-		Health = { Damage = 1.5, Cooldown = 0.25, ProjectileCount = 0.1, Penetration = 0.15, Size = 0.1, Duration = 0.1 },
+		Health = { Damage = 1.5, Cooldown = 0.8, ProjectileCount = 0.8, Penetration = 0.8, Size = 0.5, Duration = 0.5 },
 		-- Player defense -> Enemy damage (low impact)
 		Damage = { Health = 0.25, Armor = 0.4, Regen = 0.1, Lifesteal = 0.15 },
 		-- Player mobility -> Enemy speed (low impact)
@@ -42,17 +81,6 @@ EnemyBalance.RawStatScaling = {
 
 -- PlayerScaling removed: scaling is now driven only by raw stats + time.
 
--- Optional time-based scaling (works alongside player power scaling)
-EnemyBalance.TimeScaling = {
-	Enabled = true,
-	EarlyMinutes = 20, 
-	PostMinutes = 65, -- post scaling starts here
-	PostRamp = 15, -- minutes to ramp post scaling
-	Health = { EarlyScale = 0.15, PostScale = 0.4, PostGrowth = 0.6, PostExponent = 1.1 },
-	Damage = { EarlyScale = 0.05, PostScale = 0.15, PostGrowth = 0.2, PostExponent = 1.0 },
-	Speed = { EarlyScale = 0.05, PostScale = 0.1, PostGrowth = 0.15, PostExponent = 1.0 },
-	Spawn = { EarlyScale = 0.1, PostScale = 0.2, PostGrowth = 0.2, PostExponent = 1.0 },
-}
 
 EnemyBalance.SpawnBudget = {
 	MaxSpawnsPerSecond = 14, -- Global spawn budget (all players)
@@ -85,23 +113,6 @@ EnemyBalance.SpawnWeights = {
 -- Base spawn rate per player (adaptive system scales from this)
 EnemyBalance.BaseSpawnRatePerPlayer = 1.4
 
--- Multiplayer enemy scaling (Phase 0.6)
-EnemyBalance.Multiplayer = {
-	-- Scale enemies per player (1.0 = 1x base rate per player, 0.75 = 75% per player)
-	-- Example: 4 players at 1.0 = 4x total spawn rate
-	-- Example: 4 players at 0.75 = 3x total spawn rate
-	EnemiesPerPlayer = 0.9, -- deprecated (adaptive system handles)
-	
-	-- Health scaling per player (+66% health per additional player)
-	-- Formula: Health = Base * (1 + HealthPerPlayer * (playerCount - 1))
-	-- Example: 2 players = 1.66x health, 3 players = 2.32x health
-	HealthPerPlayer = 0.66, -- deprecated (adaptive system handles)
-}
-
--- Legacy time-based scaling (deprecated, kept for reference)
-EnemyBalance.GlobalMoveSpeedScaling = EnemyBalance.GlobalMoveSpeedScaling or nil
-EnemyBalance.GlobalHealthScaling = EnemyBalance.GlobalHealthScaling or nil
-EnemyBalance.LifetimeMoveSpeedScaling = EnemyBalance.LifetimeMoveSpeedScaling or nil
 EnemyBalance.InitialSpawnDelay = 3	 -- Seconds to wait before first enemy spawn
 EnemyBalance.MinSpawnRadius = 130 -- Minimum distance from player to spawn enemies
 EnemyBalance.MaxSpawnRadius = 240 -- Maximum distance from player to spawn enemies

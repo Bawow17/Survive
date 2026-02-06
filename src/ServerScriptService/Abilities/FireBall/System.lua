@@ -41,13 +41,16 @@ local function applyTheBigOneScaling(stats: any, playerEntity: number): any
 	end
 	
 	-- Calculate bonus based on projectile count (per increment above base)
-	-- Examples: 1 projectile = 0 bonus, 2 projectiles = 1 bonus, 3 projectiles = 2 bonus
-	local bonusCount = (stats.projectileCount - 1) + (stats.shotAmount - 1)
+	-- Use raw counts when available so The Big One scaling isn't reduced by count caps.
+	local rawProjectileCount = stats.projectileCountRaw or stats.projectileCount or 1
+	local rawShotAmount = stats.shotAmountRaw or stats.shotAmount or 1
+	local bonusCount = math.max(rawProjectileCount - 1, 0) + math.max(rawShotAmount - 1, 0)
 	
 	-- Store the current values (includes upgrades/passives) before applying The Big One modifiers
 	local baseScale = stats.scale or 1.0
 	local baseDamage = stats.damage or 0
 	local baseExplosionDamage = stats.explosionDamage or 0
+	local baseExplosionScale = stats.explosionScale or 1.0
 	
 	-- Apply projectile size scaling: +35% per bonus projectile
 	stats.scale = baseScale * (1 + bonusCount * 0.35)
@@ -58,9 +61,8 @@ local function applyTheBigOneScaling(stats: any, playerEntity: number): any
 	stats.duration = stats.duration * (1 + bonusCount * 0.15)
 	
 	-- Apply explosion size scaling: +50% per bonus projectile
-	-- Explosion inherits all projectile scaling (including passives + The Big One)
-	-- then adds additional 50% per bonus projectile on top
-	stats.explosionScale = stats.scale * (1 + bonusCount * 0.5)
+	-- Ability size scaling is applied later in AbilitySystemBase (so keep this as the base factor).
+	stats.explosionScale = baseExplosionScale * (1 + bonusCount * 0.5)
 	
 	-- Apply penetration bonus: +1 per bonus projectile
 	stats.penetration = stats.penetration + bonusCount

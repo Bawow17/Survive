@@ -332,6 +332,11 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	if isPlayer and OverhealSystem then
 		remainingDamage = OverhealSystem.damageOverheal(targetEntity, damageAmount)
 	end
+
+	local appliedToTarget = 0
+	if isEnemy then
+		appliedToTarget = math.min(remainingDamage, health.current)
+	end
 	
 	-- Apply remaining damage to ECS health
 	local newHealth = math.max(health.current - remainingDamage, 0)
@@ -477,13 +482,13 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	end
 
 	-- Apply lifesteal for player sources damaging enemies
-	if isEnemy and sourceEntity and remainingDamage > 0 and isPlayerSourceEntity(sourceEntity) then
+	if isEnemy and sourceEntity and appliedToTarget > 0 and isPlayerSourceEntity(sourceEntity) then
 		local sourceEffects = world:get(sourceEntity, PassiveEffects)
 		local lifesteal = sourceEffects and sourceEffects.lifesteal or 0
 		if lifesteal > 0 then
 			local sourceHealth = world:get(sourceEntity, Health)
 			if sourceHealth then
-				local healAmount = remainingDamage * lifesteal
+				local healAmount = appliedToTarget * lifesteal
 				if healAmount > 0 then
 					local healed = math.min(sourceHealth.current + healAmount, sourceHealth.max)
 					DirtyService.setIfChanged(world, sourceEntity, Health, {

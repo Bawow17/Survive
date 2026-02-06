@@ -4,7 +4,9 @@
 
 local Workspace = game:GetService("Workspace")
 local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
+local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local PowerupBalance = require(game.ServerScriptService.Balance.PowerupBalance)
+local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff)
 
 local EnemyExpDropSystem = {}
 
@@ -129,6 +131,27 @@ local function pickEnemyDropOrbType(): string
 	return "Blue"
 end
 
+local function pickWeightedOrbType(weights: {[string]: number}): string
+	local total = 0
+	local cumulative = {}
+	for orbType, weight in pairs(weights) do
+		if weight and weight > 0 then
+			total += weight
+			table.insert(cumulative, {type = orbType, threshold = total})
+		end
+	end
+	if total <= 0 then
+		return "Purple"
+	end
+	local roll = RNG:NextNumber(0, total)
+	for _, entry in ipairs(cumulative) do
+		if roll <= entry.threshold then
+			return entry.type
+		end
+	end
+	return cumulative[#cumulative].type
+end
+
 -- Pick random powerup type based on powerup weights
 local function pickPowerupType(): string
 	local cumulative = {}
@@ -162,6 +185,73 @@ end
 -- nukeKill: if true, this death was caused by Nuke powerup (skip powerup roll)
 function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vector3, maxHP: number, nukeKill: boolean?)
 	if not world or not ItemBalance.EnemyDrops.Enabled then
+		return
+	end
+
+	local tierData = Components and Components.EnemyTier and world:get(enemyEntity, Components.EnemyTier) or nil
+	local tier = tierData and tierData.tier or "Normal"
+
+	-- Tiered enemies: always drop shared EXP (no powerup substitution)
+	if tier ~= "Normal" then
+		local tierCfg = EnemyBalance.SuperElite or {}
+		local tierExpMult = (tier == "Elite" and tierCfg.EliteExpMult) or (tier == "Super" and tierCfg.SuperExpMult) or 1.0
+		local dropCount = (tier == "Elite" and tierCfg.EliteDropCount) or (tier == "Super" and tierCfg.SuperDropCount) or 1
+		local superWeights = tierCfg.SuperOrbWeights or { Purple = 70, Orange = 30 }
+		local eliteOrbType = tierCfg.EliteOrbType or "Purple"
+
+		-- Calculate HP scaling multiplier (every 100 HP = 1.005x)
+		local hpMultiplier = ItemBalance.EnemyDrops.HPScaling ^ (maxHP / 100)
+		local coeff = DifficultyCoeff.getCoeff()
+		local rewardCfg = ItemBalance.ExpRewardScaling or {}
+		local xpCoeffExp = rewardCfg.CoeffExp or 1.0
+		if typeof(xpCoeffExp) ~= "number" then
+			xpCoeffExp = 1.0
+		end
+		local coeffScale = 1.0
+		if typeof(coeff) == "number" and coeff == coeff and coeff > 0 then
+			coeffScale = coeff ^ xpCoeffExp
+		end
+
+		-- Ground the drop position (same as ambient spawns: ground + 2 studs)
+		local groundedPosition = getGroundedPosition(deathPosition, (ItemBalance.OrbHeightOffset or 2.0) + 1.0)
+		if not groundedPosition then
+			return
+		end
+
+		-- Build player list from ECS (all players get full exp)
+		local playersByEntity = {}
+		for entity, stats in world:query(Components.PlayerStats) do
+			if stats and stats.player then
+				playersByEntity[entity] = stats.player
+			end
+		end
+
+		for playerEntity, _ in pairs(playersByEntity) do
+			local totalExp = 0
+			local orbPayloads = table.create(dropCount)
+			for i = 1, dropCount do
+				local orbType = eliteOrbType
+				if tier == "Super" then
+					orbType = pickWeightedOrbType(superWeights)
+				end
+				local baseExp = ItemBalance.OrbTypes[orbType] and ItemBalance.OrbTypes[orbType].expAmount or 0
+				local orbExp = math.floor(baseExp * hpMultiplier * ItemBalance.EnemyDrops.BaseExpMultiplier * coeffScale * tierExpMult)
+				totalExp += orbExp
+				orbPayloads[i] = { type = orbType, value = orbExp }
+			end
+
+			if totalExp > 0 then
+				if ExpSinkSystem.shouldAbsorb(playerEntity) then
+					ExpSinkSystem.depositExp(totalExp, playerEntity)
+				else
+					for _, payload in ipairs(orbPayloads) do
+						if payload.value > 0 then
+							PickupService.spawnExpPickup(payload.type, groundedPosition, playerEntity, payload.value)
+						end
+					end
+				end
+			end
+		end
 		return
 	end
 	
@@ -235,7 +325,17 @@ function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vec
 		-- Pick random orb type based on enemy drop weights
 		local orbType = pickEnemyDropOrbType()
 		local baseExp = ItemBalance.OrbTypes[orbType].expAmount
-		local scaledExp = math.floor(baseExp * hpMultiplier * ItemBalance.EnemyDrops.BaseExpMultiplier)
+		local coeff = DifficultyCoeff.getCoeff()
+		local rewardCfg = ItemBalance.ExpRewardScaling or {}
+		local xpCoeffExp = rewardCfg.CoeffExp or 1.0
+		if typeof(xpCoeffExp) ~= "number" then
+			xpCoeffExp = 1.0
+		end
+		local coeffScale = 1.0
+		if typeof(coeff) == "number" and coeff == coeff and coeff > 0 then
+			coeffScale = coeff ^ xpCoeffExp
+		end
+		local scaledExp = math.floor(baseExp * hpMultiplier * ItemBalance.EnemyDrops.BaseExpMultiplier * coeffScale)
 		
 		-- Ground the drop position (same as ambient spawns: ground + 2 studs)
 		local groundedPosition = getGroundedPosition(deathPosition, (ItemBalance.OrbHeightOffset or 2.0) + 1.0)

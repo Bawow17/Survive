@@ -3,6 +3,7 @@
 -- Phase 4.2 optimization: Uses spatial grid pre-filtering to reduce O(n*m) → O(n*k)
 
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
+local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 
@@ -27,6 +28,11 @@ local playerQuery: any
 local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 local DEBUG_LOG_INTERVAL = 2.0
 local lastDebugLogTime = 0.0
+
+local LARGE_RANGE_MIN = 40.0
+local MAGNETIZE_CLOSE_RADIUS = 4.0
+local MAGNET_PULL_MIN_DURATION = 0.25
+local MAGNET_PULL_MAX_DURATION = 1.2
 
 local function logPickupFailure(orbEntity: number, playerEntity: number, playerName: string?, distance: number?, reason: string)
 	if not DEBUG then
@@ -240,6 +246,20 @@ function ExpCollectionSystem.step(dt: number)
 			
 			-- Check if within collection radius
 			if distSq <= effectiveRadiusSq then
+				-- For very large pickup ranges, pull orbs in before collecting
+				if collectionRadius >= LARGE_RANGE_MIN and distSq > (MAGNETIZE_CLOSE_RADIUS * MAGNETIZE_CLOSE_RADIUS) then
+					if not magnetPull then
+						local now = GameTimeSystem.getGameTime()
+						local duration = math.clamp(distance / 120, MAGNET_PULL_MIN_DURATION, MAGNET_PULL_MAX_DURATION)
+						DirtyService.setIfChanged(world, orbEntity, Components.MagnetPull, {
+							targetPlayer = playerEntity,
+							startTime = now,
+							duration = duration,
+						}, "MagnetPull")
+					end
+					continue
+				end
+
 				collectionAttempts += 1
 				if shouldLogDebug then
 					print(string.format("[ExpCollection] ATTEMPTING COLLECTION: Orb %d at distance %.2f (radius %.2f)", 

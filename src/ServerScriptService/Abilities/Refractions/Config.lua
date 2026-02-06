@@ -29,9 +29,11 @@ return {
 	StayHorizontal = true,
 	AlwaysStayHorizontal = false,
 	StickToPlayer = true,
-	upgradeStatBlacklist = {
-		projectileSpeed = true,
-		shotAmount = true,
+	upgradeStatWhitelist = {
+		damage = true,
+		cooldownReduction = true,
+		projectileCount = true,
+		abilityDuration = true,
 	},
 	
 	-- Spawn configuration

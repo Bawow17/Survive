@@ -3,11 +3,29 @@
 -- Spawns zombies at intervals near players
 
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
+local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local EnemyRegistry = require(game.ServerScriptService.Enemies.EnemyRegistry)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
+
+local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
+local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
+local PROFILING_ENABLED = ProfilingConfig.ENABLED
+
+local function profGauge(name: string, value: number)
+	if PROFILING_ENABLED then
+		Prof.gauge(name, value)
+	end
+end
+
+local function profInc(name: string, value: number?)
+	if PROFILING_ENABLED then
+		Prof.incCounter(name, value)
+	end
+end
 
 local EnemySpawner = {}
 
@@ -45,6 +63,10 @@ local spawnCheckAccumulator = 0
 -- Cached queries for performance
 local enemyCountQuery: any
 local playerPositionQuery: any
+local enemyOwnerQuery: any
+local enemyTierQuery: any
+
+local pressureCorrectionState: {[number]: {spawn: number, health: number, damage: number, speed: number, lastChange: number}} = {}
 
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -54,6 +76,7 @@ local SPAWN_GROUND_CLEARANCE = 0.15
 
 -- RNG for enemy type selection
 local enemyTypeRNG = Random.new()
+local tierRNG = Random.new()
 
 -- Cache for enemy types and weights
 local enemyTypes = {}
@@ -228,9 +251,13 @@ function EnemySpawner.init(worldRef: any, components: any, ecsWorldService: any,
 	-- Create cached queries for performance (CRITICAL FIX)
 	enemyCountQuery = world:query(Components.EntityType):cached()
 	playerPositionQuery = world:query(Components.Position, Components.PlayerStats, Components.Level):cached()
+	enemyOwnerQuery = world:query(Components.EntityType, Components.EnemyOwner):cached()
+	enemyTierQuery = world:query(Components.EntityType, Components.EnemyTier):cached()
 	
 	-- Build enemy type weights
 	rebuildEnemyWeights()
+
+	DifficultyCoeff.validate()
 end
 
 local function getGroundedPosition(position: Vector3, heightOffset: number): Vector3?
@@ -309,7 +336,65 @@ local function getRandomSpawnPosition(playerPos: {x: number, y: number, z: numbe
     return Vector3.new(playerPos.x + offsetX, playerPos.y, playerPos.z + offsetZ)
 end
 
-local function getPlayerScaling(playerEntity: number, levelValue: number): any
+local function lerp(a: number, b: number, t: number): number
+	return a + (b - a) * t
+end
+
+local function computeTierOdds(timeMinutes: number, cfg: any): (number, number)
+	if not cfg then
+		return 0, 0
+	end
+	local startMin = cfg.StartMinutes or 0
+	local midMin = cfg.MidMinutes or 25
+	local lateMin = cfg.LateMinutes or 50
+	local scale = cfg.SpawnScale or 1.0
+	local t = math.max(0, timeMinutes * scale)
+
+	local function getOdds(odds: any): number
+		if not odds then
+			return 0
+		end
+		local startVal = odds.start or 0
+		local midVal = odds.mid or startVal
+		local lateVal = odds.late or midVal
+		if t <= midMin then
+			local denom = math.max(1e-6, midMin - startMin)
+			local alpha = math.clamp((t - startMin) / denom, 0, 1)
+			return lerp(startVal, midVal, alpha)
+		end
+		local denom = math.max(1e-6, lateMin - midMin)
+		local alpha = math.clamp((t - midMin) / denom, 0, 1)
+		return lerp(midVal, lateVal, alpha)
+	end
+
+	local superOdds = getOdds(cfg.SuperOdds)
+	local eliteOdds = getOdds(cfg.EliteOdds)
+
+	superOdds = math.clamp(superOdds, 0, 0.5)
+	eliteOdds = math.clamp(eliteOdds, 0, 0.5)
+
+	local total = superOdds + eliteOdds
+	if total > 0.5 then
+		local scaleDown = 0.5 / total
+		superOdds *= scaleDown
+		eliteOdds *= scaleDown
+	end
+
+	return superOdds, eliteOdds
+end
+
+local function rollTier(superOdds: number, eliteOdds: number): string
+	local roll = tierRNG:NextNumber()
+	if roll < eliteOdds then
+		return "Elite"
+	end
+	if roll < eliteOdds + superOdds then
+		return "Super"
+	end
+	return "Normal"
+end
+
+local function getPlayerScaling(playerEntity: number, levelValue: number, coeffData: any): any
 	local pressureState = world:get(playerEntity, PlayerPower)
 
 	local ratioByStat = {
@@ -321,11 +406,6 @@ local function getPlayerScaling(playerEntity: number, levelValue: number): any
 
 	if pressureState and typeof(pressureState.pressure) == "table" then
 		local pressureStats = pressureState.pressure
-		local health = pressureStats.health
-		local damage = pressureStats.damage
-		local speed = pressureStats.speed
-		local spawn = pressureStats.spawn
-
 		local function normalizeRatio(value: any): number
 			if typeof(value) ~= "number" then
 				return 1.0
@@ -339,82 +419,98 @@ local function getPlayerScaling(playerEntity: number, levelValue: number): any
 			return value
 		end
 
-		ratioByStat.health = normalizeRatio(health)
-		ratioByStat.damage = normalizeRatio(damage)
-		ratioByStat.speed = normalizeRatio(speed)
-		ratioByStat.spawn = normalizeRatio(spawn)
+		ratioByStat.health = normalizeRatio(pressureStats.health)
+		ratioByStat.damage = normalizeRatio(pressureStats.damage)
+		ratioByStat.speed = normalizeRatio(pressureStats.speed)
+		ratioByStat.spawn = normalizeRatio(pressureStats.spawn)
 	end
 
-	local function quadRamp(value: number, startValue: number, endValue: number): number
-		if endValue <= startValue then
-			return 1
+	local function clampDelta(value: number, clampValue: number): number
+		if typeof(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+			return 0
 		end
-		local t = math.clamp((value - startValue) / (endValue - startValue), 0, 1)
-		return t * t
+		return math.clamp(value, -clampValue, clampValue)
 	end
 
-	local function computeTimeScale(statConfig: any, minutes: number): number
-		if not statConfig then
-			return 1
-		end
-		local timeCfg = EnemyBalance.TimeScaling or {}
-		if not timeCfg.Enabled then
-			return 1
-		end
-		local earlyMinutes = timeCfg.EarlyMinutes or 0
-		local postMinutes = timeCfg.PostMinutes or earlyMinutes
-		local postRamp = timeCfg.PostRamp or 10
-		local mult = 1
+	local corrCfg = EnemyBalance.PressureCorrection or {}
+	local spawnClamp = corrCfg.SpawnClamp or 0.15
+	local statClamp = corrCfg.StatClamp or 0.10
 
-		local earlyScale = statConfig.EarlyScale or 0
-		if earlyMinutes > 0 and earlyScale > 0 then
-			local t = quadRamp(minutes, 0, earlyMinutes)
-			mult = mult * (1 + earlyScale * t)
-		end
+	local targetCorrections = {
+		spawn = 1 + clampDelta((ratioByStat.spawn or 1) - 1, spawnClamp),
+		health = 1 + clampDelta((ratioByStat.health or 1) - 1, statClamp),
+		damage = 1 + clampDelta((ratioByStat.damage or 1) - 1, statClamp),
+		speed = 1 + clampDelta((ratioByStat.speed or 1) - 1, statClamp),
+	}
 
-		local postScale = statConfig.PostScale or 0
-		if postScale > 0 then
-			local t = quadRamp(minutes, postMinutes, postMinutes + postRamp)
-			mult = mult * (1 + postScale * t)
-		end
-
-		local postGrowth = statConfig.PostGrowth or 0
-		local postExponent = statConfig.PostExponent or 1
-		if postGrowth > 0 and minutes > postMinutes then
-			local t = (minutes - postMinutes) / math.max(postRamp, 1)
-			mult = mult * ((1 + postGrowth * t) ^ postExponent)
-		end
-
-		return mult
+	local state = pressureCorrectionState[playerEntity]
+	if not state then
+		state = {
+			spawn = 1,
+			health = 1,
+			damage = 1,
+			speed = 1,
+			lastChange = 0,
+		}
 	end
 
-	local healthMult = ratioByStat.health
-	local damageMult = ratioByStat.damage
-	local speedMult = ratioByStat.speed
-	local spawnMult = ratioByStat.spawn
+	local now = os.clock()
+	local changeThreshold = corrCfg.ChangeThreshold or 0.02
+	local changeCooldown = corrCfg.ChangeCooldown or 5.0
+	local maxDiff = math.max(
+		math.abs(targetCorrections.spawn - state.spawn),
+		math.abs(targetCorrections.health - state.health),
+		math.abs(targetCorrections.damage - state.damage),
+		math.abs(targetCorrections.speed - state.speed)
+	)
 
-	local timeCfg = EnemyBalance.TimeScaling or {}
-	if timeCfg.Enabled then
-		local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
-		local minutes = GameTimeSystem.getGameTime() / 60
-		healthMult = healthMult * computeTimeScale(timeCfg.Health, minutes)
-		damageMult = damageMult * computeTimeScale(timeCfg.Damage, minutes)
-		speedMult = speedMult * computeTimeScale(timeCfg.Speed, minutes)
-		spawnMult = spawnMult * computeTimeScale(timeCfg.Spawn, minutes)
+	if maxDiff >= changeThreshold and (now - state.lastChange) < changeCooldown then
+		targetCorrections.spawn = state.spawn
+		targetCorrections.health = state.health
+		targetCorrections.damage = state.damage
+		targetCorrections.speed = state.speed
+	else
+		if maxDiff >= changeThreshold then
+			state.lastChange = now
+		end
+		state.spawn = targetCorrections.spawn
+		state.health = targetCorrections.health
+		state.damage = targetCorrections.damage
+		state.speed = targetCorrections.speed
 	end
+
+	pressureCorrectionState[playerEntity] = state
+
+	local coeff = (coeffData and coeffData.coeff) or 1.0
+	if typeof(coeff) ~= "number" or coeff ~= coeff or coeff <= 0 then
+		coeff = 1.0
+	end
+
+	local scaleCfg = EnemyBalance.DifficultyScaling or {}
+	local spawnExp = scaleCfg.SpawnExponent or 1.0
+	local healthExp = scaleCfg.HealthExponent or 0.9
+	local damageExp = scaleCfg.DamageExponent or 0.6
+	local speedExp = scaleCfg.SpeedExponent or 0.4
+
+	local coeffSpawn = coeff ^ spawnExp
+	local coeffHealth = coeff ^ healthExp
+	local coeffDamage = coeff ^ damageExp
+	local coeffSpeed = coeff ^ speedExp
 
 	local baseSpawn = EnemyBalance.BaseSpawnRatePerPlayer or 2.5
-	local spawnRate = baseSpawn * spawnMult
+	local spawnRate = baseSpawn * coeffSpawn * state.spawn
 	if typeof(spawnRate) ~= "number" or spawnRate ~= spawnRate or spawnRate <= 0 then
 		spawnRate = baseSpawn
 	end
 
 	return {
 		ratio = ratioByStat,
-		healthMult = healthMult,
-		damageMult = damageMult,
-		speedMult = speedMult,
+		healthMult = coeffHealth * state.health,
+		damageMult = coeffDamage * state.damage,
+		speedMult = coeffSpeed * state.speed,
 		spawnRate = spawnRate,
+		corrections = state,
+		coeff = coeff,
 	}
 end
 
@@ -712,6 +808,7 @@ function EnemySpawner.setEnabled(enabled: boolean)
 		nukeActive = false
 		nukeEndTime = 0
 		nukeRestoreEndTime = 0
+		DifficultyCoeff.reset()
 	end
 end
 
@@ -739,6 +836,16 @@ function EnemySpawner.step(dt: number)
 		return  -- Early exit, saves 95% of work
 	end
 	spawnCheckAccumulator -= SPAWN_CHECK_INTERVAL
+
+	-- Global difficulty coefficient (RoR2-style)
+	local coeff, coeffDetails = DifficultyCoeff.getCoeff()
+	profGauge("Difficulty.Coeff", math.floor(coeff * 1000 + 0.5))
+	profGauge("Difficulty.PlayerFactor", math.floor((coeffDetails.playerFactor or 0) * 1000 + 0.5))
+	profGauge("Difficulty.TimeMinutes", math.floor((coeffDetails.timeMinutes or 0) * 100 + 0.5))
+	local tierCfg = EnemyBalance.SuperElite or {}
+	local superOdds, eliteOdds = computeTierOdds(coeffDetails.timeMinutes or 0, tierCfg)
+	profGauge("SuperOdds", math.floor(superOdds * 10000 + 0.5))
+	profGauge("EliteOdds", math.floor(eliteOdds * 10000 + 0.5))
 
 	local GameStateManager = require(game.ServerScriptService.ECS.Systems.GameStateManager)
 	-- Count current enemies using cached query
@@ -772,8 +879,17 @@ function EnemySpawner.step(dt: number)
 			end
 			
 			local levelValue = (levelComp and levelComp.current) or playerStats.level or 1
-			local scaling = getPlayerScaling(entity, levelValue)
+			local scaling = getPlayerScaling(entity, levelValue, {coeff = coeff})
 			local posVec = Vector3.new(position.x, position.y, position.z)
+			if PROFILING_ENABLED and playerStats.player then
+				local playerName = playerStats.player.Name
+				profGauge("SpawnRate." .. playerName, math.floor((scaling.spawnRate or 0) * 100 + 0.5))
+				local corr = scaling.corrections or {}
+				profGauge("PressureSpawn." .. playerName, math.floor((corr.spawn or 1) * 1000 + 0.5))
+				profGauge("PressureHP." .. playerName, math.floor((corr.health or 1) * 1000 + 0.5))
+				profGauge("PressureDmg." .. playerName, math.floor((corr.damage or 1) * 1000 + 0.5))
+				profGauge("PressureSpd." .. playerName, math.floor((corr.speed or 1) * 1000 + 0.5))
+			end
 
 			table.insert(playerPositions, {
 				entity = entity,
@@ -782,6 +898,7 @@ function EnemySpawner.step(dt: number)
 				stats = playerStats,
 				level = levelValue,
 				scaling = scaling,
+				playerName = playerStats.player.Name,
 			})
 			activePlayers[entity] = true
 		end
@@ -790,13 +907,45 @@ function EnemySpawner.step(dt: number)
 	if #playerPositions == 0 then
 		-- No players, reset accumulators to prevent spawning when players join
 		table.clear(playerSpawnAccumulators)
+		table.clear(pressureCorrectionState)
 		return
+	end
+
+	-- Active enemies per owner (profiling)
+	local enemiesByOwner: {[number]: number} = {}
+	for entity, entityType, ownerData in enemyOwnerQuery do
+		if entityType and entityType.type == "Enemy" and ownerData and ownerData.id then
+			enemiesByOwner[ownerData.id] = (enemiesByOwner[ownerData.id] or 0) + 1
+		end
+	end
+
+	-- Active enemy tiers (profiling)
+	local activeSuper = 0
+	local activeElite = 0
+	for entity, entityType, tierData in enemyTierQuery do
+		if entityType and entityType.type == "Enemy" and tierData and tierData.tier then
+			if tierData.tier == "Super" then
+				activeSuper += 1
+			elseif tierData.tier == "Elite" then
+				activeElite += 1
+			end
+		end
+	end
+
+	if PROFILING_ENABLED then
+		for _, playerData in ipairs(playerPositions) do
+			local count = enemiesByOwner[playerData.entity] or 0
+			profGauge("ActiveEnemies." .. playerData.playerName, count)
+		end
+		profGauge("ActiveSuper", activeSuper)
+		profGauge("ActiveElite", activeElite)
 	end
 
 	-- Clear accumulators for players who left
 	for entity in pairs(playerSpawnAccumulators) do
 		if not activePlayers[entity] then
 			playerSpawnAccumulators[entity] = nil
+			pressureCorrectionState[entity] = nil
 		end
 	end
 
@@ -862,7 +1011,29 @@ function EnemySpawner.step(dt: number)
 			end
 
 			local finalSpawnPos = adjustSpawnHeightForEnemy(groundedPos, enemyType)
-			local enemyEntity = ECSWorldService.CreateEnemy(enemyType, finalSpawnPos, playerData.entity, playerData.scaling)
+			local tier = rollTier(superOdds, eliteOdds)
+			local tierMult = { health = 1.0, damage = 1.0, speed = 1.0, size = 1.0 }
+			if tier == "Super" then
+				tierMult = tierCfg.SuperMult or tierMult
+				profInc("SuperSpawned", 1)
+			elseif tier == "Elite" then
+				tierMult = tierCfg.EliteMult or tierMult
+				profInc("EliteSpawned", 1)
+			end
+
+			local baseScaling = playerData.scaling or {}
+			local spawnScaling = {
+				healthMult = (baseScaling.healthMult or 1) * (tierMult.health or 1),
+				damageMult = (baseScaling.damageMult or 1) * (tierMult.damage or 1),
+				speedMult = (baseScaling.speedMult or 1) * (tierMult.speed or 1),
+				spawnRate = baseScaling.spawnRate,
+				corrections = baseScaling.corrections,
+				coeff = baseScaling.coeff,
+				tier = tier,
+				visualScale = tierMult.size or 1,
+			}
+
+			local enemyEntity = ECSWorldService.CreateEnemy(enemyType, finalSpawnPos, playerData.entity, spawnScaling)
 
 			if enemyEntity then
 				enemyCount += 1

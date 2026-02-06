@@ -177,9 +177,11 @@ function AbilitySystemBase.getAbilityStats(playerEntity: number, abilityId: stri
 			stats.duration = stats.duration * passiveEffects.durationMultiplier
 		end
 
-		-- Apply penetration multiplier (rounded for integer penetration)
-		if stats.penetration and passiveEffects.penetrationMultiplier then
-			stats.penetration = math.max(0, math.floor(stats.penetration * passiveEffects.penetrationMultiplier + 0.0001))
+		-- Apply penetration multiplier + flat bonus (rounded for integer penetration)
+		if stats.penetration then
+			local penMult = passiveEffects.penetrationMultiplier or 1.0
+			local penBonus = passiveEffects.penetrationBonus or 0
+			stats.penetration = math.max(0, math.floor(stats.penetration * penMult + penBonus + 0.0001))
 		end
 
 		-- Apply projectile count bonus (cap at 5x base, unless attribute already exceeds cap)
@@ -238,7 +240,7 @@ function AbilitySystemBase.getAbilityStats(playerEntity: number, abilityId: stri
 			-- Apply penetration multiplier from buff config
 			local penetrationMult = arcaneRuneBuff.penetrationMultiplier or 1.0
 			if stats.penetration then
-				stats.penetration = stats.penetration * penetrationMult
+				stats.penetration = math.max(0, math.floor(stats.penetration * penetrationMult + 0.0001))
 			end
 			
 			-- Apply duration multiplier from buff config (stacks with passive duration multiplier)
@@ -644,10 +646,6 @@ function AbilitySystemBase.createProjectile(
 		return nil
 	end
 	
-	-- Apply spawn offset relative to direction
-	local spawnOffset = balance.spawnOffset or Vector3.new(0, 0, 0)
-	local finalSpawnPosition = spawnPosition + spawnOffset
-
 	-- Ensure model is replicated before creating projectile
 	if balance.modelPath then
 		ModelReplicationService.replicateAbility(abilityId)
@@ -663,6 +661,16 @@ function AbilitySystemBase.createProjectile(
 			baseCollisionRadius = math.max(hitboxSize.X, hitboxSize.Z) / 2
 		end
 	end
+
+	-- Apply spawn offset relative to direction
+	local spawnOffset = balance.spawnOffset or Vector3.new(0, 0, 0)
+	local scale = balance.scale or 1
+	-- Ability size increases vertical spawn point at a reduced rate
+	local sizeYOffset = 0
+	if scale > 1 then
+		sizeYOffset = baseCollisionRadius * (scale - 1) * 0.7
+	end
+	local finalSpawnPosition = spawnPosition + spawnOffset + Vector3.new(0, sizeYOffset, 0)
 
 	-- Apply scale multiplier from size upgrades/passives
 	local scaledCollisionRadius = baseCollisionRadius * (balance.scale or 1)
@@ -683,9 +691,8 @@ function AbilitySystemBase.createProjectile(
 	if balance.hasExplosion then
 		local explosionScale = balance.explosionScale or 1.0
 		local projectileScale = balance.scale or 1.0
-		if explosionScale <= projectileScale * 2 then
-			explosionScale = explosionScale * projectileScale
-		end
+		-- Always apply ability size scaling to explosions (visual + hitbox).
+		explosionScale = explosionScale * projectileScale
 
 		local explosionModelPath = balance.explosionModelPath
 		local explosionClientPath = explosionModelPath

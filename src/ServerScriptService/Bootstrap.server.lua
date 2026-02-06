@@ -71,6 +71,7 @@ local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSyst
 local PickupService = require(game.ServerScriptService.Services.PickupService)
 local BankedHandsService = require(game.ServerScriptService.Services.BankedHandsService)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
+local LoopGameService = require(game.ServerScriptService.Services.LoopGameService)
 
 -- Upgrade Systems
 local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
@@ -333,6 +334,7 @@ function ECSWorldService.Initialize()
 	ProjectileService.init(world, Components, function(entityId)
 		return entityToPlayer[entityId]
 	end)
+	LoopGameService.init()
 	HitFlashSystem.init(world, Components)
 	DeathAnimationSystem.init(world, Components, ECSWorldService)
 	KnockbackSystem.init(world, Components, DirtyService)
@@ -458,6 +460,9 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 		* scalingDamage
 	local baseSpeed = enemyConfig.baseSpeed * scalingSpeed
 
+	local visualScale = (scaling and scaling.visualScale) or 1.0
+	local enemyTier = (scaling and scaling.tier) or "Normal"
+
 	setComponent(entity, EntityType, {
 		type = "Enemy",
 		subtype = enemyType or "Zombie",
@@ -478,8 +483,9 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 		balance = enemyConfig,  -- Store full balance config for behavior-specific logic
 	}, "AI")
 	setComponent(entity, AttackCooldown, { remaining = 0, max = enemyConfig.attackCooldown }, "AttackCooldown")
-	setComponent(entity, Visual, { modelPath = visualPath, visible = true }, "Visual")
+	setComponent(entity, Visual, { modelPath = visualPath, visible = true, scale = visualScale }, "Visual")
 	setComponent(entity, Target, { id = owner }, "Target")
+	setComponent(entity, Components.EnemyTier, { tier = enemyTier }, "EnemyTier")
 
 	-- Owner/aggro metadata for adaptive targeting/exp
 	setComponent(entity, Components.EnemyOwner, { id = owner }, "EnemyOwner")
@@ -1203,6 +1209,10 @@ local function stepWorld(dt: number)
 	-- Game State Manager (check continue timer)
 	debug.profilebegin("GameStateManager")
 	GameStateManager.step(dt)
+	debug.profileend()
+
+	debug.profilebegin("LoopGameService")
+	LoopGameService.step(dt)
 	debug.profileend()
 	
 	-- Session timer sync (1fps throttled) - only send if game is active

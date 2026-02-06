@@ -47,8 +47,8 @@ return {
 	},
 	
 	-- Spawn chances
-	AmbientPowerupChance = 0.00106,  -- chance to spawn powerup instead of exp (5x rarer)
-	EnemyDropPowerupChance = 0.0016,  -- chance enemy drops powerup (5x rarer)
+	AmbientPowerupChance = 0.00318,  -- chance to spawn powerup instead of exp (3x)
+	EnemyDropPowerupChance = 0.0048,  -- chance enemy drops powerup (3x)
 	
 	-- Powerup type weights (equal distribution)
 	PowerupWeights = {

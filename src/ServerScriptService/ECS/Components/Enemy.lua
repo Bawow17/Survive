@@ -46,4 +46,7 @@ EnemyComponents.EnemyOwner = world:component()
 -- EnemyAggro component - Tracks per-player damage/threat for target switching
 EnemyComponents.EnemyAggro = world:component()
 
+-- EnemyTier component - Normal/Super/Elite classification
+EnemyComponents.EnemyTier = world:component()
+
 return EnemyComponents

@@ -653,6 +653,11 @@ function ChargerAISystem.step(dt: number)
 		
 		-- Calculate current move speed (already scaled at spawn)
 		local baseSpeed = (ai and ai.speed) or balance.baseSpeed or 27
+		local speedScale = 1.0
+		local unscaledBase = balance.baseSpeed or baseSpeed
+		if unscaledBase > 0 and ai and ai.speed then
+			speedScale = ai.speed / unscaledBase
+		end
 		local approachSpeed = baseSpeed
 		local slowMultiplier = EnemySlowSystem.getSlowMultiplier(entity)
 		approachSpeed = approachSpeed * slowMultiplier
@@ -869,7 +874,7 @@ function ChargerAISystem.step(dt: number)
 				local lockedDashDir = chargerState.dashDirection or faceDirVec3  -- Fallback if lock failed
 				
 				-- Calculate dash duration
-				local dashSpeed = (balance.dashSpeed or 60) * slowMultiplier
+				local dashSpeed = (balance.dashSpeed or 60) * speedScale * slowMultiplier
 				local dashDist = dist + (balance.dashOvershoot or 30)
 				local dashDur = dashSpeed > 0 and (dashDist / dashSpeed) or (balance.dashDuration or 0.75)
 				dashDur = math.max(balance.dashDuration or 0.75, dashDur)
@@ -890,7 +895,7 @@ function ChargerAISystem.step(dt: number)
 		elseif chargerState.state == S_DASH then
 			-- Fast straight-line dash
 			local dashDir = chargerState.dashDirection or faceDirVec3
-			local dashSpeed = (balance.dashSpeed or 60) * slowMultiplier
+			local dashSpeed = (balance.dashSpeed or 60) * speedScale * slowMultiplier
 			local newVel = dashDir * dashSpeed
 			setVelocity(entity, { x = newVel.X, y = 0, z = newVel.Z })
 			
@@ -922,9 +927,11 @@ function ChargerAISystem.step(dt: number)
 							end
 						end
 						
-						-- Deal dash damage if within vertical reach
+						-- Deal dash damage if within vertical reach (use scaled Damage component)
 						if canHitPlayer and DamageSystem then
-							DamageSystem.applyDamage(playerEntity, balance.baseDamage or 15, "dash", entity)
+							local damageComp = world:get(entity, Components.Damage)
+							local dashDamage = (damageComp and damageComp.amount) or balance.baseDamage or 15
+							DamageSystem.applyDamage(playerEntity, dashDamage, "dash", entity)
 							
 							-- Mark as hit (update state)
 							setChargerState(entity, {

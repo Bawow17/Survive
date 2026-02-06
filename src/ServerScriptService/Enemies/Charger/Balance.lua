@@ -24,11 +24,11 @@ ChargerBalance.attackCooldown = 0.2 -- Not used for Charger (uses dash cooldown 
 
 -- Dash mechanic settings
 ChargerBalance.dashTriggerRange = 35 -- Distance at which Charger enters dash range
-ChargerBalance.windupTime = 0.8 -- Charge-up time before dash
+ChargerBalance.windupTime = 1.2 -- Charge-up time before dash
 ChargerBalance.directionLockDelay = 0.55 -- Time into windup when direction locks (0.55s of 0.8s windup)
-ChargerBalance.dashSpeed = 60 -- Speed during dash (very fast)
+ChargerBalance.dashSpeed = 90 -- Speed during dash (very fast)
 ChargerBalance.dashDuration = 0.85 -- Maximum dash duration
-ChargerBalance.dashOvershoot = 25 -- Distance to dash past the player
+ChargerBalance.dashOvershoot = 60 -- Distance to dash past the player
 ChargerBalance.endlagTime = 0.8 -- Time stuck in place after dash
 ChargerBalance.dashCooldown = 5.5 -- Cooldown before next dash can start
 

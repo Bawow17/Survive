@@ -79,6 +79,25 @@ return {
 	-- Leveling (Dynamic three-phase system)
 	BaseExpRequired = 100,  -- Exp needed for level 2
 	MaxLevel = 1000,
+
+	-- Optional EXP curve overrides (tuning knobs)
+	ExpCurve = {
+		GlobalScale = 1.0,
+		Phase1End = nil, -- override phase breakpoints if set
+		Phase2End = nil,
+		Phase2Scaling = 1.015,
+		Phase3BaseMultiplier = 1.08,
+		Phase3LinearFactor = 0.01,
+		dampingStart = 35,
+		dampingEnd = 80,
+		dampingScale = 0.5,
+		maxGrowthPerLevel = 0.03,
+	},
+
+	-- EXP reward scaling based on difficulty coefficient
+	ExpRewardScaling = {
+		CoeffExp = 1.0,
+	},
 	
 	-- Three-phase progression (automatically scales with upgrade count)
 	ProgressionPhases = {

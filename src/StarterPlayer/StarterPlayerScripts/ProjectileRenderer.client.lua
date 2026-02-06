@@ -57,6 +57,9 @@ type PetalPayload = {
 type BeamPayload = {
 	length: number?,
 	size: Vector3?,
+	offset: Vector3?,
+	rotation: CFrame?,
+	lengthAxis: string?,
 }
 
 type ProjectileRecord = {
@@ -79,6 +82,14 @@ type ProjectileRecord = {
 	homing: HomingPayload?,
 	petal: PetalPayload?,
 	beam: BeamPayload?,
+	beamVisual: {
+		start: BasePart?,
+		ending: BasePart?,
+		hitbox: BasePart?,
+		baseHitboxSize: Vector3?,
+		parts: {BasePart}?,
+	}?,
+	beamEndJitter: number?,
 	lastSimTime: number?,
 	lastPos: Vector3?,
 	lastHomingUpdate: number?,
@@ -95,6 +106,9 @@ local modelPoolByPath: {[string]: {Model}} = {}
 local impactPoolByPath: {[string]: {Model}} = {}
 local MAX_POOL_SIZE = 80
 local MAX_IMPACT_POOL_SIZE = 20
+local MAX_BEAM_POOL_SIZE = 40
+local BEAM_END_EXTEND_MIN = -10
+local BEAM_END_EXTEND_MAX = 10
 local explosionTokenCounter = 0
 local PETAL_COLOR_CLOSEST = Color3.fromRGB(255, 182, 193)
 local PETAL_COLOR_TOUGHEST = Color3.fromRGB(173, 216, 230)
@@ -105,6 +119,10 @@ local petalTargetCache: {[number]: {time: number, range: number, closest: Vector
 local enemiesFolder: Folder? = workspace:FindFirstChild("Enemies") :: Folder?
 local enemySnapshot: {{pos: Vector3}} = {}
 local lastEnemySnapshot = 0
+
+local refractionsTemplate: Instance? = nil
+local beamPool: {Instance} = {}
+local beamVisualsByModel: {[Instance]: {start: BasePart?, ending: BasePart?, hitbox: BasePart?, baseHitboxSize: Vector3?, parts: {BasePart}?}} = {}
 
 local function toVector3(value: any): Vector3?
 	if typeof(value) == "Vector3" then
@@ -170,6 +188,86 @@ local function configureModel(model: Model): (BasePart?, {BasePart})
 	return primary, parts
 end
 
+local function getRefractionsTemplate(): Instance?
+	if refractionsTemplate and refractionsTemplate.Parent then
+		return refractionsTemplate
+	end
+	local template = workspace:FindFirstChild("Refractions")
+	if template then
+		refractionsTemplate = template
+		return template
+	end
+	return nil
+end
+
+local function configureBeamModel(model: Instance): {start: BasePart?, ending: BasePart?, hitbox: BasePart?, baseHitboxSize: Vector3?, parts: {BasePart}?}
+	local parts = {}
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			if descendant:GetAttribute("__OrigTransparency") == nil then
+				descendant:SetAttribute("__OrigTransparency", descendant.Transparency)
+			end
+			if descendant:GetAttribute("__OrigSize") == nil then
+				descendant:SetAttribute("__OrigSize", descendant.Size)
+			end
+			descendant.Anchored = true
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+			table.insert(parts, descendant)
+		end
+	end
+	local startPart = model:FindFirstChild("Start", true)
+	local endPart = model:FindFirstChild("End", true)
+	local hitbox = model:FindFirstChild("Hitbox", true)
+	local baseHitboxSize = nil
+	if hitbox and hitbox:IsA("BasePart") then
+		baseHitboxSize = hitbox.Size
+	end
+	return {
+		start = startPart :: BasePart?,
+		ending = endPart :: BasePart?,
+		hitbox = hitbox :: BasePart?,
+		baseHitboxSize = baseHitboxSize,
+		parts = parts,
+	}
+end
+
+local function acquireBeamModel(): (Instance?, {start: BasePart?, ending: BasePart?, hitbox: BasePart?, baseHitboxSize: Vector3?, parts: {BasePart}?}?)
+	local model = #beamPool > 0 and table.remove(beamPool) or nil
+	if model then
+		model.Parent = projectilesFolder
+		return model, beamVisualsByModel[model]
+	end
+
+	local template = getRefractionsTemplate()
+	if not template then
+		return nil, nil
+	end
+	model = template:Clone()
+	model.Parent = projectilesFolder
+	model:SetAttribute("RecordProjectile", true)
+	local visual = configureBeamModel(model)
+	beamVisualsByModel[model] = visual
+	return model, visual
+end
+
+local function releaseBeamModel(record: ProjectileRecord)
+	local model = record.model
+	if not model then
+		return
+	end
+	model.Parent = nil
+	if #beamPool < MAX_BEAM_POOL_SIZE then
+		table.insert(beamPool, model)
+	end
+	record.model = nil
+	record.parts = nil
+	record.primary = nil
+	record.beamVisual = nil
+	record.renderEnabled = false
+end
+
 local function acquireModel(modelPath: string?): (Model?, BasePart?, {BasePart}?)
 	if not modelPath then
 		return nil, nil, nil
@@ -225,6 +323,10 @@ local function releaseModel(record: ProjectileRecord)
 	if not model then
 		return
 	end
+	if record.beam and record.beamVisual then
+		releaseBeamModel(record)
+		return
+	end
 	model.Parent = nil
 	if record.modelPath then
 		local pool = modelPoolByPath[record.modelPath]
@@ -243,6 +345,9 @@ local function releaseModel(record: ProjectileRecord)
 end
 
 local function applyVisual(record: ProjectileRecord)
+	if record.beam and record.beamVisual then
+		return
+	end
 	local model = record.model
 	if not model then
 		return
@@ -272,6 +377,9 @@ local function applyVisual(record: ProjectileRecord)
 end
 
 local function updateModelTransform(record: ProjectileRecord, position: Vector3, direction: Vector3)
+	if record.beam and record.beamVisual then
+		return
+	end
 	local model = record.model
 	if not model then
 		return
@@ -281,6 +389,69 @@ local function updateModelTransform(record: ProjectileRecord, position: Vector3,
 		return
 	end
 	model:PivotTo(CFrame.lookAt(position, position + direction))
+end
+
+local function updateBeamTransform(record: ProjectileRecord, pivot: Vector3, direction: Vector3)
+	local visual = record.beamVisual
+	local beam = record.beam
+	if not visual or not beam then
+		return
+	end
+	if direction.Magnitude == 0 then
+		direction = Vector3.new(0, 0, 1)
+	end
+	local beamSize = beam.size
+	local beamOffset = beam.offset or Vector3.new(0, 0, 0)
+	local beamRotation = beam.rotation
+	local lengthAxis = beam.lengthAxis or "Z"
+	local length = beam.length or 0
+	if beamSize then
+		if lengthAxis == "X" then
+			length = beamSize.X
+		elseif lengthAxis == "Y" then
+			length = beamSize.Y
+		else
+			length = beamSize.Z
+		end
+	end
+	if length <= 0 then
+		length = 1
+	end
+
+	local cf = CFrame.lookAt(pivot, pivot + direction)
+	if beamRotation then
+		cf = cf * beamRotation
+	end
+	local center = cf:PointToWorldSpace(beamOffset)
+	local axisDir = cf.LookVector
+	if lengthAxis == "X" then
+		axisDir = cf.RightVector
+	elseif lengthAxis == "Y" then
+		axisDir = cf.UpVector
+	end
+	local halfLen = length * 0.5
+	local startPos = center - axisDir * halfLen
+	local endPos = center + axisDir * halfLen
+	if record.beamEndJitter == nil then
+		record.beamEndJitter = (math.random() * (BEAM_END_EXTEND_MAX - BEAM_END_EXTEND_MIN)) + BEAM_END_EXTEND_MIN
+	end
+	endPos = endPos + axisDir * (record.beamEndJitter :: number)
+
+	if visual.start then
+		visual.start.CFrame = CFrame.lookAt(startPos, endPos)
+	end
+	if visual.ending then
+		visual.ending.CFrame = CFrame.lookAt(endPos, endPos + axisDir)
+	end
+	if visual.hitbox then
+		if beamSize then
+			visual.hitbox.Size = beamSize
+		elseif visual.baseHitboxSize then
+			visual.hitbox.Size = visual.baseHitboxSize
+		end
+		local hitboxCf = CFrame.fromMatrix(center, cf.RightVector, cf.UpVector, cf.LookVector)
+		visual.hitbox.CFrame = hitboxCf
+	end
 end
 
 local function playExplosionVfx(model: Model)
@@ -652,14 +823,33 @@ local function ensureModel(record: ProjectileRecord, position: Vector3)
 		record.renderEnabled = false
 		return
 	end
-	local model, _, parts = acquireModel(record.modelPath)
-	if not model then
-		return
+	if record.beam then
+		local model, visual = acquireBeamModel()
+		if model and visual then
+			record.model = model
+			record.parts = visual.parts
+			record.beamVisual = visual
+			record.renderEnabled = true
+		else
+			local fallbackModel, _, parts = acquireModel(record.modelPath)
+			if not fallbackModel then
+				return
+			end
+			record.model = fallbackModel
+			record.parts = parts
+			record.renderEnabled = true
+			applyVisual(record)
+		end
+	else
+		local model, _, parts = acquireModel(record.modelPath)
+		if not model then
+			return
+		end
+		record.model = model
+		record.parts = parts
+		record.renderEnabled = true
+		applyVisual(record)
 	end
-	record.model = model
-	record.parts = parts
-	record.renderEnabled = true
-	applyVisual(record)
 end
 
 local function despawnProjectile(id: number)
@@ -777,7 +967,11 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 		end
 
 		ensureModel(record, initialPos)
-		updateModelTransform(record, initialPos, direction)
+		if record.beam and record.beamVisual then
+			updateBeamTransform(record, initialPos, direction)
+		else
+			updateModelTransform(record, initialPos, direction)
+		end
 	end
 end)
 
@@ -809,7 +1003,11 @@ ProjectilesImpactBatch.OnClientEvent:Connect(function(payloads: any)
 		local impactPos = toVector3(entry.pos)
 		local record = activeProjectiles[id]
 		if record and impactPos then
-			updateModelTransform(record, impactPos, record.direction)
+			if record.beam and record.beamVisual then
+				updateBeamTransform(record, impactPos, record.direction)
+			else
+				updateModelTransform(record, impactPos, record.direction)
+			end
 		end
 		if impactPos and entry.effect then
 			spawnImpactEffect(entry.effect, impactPos)
@@ -927,7 +1125,11 @@ RunService.Heartbeat:Connect(function(dt: number)
 		end
 
 		if record.model then
-			updateModelTransform(record, pos, record.direction)
+			if record.beam and record.beamVisual then
+				updateBeamTransform(record, pos, record.direction)
+			else
+				updateModelTransform(record, pos, record.direction)
+			end
 		end
 	end
 end)

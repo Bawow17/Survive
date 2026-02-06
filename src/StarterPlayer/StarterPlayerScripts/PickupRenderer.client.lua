@@ -26,6 +26,7 @@ local BOB_FREQUENCY = 1.6
 local SEEK_SPEED = 120
 local CHECK_INTERVAL = 0.1
 local REQUEST_RETRY_DELAY = 0.4
+local SEEK_TIMEOUT = 1.5
 local MAGNET_RADIUS_MULTIPLIER = 6
 local GLOBAL_MAGNET_RADIUS = 1000
 local ORB_TEMPLATE_PATH = {"ContentDrawer", "ItemModels", "OrbTemplate"}
@@ -53,6 +54,7 @@ type PickupRecord = {
 	seed: number,
 	lastRequestAt: number?,
 	seeking: boolean?,
+	seekStartAt: number?,
 }
 
 local activePickups: {[number]: PickupRecord} = {}
@@ -235,7 +237,7 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			existing.value = data.value or existing.value
 			existing.kind = data.kind or existing.kind
 			applyVisual(existing)
-			existing.part.CFrame = CFrame.new(pos)
+			existing.primary.CFrame = CFrame.new(pos)
 			continue
 		end
 
@@ -376,12 +378,22 @@ RunService.Heartbeat:Connect(function(dt: number)
 				if not record.lastRequestAt or (now - record.lastRequestAt) >= REQUEST_RETRY_DELAY then
 					record.lastRequestAt = now
 					record.seeking = true
+					record.seekStartAt = now
 					PickupRequest:FireServer(record.id)
 				end
 			elseif magnetActive and distSq <= magnetRadiusSq and record.kind ~= "expRed" then
 				record.seeking = true
 			elseif not record.lastRequestAt then
 				record.seeking = false
+			end
+		end
+
+		if record.seeking and record.lastRequestAt and record.seekStartAt and not magnetActive then
+			if (now - record.seekStartAt) > SEEK_TIMEOUT then
+				record.seeking = false
+				record.lastRequestAt = nil
+				record.seekStartAt = nil
+				record.currentPos = record.position
 			end
 		end
 	end

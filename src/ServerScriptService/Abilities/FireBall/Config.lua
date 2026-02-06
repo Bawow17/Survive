@@ -34,6 +34,15 @@ return {
 	StayHorizontal = false, -- Keep projectiles horizontal when player is grounded
 	AlwaysStayHorizontal = true, -- Lock Y-axis to spawn height (works even when airborne, overrides StayHorizontal)
 	StickToPlayer = false, -- Projectile follows player movement in all axes X/Y/Z (overrides AlwaysStayHorizontal)
+
+	-- Upgrade stat whitelist
+	upgradeStatWhitelist = {
+		damage = true,
+		cooldownReduction = true,
+		projectileCount = true,
+		abilitySize = true,
+		abilityDuration = true,
+	},
 	
 	-- Homing configuration (only used when targetingMode = 3)
 	homingStrength = 180, -- Turn speed in degrees per second

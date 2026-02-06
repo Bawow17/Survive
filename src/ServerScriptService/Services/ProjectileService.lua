@@ -281,7 +281,9 @@ local function queueSpawnForPlayer(player: Player, record: ProjectileRecord)
 		beam = record.beam and {
 			length = record.beam.length,
 			size = record.beam.size,
-			-- offset/rotation are server-only (not needed for client visuals)
+			offset = record.beam.offset,
+			rotation = record.beam.rotation,
+			lengthAxis = record.beam.lengthAxis,
 		} or nil,
 	})
 end
@@ -878,6 +880,13 @@ function ProjectileService.spawnProjectile(payload: {
 			direction = Vector3.new(0, 0, 1)
 		end
 	end
+	-- Only Refractions should spawn beam projectiles. If any other ability
+	-- accidentally passes beam data, strip it to prevent infinite pierce.
+	if payload.beam and payload.kind ~= "Refractions" then
+		payload.beam = nil
+	end
+
+	local basePierce = math.max(math.floor(payload.pierce or 0), 0)
 	local record: ProjectileRecord = {
 		id = id,
 		kind = payload.kind,
@@ -892,8 +901,9 @@ function ProjectileService.spawnProjectile(payload: {
 		lifetime = lifetime,
 		lastSimTime = now,
 		lastPos = payload.origin,
-		pierceRemaining = (payload.pierce or 0) + 1,
-		basePierce = payload.pierce or 0,
+		pierceRemaining = basePierce + 1,
+		basePierce = basePierce,
+		hitCount = 0,
 		hitSet = {},
 		hitCooldowns = {},
 		hitCooldown = payload.hitCooldown or 0.04,
@@ -1434,8 +1444,8 @@ function ProjectileService.step(dt: number)
 				elseif collision and collision.radius then
 					enemyRadius = collision.radius
 				end
-				local hit = false
-				local hitPos = enemyPos
+				local hitThis = false
+				local hitPosCandidate = enemyPos
 				if record.beam then
 					local beamLength = (segmentEnd - segmentStart).Magnitude
 					local halfX = record.radius
@@ -1477,19 +1487,19 @@ function ProjectileService.step(dt: number)
 					if math.abs(coordLen) <= (lengthHalf + enemyRadius)
 						and math.abs(coordA) <= (axisHalfA + enemyRadius)
 						and math.abs(coordB) <= (axisHalfB + enemyRadius) then
-						hit = true
+						hitThis = true
 					end
 				else
 					local closest = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
 					local distSq = distanceSq(closest, enemyPos)
 					local hitRadius = record.radius + enemyRadius
 					if distSq <= hitRadius * hitRadius then
-						hit = true
-						hitPos = closest
+						hitThis = true
+						hitPosCandidate = closest
 					end
 				end
 
-				if hit then
+				if hitThis then
 					if record.collision and record.collision.useRaycast then
 						if not passesRaycastCheck(record.lastPos, enemyPos) then
 							continue
@@ -1509,10 +1519,11 @@ function ProjectileService.step(dt: number)
 					end
 					record.hitCooldowns[enemyId] = now + record.hitCooldown
 					if not record.beam then
+						record.hitCount += 1
 						record.pierceRemaining -= 1
 					end
 					hitBudget -= 1
-					hitPos = hitPos
+					hitPos = hitPosCandidate
 
 					if record.homing and not record.beam then
 						record.homing.targetEntity = nil
@@ -1520,24 +1531,25 @@ function ProjectileService.step(dt: number)
 
 					if record.beam then
 						-- Beam persists; no despawn or split handling.
-						hit = false
+						-- no despawn
 					elseif record.splitOnHit and not record.splitOnHit.used then
 						record.splitOnHit.used = true
-						spawnSplitProjectiles(record, hitPos, now)
+						spawnSplitProjectiles(record, hitPosCandidate, now)
 						hit = true
 						hitReason = "split"
 					elseif record.aoe and record.aoe.trigger == "hit" then
-						local shouldDespawn = record.pierceRemaining <= 0
-						startExplosion(record, hitPos, "exploded", shouldDespawn)
+						local shouldDespawn = record.pierceRemaining <= 0 or record.hitCount >= ((record.basePierce or 0) + 1)
+						startExplosion(record, hitPosCandidate, "exploded", shouldDespawn)
 						if shouldDespawn then
 							hit = true
 							hitReason = "exploded"
 						end
-					elseif record.pierceRemaining <= 0 then
+					elseif record.pierceRemaining <= 0 or record.hitCount >= ((record.basePierce or 0) + 1) then
 						hit = true
 					end
 
 					if hit then
+						hitPos = hitPosCandidate
 						break
 					end
 				end
@@ -1551,6 +1563,16 @@ function ProjectileService.step(dt: number)
 
 		if hit then
 			local impactPos = hitReason == "exploded" and nil or hitPos
+			if record.hitCount and (record.hitCount > ((record.basePierce or 0) + 1)) then
+				warn(string.format(
+					"[ProjectileService] Pierce mismatch for %s id=%d hits=%d basePierce=%s remaining=%s",
+					tostring(record.kind),
+					record.id,
+					record.hitCount,
+					tostring(record.basePierce),
+					tostring(record.pierceRemaining)
+				))
+			end
 			despawnProjectile(record, hitReason, impactPos)
 		end
 	end

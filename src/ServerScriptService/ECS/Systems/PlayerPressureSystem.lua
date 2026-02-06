@@ -2,6 +2,7 @@
 -- PlayerPressureSystem - Computes player power + pressure for adaptive enemy scaling
 
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
+local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 
 local PlayerPressureSystem = {}
 
@@ -60,14 +61,22 @@ local function computeGeneralDeltas(effects: any): {[string]: number}
 	local projectileCountBonus = effects and effects.projectileCountBonus or 0
 	local projectileCountMult = 1 + projectileCountBonus
 
-	local penetrationMult = effects and effects.penetrationMultiplier or 1.0
+	local penetrationBonus = effects and effects.penetrationBonus or 0
+	local penetrationMult = (effects and effects.penetrationMultiplier or 1.0) * (1 + penetrationBonus)
 	local sizeMult = effects and effects.sizeMultiplier or 1.0
 	local durationMult = effects and effects.durationMultiplier or 1.0
 
+	local baseHealth = PlayerBalance.BaseMaxHealth or 100
 	local healthMult = effects and effects.healthMultiplier or 1.0
+	local healthFlat = effects and effects.healthFlatBonus or 0
+	local healthEffective = if baseHealth > 0 then (baseHealth * healthMult + healthFlat) / baseHealth else healthMult
 	local armorReduction = effects and effects.armorReduction or 0
 	local armorMult = 1 + armorReduction
+	local baseRegen = PlayerBalance.HealthRegenRate or 0
 	local regenMult = effects and effects.regenMultiplier or 1.0
+	local regenFlat = effects and effects.regenFlatBonus or 0
+	local regenRate = baseRegen * regenMult + regenFlat
+	local regenEffective = if baseRegen > 0 then (regenRate / baseRegen) else regenRate
 	local lifesteal = effects and effects.lifesteal or 0
 	local lifestealMult = 1 + lifesteal
 
@@ -83,9 +92,9 @@ local function computeGeneralDeltas(effects: any): {[string]: number}
 		Penetration = penetrationMult - 1,
 		Size = sizeMult - 1,
 		Duration = durationMult - 1,
-		Health = healthMult - 1,
+		Health = healthEffective - 1,
 		Armor = armorMult - 1,
-		Regen = regenMult - 1,
+		Regen = regenEffective - 1,
 		Lifesteal = lifestealMult - 1,
 		MoveSpeed = moveSpeedMult - 1,
 		MobilityDistance = mobilityBase - 1,

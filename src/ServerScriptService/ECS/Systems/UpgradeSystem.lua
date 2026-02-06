@@ -29,6 +29,12 @@ local AfterimageClones: any
 local RNG = Random.new()
 local ABILITY_REPEAT_BIAS = 0.25
 local PASSIVE_REPEAT_BIAS = 0.25
+local RARITY_ORDER = {
+	Common = 1,
+	Rare = 2,
+	Epic = 3,
+	Legendary = 4,
+}
 
 local playerQuery: any
 local REBUILD_INTERVAL = 1.0
@@ -138,6 +144,9 @@ local function ensureUpgradeState(playerEntity: number): any
 	if not upgrades.passives.counts then
 		upgrades.passives.counts = {}
 	end
+	if not upgrades.passives.statStacks then
+		upgrades.passives.statStacks = {}
+	end
 	if not upgrades.passives.levels then
 		upgrades.passives.levels = {}
 	end
@@ -161,6 +170,9 @@ local function ensureAbilityUpgradeState(upgrades: any, abilityId: string): any
 	if not abilityState.counts then
 		abilityState.counts = {}
 	end
+	if not abilityState.statStacks then
+		abilityState.statStacks = {}
+	end
 	return abilityState
 end
 
@@ -173,6 +185,20 @@ local function applySoftCap(rawValue: number, cap: number?, curveK: number?): nu
 	end
 	local k = curveK or UpgradeDefs.SoftCaps.curveK
 	return cap * (1 - math.exp(-k * rawValue / cap))
+end
+
+local function computeStackMultiplier(values: {number}?): number
+	if not values or #values == 0 then
+		return 1
+	end
+	local mult = 1
+	for _, value in ipairs(values) do
+		if typeof(value) == "number" then
+			local clamped = math.clamp(value, -0.95, 0.95)
+			mult = mult * (1 - clamped)
+		end
+	end
+	return mult
 end
 
 local function lerp(a: number, b: number, t: number): number
@@ -191,6 +217,13 @@ local passiveStatById: {[string]: any} = {}
 for _, def in pairs(UpgradeDefs.PassiveStats) do
 	if def.id then
 		passiveStatById[def.id] = def
+	end
+end
+
+local abilityStatById: {[string]: any} = {}
+for _, def in pairs(UpgradeDefs.AbilityStats) do
+	if def.id then
+		abilityStatById[def.id] = def
 	end
 end
 
@@ -240,16 +273,30 @@ local function getRarityWeights(luckValue: number): {[string]: number}
 	local epicWeight = UpgradeDefs.Rarities.Epic.weight
 	local legendaryWeight = UpgradeDefs.Rarities.Legendary.weight
 
-	local luck = math.max(0, luckValue)
-	local epicMult = math.min(1 + luck, UpgradeDefs.Luck.maxEpicMultiplier)
-	local legendaryMult = math.min(1 + luck * 1.2, UpgradeDefs.Luck.maxLegendaryMultiplier)
+	local luckBonus = math.max(0, (luckValue or 1) - 1)
+	local epicMult = math.min(1 + luckBonus, UpgradeDefs.Luck.maxEpicMultiplier)
+	local legendaryMult = math.min(1 + luckBonus, UpgradeDefs.Luck.maxLegendaryMultiplier)
 
 	epicWeight = epicWeight * epicMult
 	legendaryWeight = legendaryWeight * legendaryMult
 
 	local remaining = 1 - epicWeight - legendaryWeight
 	if remaining < 0 then
-		remaining = 0.001
+		local total = commonWeight + rareWeight + epicWeight + legendaryWeight
+		if total <= 0 then
+			return {
+				Common = 0.5,
+				Rare = 0.3,
+				Epic = 0.15,
+				Legendary = 0.05,
+			}
+		end
+		return {
+			Common = commonWeight / total,
+			Rare = rareWeight / total,
+			Epic = epicWeight / total,
+			Legendary = legendaryWeight / total,
+		}
 	end
 
 	local baseCommon = UpgradeDefs.Rarities.Common.weight
@@ -259,17 +306,44 @@ local function getRarityWeights(luckValue: number): {[string]: number}
 	commonWeight = remaining * commonRatio
 	rareWeight = remaining * (1 - commonRatio)
 
-	if commonWeight < UpgradeDefs.Luck.minCommonWeight then
-		commonWeight = UpgradeDefs.Luck.minCommonWeight
-		rareWeight = math.max(0, 1 - commonWeight - epicWeight - legendaryWeight)
-	end
-
 	return {
 		Common = commonWeight,
 		Rare = rareWeight,
 		Epic = epicWeight,
 		Legendary = legendaryWeight,
 	}
+end
+
+local function isRarityAtLeast(rarityId: string, minRarityId: string): boolean
+	local rIndex = RARITY_ORDER[rarityId] or 1
+	local minIndex = RARITY_ORDER[minRarityId] or 1
+	return rIndex >= minIndex
+end
+
+local function clampRarityId(rarityId: string, minRarityId: string): string
+	if not minRarityId then
+		return rarityId
+	end
+	if isRarityAtLeast(rarityId, minRarityId) then
+		return rarityId
+	end
+	return minRarityId
+end
+
+local function getRarityScale(rarityId: string): number
+	if UpgradeDefs.RarityScales and UpgradeDefs.RarityScales[rarityId] then
+		return UpgradeDefs.RarityScales[rarityId]
+	end
+	local rarity = UpgradeDefs.Rarities[rarityId]
+	return (rarity and rarity.scale) or 1
+end
+
+local function getStatValue(def: any, rarityId: string): number
+	if def.rarityValues then
+		return def.rarityValues[rarityId] or 0
+	end
+	local baseValue = def.baseValue or def.max or 0
+	return baseValue * getRarityScale(rarityId)
 end
 
 local function rollRarity(playerEntity: number): any
@@ -358,10 +432,13 @@ local function rollAbilityStatCount(rarity: any, poolSize: number): number
 	return choices[#choices].count
 end
 
-local function pickAbilityStatDefs(abilityBalance: any, upgrades: any, abilityId: string): {any}
+local function pickAbilityStatDefs(abilityBalance: any, upgrades: any, abilityId: string, choiceRarityId: string): {any}
 	local statPool = {}
 	local abilityState = ensureAbilityUpgradeState(upgrades, abilityId)
 	for _, def in pairs(UpgradeDefs.AbilityStats) do
+		if def.minRarity and not isRarityAtLeast(choiceRarityId, def.minRarity) then
+			continue
+		end
 		if abilityBalance and abilityBalance.upgradeStatBlacklist and abilityBalance.upgradeStatBlacklist[def.id] then
 			continue
 		end
@@ -392,11 +469,14 @@ local function pickAbilityStatDefs(abilityBalance: any, upgrades: any, abilityId
 	return statPool
 end
 
-local function pickPassiveStatDefs(upgrades: any, playerEntity: number): {any}
+local function pickPassiveStatDefs(upgrades: any, playerEntity: number, choiceRarityId: string): {any}
 	local statPool = {}
 	local mobilityData = world and Components and world:get(playerEntity, Components.MobilityData) or nil
 	local equippedMobility = mobilityData and mobilityData.equippedMobility or nil
 	for _, def in pairs(UpgradeDefs.PassiveStats) do
+		if def.minRarity and not isRarityAtLeast(choiceRarityId, def.minRarity) then
+			continue
+		end
 		if def.hidden then
 			continue
 		end
@@ -431,91 +511,98 @@ local function pickPassiveStatDefs(upgrades: any, playerEntity: number): {any}
 	return statPool
 end
 
-local function rollStatValues(selectedStats: {any}, rarity: any): ({[string]: number}, {[string]: number})
+local function rollStatValues(selectedStats: {any}, rarity: any, playerEntity: number?): ({[string]: number}, {[string]: number}, {[string]: string})
 	local rolls: {[string]: number} = {}
 	local counts: {[string]: number} = {}
+	local statRarities: {[string]: string} = {}
+	local choiceRarityId = (rarity and rarity.id) or "Common"
 
-	local percentStats = {}
-	for _, def in ipairs(selectedStats) do
+	local function rollRarityId(): string
+		if playerEntity then
+			return rollRarity(playerEntity).id
+		end
+		return choiceRarityId
+	end
+
+	local function applyStat(def: any, rarityId: string)
+		local finalRarity = clampRarityId(rarityId, def.minRarity)
+		local value = getStatValue(def, finalRarity)
+		statRarities[def.id] = finalRarity
 		if def.kind == "count" then
-			local increment = def.increment or 1
-			if rarity.id == "Legendary" then
-				increment = def.legendaryIncrement or (increment * 2)
-			end
-			counts[def.id] = (counts[def.id] or 0) + increment
+			counts[def.id] = (counts[def.id] or 0) + value
 		else
-			table.insert(percentStats, def)
+			rolls[def.id] = (rolls[def.id] or 0) + value
 		end
 	end
 
-	if #percentStats == 0 then
-		return rolls, counts
+	local guaranteedIndex = nil
+	if #selectedStats > 1 then
+		guaranteedIndex = RNG:NextInteger(1, #selectedStats)
 	end
 
-	local rarityId = rarity and rarity.id or "Common"
-	local baseBias = {
-		Common = 2.2,
-		Rare = 1.6,
-		Epic = 1.25,
-		Legendary = 1.0,
-	}
-	local bias = baseBias[rarityId] or 1.6
-	local statCountPenalty = 0.35 * math.max(#percentStats - 1, 0)
-	local exponent = bias + statCountPenalty
-
-	local function rollPercent(def: any): number
-		local maxValue = (def.rarityMax and def.rarityMax[rarityId]) or def.max or 0.0001
-		local minValue = (def.rarityMin and def.rarityMin[rarityId]) or def.min or 0
-		if maxValue < minValue then
-			minValue = maxValue
-		end
-
-		local roll = RNG:NextNumber()
-		local t = roll ^ exponent
-		local minRollT = (rarity and rarity.minRollT) or 0
-		if minRollT > 0 then
-			t = minRollT + (1 - minRollT) * t
-		end
-		local value = lerp(minValue, maxValue, t)
-		if def.hardCap then
-			value = math.min(value, maxValue)
-		end
-		return value
-	end
-
-	for _, def in ipairs(percentStats) do
+	for index, def in ipairs(selectedStats) do
 		if def.kind == "paired" then
 			local subStats = def.subStats or {}
-			for _, subId in ipairs(subStats) do
-				local subDef = passiveStatById[subId]
-				if subDef then
-					local rollValue = rollPercent(subDef)
-					rolls[subDef.id] = (rolls[subDef.id] or 0) + rollValue
+			if #subStats > 0 then
+				local guaranteedSubIndex = RNG:NextInteger(1, #subStats)
+				for subIndex, subId in ipairs(subStats) do
+					local subDef = passiveStatById[subId]
+					if subDef then
+						local rarityId = if subIndex == guaranteedSubIndex then choiceRarityId else rollRarityId()
+						local finalRarity = clampRarityId(rarityId, subDef.minRarity)
+						local value = getStatValue(subDef, finalRarity)
+						statRarities[subDef.id] = finalRarity
+						if subDef.kind == "count" then
+							counts[subDef.id] = (counts[subDef.id] or 0) + value
+						else
+							rolls[subDef.id] = (rolls[subDef.id] or 0) + value
+						end
+					end
 				end
 			end
 		else
-			local rollValue = rollPercent(def)
-			rolls[def.id] = (rolls[def.id] or 0) + rollValue
+			local rarityId: string
+			if #selectedStats == 1 then
+				rarityId = choiceRarityId
+			elseif guaranteedIndex and index == guaranteedIndex then
+				rarityId = choiceRarityId
+			else
+				rarityId = rollRarityId()
+			end
+			applyStat(def, rarityId)
 		end
 	end
 
-	return rolls, counts
+	return rolls, counts, statRarities
 end
 
-local function buildStatDescription(statDefs: {any}, rolls: {[string]: number}, counts: {[string]: number}): (string, {any})
+local function buildStatDescription(statDefs: {any}, rolls: {[string]: number}, counts: {[string]: number}, statRarities: {[string]: string}?): (string, {any})
 	local parts = {}
 	local textParts = {}
-	local function pushPart(valueText: string, nameText: string, statId: string, score: number?)
+
+	local function formatFlat(value: number): string
+		if math.abs(value - math.floor(value + 0.0001)) < 1e-4 then
+			return string.format("%d", math.floor(value + 0.0001))
+		end
+		return string.format("%.1f", value)
+	end
+
+	local function pushPart(valueText: string, nameText: string, statId: string, rarityId: string?)
 		local text = if valueText ~= "" then string.format("%s %s", valueText, nameText) else nameText
-		table.insert(parts, {
+		local part = {
 			text = text,
 			valueText = valueText,
 			nameText = nameText,
 			statId = statId,
-			score = score,
-		})
+			rarityId = rarityId,
+		}
+		if rarityId and UpgradeDefs.Rarities[rarityId] then
+			part.color = UpgradeDefs.Rarities[rarityId].color
+		end
+		table.insert(parts, part)
 		table.insert(textParts, text)
 	end
+
 	for _, def in ipairs(statDefs) do
 		if def.kind == "count" then
 			local countValue = counts[def.id]
@@ -526,7 +613,7 @@ local function buildStatDescription(statDefs: {any}, rolls: {[string]: number}, 
 				else
 					displayValue = string.format("%.1f", countValue)
 				end
-				pushPart("+" .. displayValue, def.display, def.id, nil)
+				pushPart("+" .. displayValue, def.display, def.id, statRarities and statRarities[def.id])
 			end
 		elseif def.kind == "paired" then
 			local subStats = def.subStats or {}
@@ -535,11 +622,13 @@ local function buildStatDescription(statDefs: {any}, rolls: {[string]: number}, 
 				if subDef then
 					local value = rolls[subDef.id]
 					if value and value > 0 then
-						local score = if subDef.max and subDef.max > 0 then value / subDef.max else nil
-						if subDef.effect == "reduce" then
-							pushPart("-" .. formatPercent(value), subDef.display, subDef.id, score)
+						local rarityId = statRarities and statRarities[subDef.id]
+						if subDef.kind == "flat" then
+							pushPart("+" .. formatFlat(value), subDef.display, subDef.id, rarityId)
+						elseif subDef.effect == "reduce" then
+							pushPart("-" .. formatPercent(value), subDef.display, subDef.id, rarityId)
 						else
-							pushPart("+" .. formatPercent(value), subDef.display, subDef.id, score)
+							pushPart("+" .. formatPercent(value), subDef.display, subDef.id, rarityId)
 						end
 					end
 				end
@@ -547,14 +636,16 @@ local function buildStatDescription(statDefs: {any}, rolls: {[string]: number}, 
 		else
 			local value = rolls[def.id]
 			if value and value > 0 then
-				local score = if def.max and def.max > 0 then value / def.max else nil
-				if def.effect == "reduce" then
-					pushPart("-" .. formatPercent(value), def.display, def.id, score)
+				local rarityId = statRarities and statRarities[def.id]
+				if def.kind == "flat" then
+					pushPart("+" .. formatFlat(value), def.display, def.id, rarityId)
+				elseif def.effect == "reduce" then
+					pushPart("-" .. formatPercent(value), def.display, def.id, rarityId)
 				else
-					pushPart("+" .. formatPercent(value), def.display, def.id, score)
+					pushPart("+" .. formatPercent(value), def.display, def.id, rarityId)
 				end
 				if def.id == "expGain" then
-					pushPart("+" .. formatPercent(value), "Pickup Range", "pickupRange", score)
+					pushPart("+" .. formatPercent(value * 0.2), "Pickup Range", "pickupRange", rarityId)
 				end
 			end
 		end
@@ -564,6 +655,17 @@ end
 
 local function assignPartColors(parts: {any}, baseRarity: any): {any}
 	if not parts or #parts == 0 or not baseRarity then
+		return parts
+	end
+
+	local needsColor = false
+	for _, part in ipairs(parts) do
+		if part.color == nil then
+			needsColor = true
+			break
+		end
+	end
+	if not needsColor then
 		return parts
 	end
 
@@ -593,7 +695,9 @@ local function assignPartColors(parts: {any}, baseRarity: any): {any}
 
 	if not anyScore then
 		for _, part in ipairs(parts) do
-			part.color = baseRarity.color
+			if part.color == nil then
+				part.color = baseRarity.color
+			end
 		end
 		return parts
 	end
@@ -619,10 +723,28 @@ local function assignPartColors(parts: {any}, baseRarity: any): {any}
 		end
 
 		local rarity = rarityOrder[targetIndex] or UpgradeDefs.Rarities.Common
-		parts[entry.index].color = rarity.color
+		if parts[entry.index].color == nil then
+			parts[entry.index].color = rarity.color
+		end
 	end
 
 	return parts
+end
+
+local function getHighestRarityId(statRarities: {[string]: string}?, fallbackId: string): string
+	if not statRarities then
+		return fallbackId
+	end
+	local bestId = fallbackId
+	local bestIndex = RARITY_ORDER[bestId] or 1
+	for _, rarityId in pairs(statRarities) do
+		local index = RARITY_ORDER[rarityId] or 1
+		if index > bestIndex then
+			bestIndex = index
+			bestId = rarityId
+		end
+	end
+	return bestId
 end
 
 local function trimStatRolls(rolls: {[string]: number}, counts: {[string]: number}, maxStats: number): ({[string]: number}, {[string]: number})
@@ -741,7 +863,7 @@ local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string
 	end
 	local abilityState = ensureAbilityUpgradeState(upgrades, abilityId)
 	local rarity = rollRarity(playerEntity)
-	local statPool = pickAbilityStatDefs(ability.balance, upgrades, abilityId)
+	local statPool = pickAbilityStatDefs(ability.balance, upgrades, abilityId, rarity.id)
 	if #statPool == 0 then
 		return nil
 	end
@@ -765,10 +887,11 @@ local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string
 		return nil
 	end
 
-	local rolls, counts = rollStatValues(selected, rarity)
-	rolls, counts = trimStatRolls(rolls, counts, 3)
-	local desc, descParts = buildStatDescription(selected, rolls, counts)
-	assignPartColors(descParts, rarity)
+	local rolls, counts, statRarities = rollStatValues(selected, rarity, playerEntity)
+	local desc, descParts = buildStatDescription(selected, rolls, counts, statRarities)
+	local finalRarityId = getHighestRarityId(statRarities, rarity.id)
+	local finalRarity = UpgradeDefs.Rarities[finalRarityId] or rarity
+	assignPartColors(descParts, finalRarity)
 	local abilityName = ability.balance.Name or abilityId
 
 	local choiceId = HttpService:GenerateGUID(false)
@@ -779,8 +902,8 @@ local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string
 		name = abilityName,
 		desc = desc,
 		descParts = descParts,
-		color = rarity.color,
-		rarity = rarity.id,
+		color = finalRarity.color,
+		rarity = finalRarity.id,
 		level = (abilityState.level or 0) + 1,
 		rolls = rolls,
 		counts = counts,
@@ -789,7 +912,7 @@ end
 
 local function buildPassiveUpgradeChoice(playerEntity: number, upgrades: any, biased: boolean?): any?
 	local rarity = rollRarity(playerEntity)
-	local statPool = pickPassiveStatDefs(upgrades, playerEntity)
+	local statPool = pickPassiveStatDefs(upgrades, playerEntity, rarity.id)
 	if #statPool == 0 then
 		return nil
 	end
@@ -801,17 +924,33 @@ local function buildPassiveUpgradeChoice(playerEntity: number, upgrades: any, bi
 		end
 		local levels = upgrades.passives.levels or {}
 		local level = levels[def.id] or 0
+		if def.kind == "paired" then
+			level = 0
+			for _, subId in ipairs(def.subStats or {}) do
+				level = math.max(level, levels[subId] or 0)
+			end
+		end
 		return baseWeight * (1 + level * PASSIVE_REPEAT_BIAS)
 	end)
 	if not selectedDef then
 		return nil
 	end
 
-	local rolls, counts = rollStatValues({selectedDef}, rarity)
-	local desc, descParts = buildStatDescription({selectedDef}, rolls, counts)
-	assignPartColors(descParts, rarity)
+	local rolls, counts, statRarities = rollStatValues({selectedDef}, rarity, playerEntity)
+	local desc, descParts = buildStatDescription({selectedDef}, rolls, counts, statRarities)
+	local finalRarityId = getHighestRarityId(statRarities, rarity.id)
+	local finalRarity = UpgradeDefs.Rarities[finalRarityId] or rarity
+	assignPartColors(descParts, finalRarity)
 
 	local choiceId = HttpService:GenerateGUID(false)
+	local levels = upgrades.passives.levels or {}
+	local levelValue = levels[selectedDef.id] or 0
+	if selectedDef.kind == "paired" then
+		levelValue = 0
+		for _, subId in ipairs(selectedDef.subStats or {}) do
+			levelValue = math.max(levelValue, levels[subId] or 0)
+		end
+	end
 	return {
 		id = choiceId,
 		category = "passive",
@@ -819,9 +958,9 @@ local function buildPassiveUpgradeChoice(playerEntity: number, upgrades: any, bi
 		name = selectedDef.display,
 		desc = desc,
 		descParts = descParts,
-		color = rarity.color,
-		rarity = rarity.id,
-		level = ((upgrades.passives.levels and upgrades.passives.levels[selectedDef.id]) or 0) + 1,
+		color = finalRarity.color,
+		rarity = finalRarity.id,
+		level = levelValue + 1,
 		rolls = rolls,
 		counts = counts,
 	}
@@ -1128,40 +1267,53 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 
 	-- Final safety: if we still have fewer than requested, fill with unique passives.
 	if #choices < count then
-		local statPool = pickPassiveStatDefs(upgrades, playerEntity)
-		local availablePassives = {}
-		for _, def in ipairs(statPool) do
-			if def.id and not usedPassives[def.id] then
-				table.insert(availablePassives, def)
-			end
-		end
-
-		while #choices < count and #availablePassives > 0 do
-			local pickIndex = RNG:NextInteger(1, #availablePassives)
-			local def = table.remove(availablePassives, pickIndex)
-			if def then
-				local rarity = rollRarity(playerEntity)
-				local rolls, counts = rollStatValues({def}, rarity)
-				local desc, descParts = buildStatDescription({def}, rolls, counts)
-				assignPartColors(descParts, rarity)
-
-				local choice = {
-					id = HttpService:GenerateGUID(false),
-					category = "passive",
-					statId = def.id,
-					name = def.display,
-					desc = desc,
-					descParts = descParts,
-					color = rarity.color,
-					rarity = rarity.id,
-					level = ((upgrades.passives.levels and upgrades.passives.levels[def.id]) or 0) + 1,
-					rolls = rolls,
-					counts = counts,
-				}
-
-				if markChoice(choice) then
-					table.insert(choices, choice)
+		local attempts = 0
+		local maxAttempts = count * 5
+		while #choices < count and attempts < maxAttempts do
+			attempts += 1
+			local rarity = rollRarity(playerEntity)
+			local statPool = pickPassiveStatDefs(upgrades, playerEntity, rarity.id)
+			local availablePassives = {}
+			for _, def in ipairs(statPool) do
+				if def.id and not usedPassives[def.id] then
+					table.insert(availablePassives, def)
 				end
+			end
+			if #availablePassives == 0 then
+				break
+			end
+
+			local def = availablePassives[RNG:NextInteger(1, #availablePassives)]
+			local rolls, counts, statRarities = rollStatValues({def}, rarity, playerEntity)
+			local desc, descParts = buildStatDescription({def}, rolls, counts, statRarities)
+			local finalRarityId = getHighestRarityId(statRarities, rarity.id)
+			local finalRarity = UpgradeDefs.Rarities[finalRarityId] or rarity
+			assignPartColors(descParts, finalRarity)
+			local levels = upgrades.passives.levels or {}
+			local levelValue = levels[def.id] or 0
+			if def.kind == "paired" then
+				levelValue = 0
+				for _, subId in ipairs(def.subStats or {}) do
+					levelValue = math.max(levelValue, levels[subId] or 0)
+				end
+			end
+
+			local choice = {
+				id = HttpService:GenerateGUID(false),
+				category = "passive",
+				statId = def.id,
+				name = def.display,
+				desc = desc,
+				descParts = descParts,
+				color = finalRarity.color,
+				rarity = finalRarity.id,
+				level = levelValue + 1,
+				rolls = rolls,
+				counts = counts,
+			}
+
+			if markChoice(choice) then
+				table.insert(choices, choice)
 			end
 		end
 	end
@@ -1210,12 +1362,23 @@ local function rebuildAbilityStats(playerEntity: number, abilityId: string, upgr
 		else
 			local baseValue = baseBalance[def.field]
 			if typeof(baseValue) == "number" then
-				local rawValue = abilityState.stats[def.id] or 0
-				local effective = applySoftCap(rawValue, def.softCap, def.curveK)
-				if def.effect == "reduce" then
-					stats[def.field] = baseValue * (1 - effective)
+				if def.id == "cooldownReduction" then
+					local stack = abilityState.statStacks and abilityState.statStacks[def.id]
+					if stack and #stack > 0 then
+						stats[def.field] = baseValue * computeStackMultiplier(stack)
+					else
+						local rawValue = abilityState.stats[def.id] or 0
+						local effective = applySoftCap(rawValue, def.softCap, def.curveK)
+						stats[def.field] = baseValue * (1 - effective)
+					end
 				else
-					stats[def.field] = baseValue * (1 + effective)
+					local rawValue = abilityState.stats[def.id] or 0
+					local effective = applySoftCap(rawValue, def.softCap, def.curveK)
+					if def.effect == "reduce" then
+						stats[def.field] = baseValue * (1 - effective)
+					else
+						stats[def.field] = baseValue * (1 + effective)
+					end
 				end
 			end
 		end
@@ -1301,17 +1464,20 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 		cooldownMultiplier = PlayerBalance.BaseCooldownMultiplier,
 		expMultiplier = PlayerBalance.BaseExpMultiplier,
 		healthMultiplier = 1.0,
+		healthFlatBonus = 0,
 		moveSpeedMultiplier = 1.0,
 		sizeMultiplier = 1.0,
 		durationMultiplier = 1.0,
 		pickupRangeMultiplier = 1.0,
 		penetrationMultiplier = 1.0,
+		penetrationBonus = upgrades.passives.counts.penetration or 0,
 		mobilityCooldownMultiplier = 1.0,
 		mobilityDistanceMultiplier = 1.0,
 		mobilityDistanceBase = 1.0,
 		mobilityVerticalMultiplier = 1.0,
 		grappleDistanceMultiplier = 1.0,
 		regenMultiplier = 1.0,
+		regenFlatBonus = 0,
 		regenDelayMultiplier = 1.0,
 		critChance = 0,
 		critDamage = 0,
@@ -1328,6 +1494,36 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 			continue
 		end
 		local rawValue = upgrades.passives.stats[def.id] or 0
+		if def.kind == "flat" then
+			if def.field then
+				if def.effect == "reduce" then
+					effects[def.field] = (effects[def.field] or 0) - rawValue
+				else
+					effects[def.field] = (effects[def.field] or 0) + rawValue
+				end
+			end
+		if def.id == "regenFlat" and def.delayMin and def.delayMax then
+			local minVal = def.min or 0
+			local maxVal = def.max or 0
+			local denom = math.max(maxVal - minVal, 1e-6)
+			local normalized = math.clamp((rawValue - minVal) / denom, 0, 1)
+				local delayReduction = def.delayMin + (def.delayMax - def.delayMin) * normalized
+				effects.regenDelayMultiplier = effects.regenDelayMultiplier * (1 - delayReduction)
+			end
+			continue
+		end
+
+		if def.id == "cooldownReduction" then
+			local stack = upgrades.passives.statStacks and upgrades.passives.statStacks[def.id]
+			if stack and #stack > 0 then
+				effects.cooldownMultiplier = effects.cooldownMultiplier * computeStackMultiplier(stack)
+			else
+				local effective = applySoftCap(rawValue, def.softCap, def.curveK)
+				effects.cooldownMultiplier = effects.cooldownMultiplier * (1 - effective)
+			end
+			continue
+		end
+
 		local effective = applySoftCap(rawValue, def.softCap, def.curveK)
 
 		if def.field == "damageMultiplier"
@@ -1350,7 +1546,7 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 				effects[def.field] = effects[def.field] * (1 + effective)
 			end
 			if def.id == "expGain" then
-				effects.pickupRangeMultiplier = effects.pickupRangeMultiplier * (1 + effective)
+				effects.pickupRangeMultiplier = effects.pickupRangeMultiplier * (1 + effective * 0.2)
 			end
 		else
 			if def.effect == "reduce" then
@@ -1360,14 +1556,6 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 			end
 		end
 
-		if def.id == "regen" and def.delayMin and def.delayMax then
-			local minVal = def.min or 0
-			local maxVal = def.max or 0
-			local denom = math.max(maxVal - minVal, 1e-6)
-			local normalized = math.clamp((effective - minVal) / denom, 0, 1)
-			local delayReduction = def.delayMin + (def.delayMax - def.delayMin) * normalized
-			effects.regenDelayMultiplier = effects.regenDelayMultiplier * (1 - delayReduction)
-		end
 	end
 
 	effects.mobilityDistanceBase = effects.mobilityDistanceMultiplier
@@ -1600,6 +1788,24 @@ function UpgradeSystem.applyUpgrade(playerEntity: number, upgrade: any): boolean
 		local rolls = upgrade.rolls or {}
 		for statId, value in pairs(rolls) do
 			abilityState.stats[statId] = (abilityState.stats[statId] or 0) + value
+			local def = abilityStatById[statId]
+			if def and def.id == "cooldownReduction" then
+				local stack = abilityState.statStacks[statId]
+				if not stack then
+					stack = {}
+					abilityState.statStacks[statId] = stack
+				end
+				if #stack == 0 then
+					local existing = abilityState.stats[statId] or 0
+					if existing > value then
+						local effectiveExisting = applySoftCap(existing - value, def.softCap, def.curveK)
+						if effectiveExisting > 0 then
+							table.insert(stack, effectiveExisting)
+						end
+					end
+				end
+				table.insert(stack, value)
+			end
 		end
 		local counts = upgrade.counts or {}
 		for statId, value in pairs(counts) do
@@ -1615,6 +1821,24 @@ function UpgradeSystem.applyUpgrade(playerEntity: number, upgrade: any): boolean
 		local levels = upgrades.passives.levels or {}
 		for statKey, value in pairs(rolls) do
 			upgrades.passives.stats[statKey] = (upgrades.passives.stats[statKey] or 0) + value
+			local def = passiveStatById[statKey]
+			if def and def.id == "cooldownReduction" then
+				local stack = upgrades.passives.statStacks[statKey]
+				if not stack then
+					stack = {}
+					upgrades.passives.statStacks[statKey] = stack
+				end
+				if #stack == 0 then
+					local existing = (upgrades.passives.stats[statKey] or 0) - value
+					if existing > 0 then
+						local effectiveExisting = applySoftCap(existing, def.softCap, def.curveK)
+						if effectiveExisting > 0 then
+							table.insert(stack, effectiveExisting)
+						end
+					end
+				end
+				table.insert(stack, value)
+			end
 			levels[statKey] = (levels[statKey] or 0) + 1
 		end
 		for statKey, value in pairs(counts) do

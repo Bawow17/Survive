@@ -85,6 +85,21 @@ local function formatTime(seconds: number): string
 	return string.format("%02d:%02d", minutes, secs)
 end
 
+local function formatIntWithCommas(value: number): string
+	local rounded = math.floor(value + 0.0001)
+	local sign = ""
+	if rounded < 0 then
+		sign = "-"
+		rounded = -rounded
+	end
+	local text = tostring(rounded)
+	local withCommas = text:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+	if withCommas:sub(1, 1) == "," then
+		withCommas = withCommas:sub(2)
+	end
+	return sign .. withCommas
+end
+
 -- Populate scoreboard with player stats
 local function populateScoreboard(statsPayload: {{username: string, level: number, kills: number, deaths: number, damage: number, surviveTime: number}})
 	-- Clear existing entries (use pairs instead of ipairs for safety during iteration)
@@ -135,7 +150,7 @@ local function populateScoreboard(statsPayload: {{username: string, level: numbe
 		
 		local damageLabel = playerFrame:FindFirstChild("DamageExampleLabel") :: TextLabel
 		if damageLabel then
-			damageLabel.Text = tostring(math.floor(playerData.damage))
+			damageLabel.Text = formatIntWithCommas(playerData.damage)
 		end
 		
 		playerFrame.Parent = scoreFrame
@@ -297,4 +312,3 @@ ClearScoreboardRemote.OnClientEvent:Connect(function()
 		child:Destroy()
 	end
 end)
-

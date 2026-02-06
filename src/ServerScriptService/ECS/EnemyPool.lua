@@ -187,6 +187,9 @@ function EnemyPool.release(entity: number)
 		if world:has(entity, Components.EnemyAggro) then
 			world:remove(entity, Components.EnemyAggro)
 		end
+		if world:has(entity, Components.EnemyTier) then
+			world:remove(entity, Components.EnemyTier)
+		end
 		
 		-- Return to pool
 		poolCount += 1

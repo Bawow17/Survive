@@ -7,6 +7,17 @@ local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local StatusEffectSystem = require(game.ServerScriptService.ECS.Systems.StatusEffectSystem)
 local UpgradeCounter = require(game.ServerScriptService.Balance.UpgradeCounter)
+local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
+
+local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
+local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
+local PROFILING_ENABLED = ProfilingConfig.ENABLED
+
+local function profGauge(name: string, value: number)
+	if PROFILING_ENABLED then
+		Prof.gauge(name, value)
+	end
+end
 
 local ExpSystem = {}
 
@@ -26,6 +37,38 @@ local DebugGrantLevels: RemoteEvent?
 
 -- Cached query for exp chunks processing
 local expChunksQuery: any
+local levelHistory: {[number]: {times: {number}}} = {}
+
+local LEVEL_WINDOW_SECONDS = 120
+
+local function recordLevelTime(playerEntity: number, playerName: string?)
+	if not playerName then
+		return
+	end
+	local now = GameTimeSystem.getGameTime()
+	local history = levelHistory[playerEntity]
+	if not history then
+		history = {times = {}}
+	end
+	table.insert(history.times, now)
+
+	-- Prune to rolling window
+	local cutoff = now - LEVEL_WINDOW_SECONDS
+	while #history.times > 0 and history.times[1] < cutoff do
+		table.remove(history.times, 1)
+	end
+
+	levelHistory[playerEntity] = history
+
+	if #history.times >= 2 then
+		local duration = history.times[#history.times] - history.times[1]
+		local levelsGained = #history.times - 1
+		if duration > 0 and levelsGained > 0 then
+			local avgSeconds = duration / levelsGained
+			profGauge("Exp.SecondsPerLevel." .. playerName, math.floor(avgSeconds * 1000 + 0.5))
+		end
+	end
+end
 
 function ExpSystem.init(worldRef: any, components: any, dirtyService: any)
 	world = worldRef
@@ -87,17 +130,38 @@ function ExpSystem.setBankedHandsService(service: any)
 	BankedHandsService = service
 end
 
--- Cache phase breakpoints
-local phase1End, phase2End, phase3End = UpgradeCounter.getPhaseBreakpoints()
+local function getPhaseBreakpoints(): (number, number)
+	local phase1End, phase2End = UpgradeCounter.getPhaseBreakpoints()
+	local curve = ItemBalance.ExpCurve
+	if curve then
+		if typeof(curve.Phase1End) == "number" then
+			phase1End = math.max(1, math.floor(curve.Phase1End))
+		end
+		if typeof(curve.Phase2End) == "number" then
+			phase2End = math.max(phase1End, math.floor(curve.Phase2End))
+		end
+	end
+	return phase1End, phase2End
+end
 
 -- Calculate exp required for a level (dynamic three-phase system)
 local function calculateExpRequired(level: number): number
 	local phases = ItemBalance.ProgressionPhases
+	local curve = ItemBalance.ExpCurve or {}
+	local phase1End, phase2End = getPhaseBreakpoints()
+	local globalScale = curve.GlobalScale or 1.0
+	local phase2Scaling = curve.Phase2Scaling or (phases.Phase2 and phases.Phase2.scaling) or 1.0
+	local phase3Base = curve.Phase3BaseMultiplier or (phases.Phase3 and phases.Phase3.baseMultiplier) or 1.0
+	local phase3LinearFactor = curve.Phase3LinearFactor or (phases.Phase3 and phases.Phase3.linearFactor) or 0.0
+	local maxGrowthPerLevel = curve.maxGrowthPerLevel or (phases.Phase3 and phases.Phase3.maxGrowthPerLevel)
+	local dampingStart = curve.dampingStart or (phases.Phase3 and phases.Phase3.dampingStart)
+	local dampingEnd = curve.dampingEnd or (phases.Phase3 and phases.Phase3.dampingEnd)
+	local dampingScale = curve.dampingScale or (phases.Phase3 and phases.Phase3.dampingScale) or 1.0
 	
 	-- Phase 1: Linear progression (fast leveling)
 	if level <= phase1End then
 		return math.floor(
-			ItemBalance.BaseExpRequired + (level - 1) * phases.Phase1.expPerLevel
+			(ItemBalance.BaseExpRequired + (level - 1) * phases.Phase1.expPerLevel) * globalScale
 		)
 	end
 	
@@ -108,7 +172,7 @@ local function calculateExpRequired(level: number): number
 		local phase1EndExp = ItemBalance.BaseExpRequired + (phase1End - 1) * phases.Phase1.expPerLevel
 		
 		return math.floor(
-			phase1EndExp * (phases.Phase2.scaling ^ phase2Index)
+			phase1EndExp * (phase2Scaling ^ phase2Index) * globalScale
 		)
 	end
 	
@@ -117,22 +181,17 @@ local function calculateExpRequired(level: number): number
 	local phase3Index = level - phase3StartLevel
 	local phase2LastLevel = phase2End - phase1End
 	local phase2EndExp = (ItemBalance.BaseExpRequired + (phase1End - 1) * phases.Phase1.expPerLevel) 
-						* (phases.Phase2.scaling ^ phase2LastLevel)
+						* (phase2Scaling ^ phase2LastLevel)
 	
-	local linearFactor = phases.Phase3.linearFactor or 0.1
-	local base = phase2EndExp * (phases.Phase3.baseMultiplier ^ phase3Index) * (1 + phase3Index * linearFactor)
-	local dampingStart = phases.Phase3.dampingStart
-	local dampingEnd = phases.Phase3.dampingEnd
-	local dampingScale = phases.Phase3.dampingScale or 1
+	local base = phase2EndExp * (phase3Base ^ phase3Index) * (1 + phase3Index * phase3LinearFactor)
 	if dampingStart and dampingEnd and dampingEnd > dampingStart and level >= dampingStart then
 		local t = math.clamp((level - dampingStart) / (dampingEnd - dampingStart), 0, 1)
 		local damp = 1 - (1 - dampingScale) * t
 		base = base * damp
 	end
-	local maxGrowthPerLevel = phases.Phase3.maxGrowthPerLevel
 	if maxGrowthPerLevel and phase3Index > 0 then
 		local prevIndex = phase3Index - 1
-		local prevBase = phase2EndExp * (phases.Phase3.baseMultiplier ^ prevIndex) * (1 + prevIndex * linearFactor)
+		local prevBase = phase2EndExp * (phase3Base ^ prevIndex) * (1 + prevIndex * phase3LinearFactor)
 		if dampingStart and dampingEnd and dampingEnd > dampingStart and (level - 1) >= dampingStart then
 			local tPrev = math.clamp(((level - 1) - dampingStart) / (dampingEnd - dampingStart), 0, 1)
 			local dampPrev = 1 - (1 - dampingScale) * tPrev
@@ -143,7 +202,7 @@ local function calculateExpRequired(level: number): number
 			base = cap
 		end
 	end
-	return math.floor(base)
+	return math.floor(base * globalScale)
 end
 
 function ExpSystem.getExpRequired(level: number): number
@@ -304,6 +363,9 @@ local function applyExpDirect(playerEntity: number, amount: number)
 	-- Generate banked hands for all level ups
 	for _, levelUp in ipairs(levelUps) do
 		onLevelUp(playerEntity, levelUp.to, levelUp.from)
+		if playerStats and playerStats.player then
+			recordLevelTime(playerEntity, playerStats.player.Name)
+		end
 	end
 	
 	-- Cap exp if at max level
@@ -554,7 +616,7 @@ end
 
 -- Debug: Print progression curve preview
 function ExpSystem.printProgressionCurve()
-	local phase1, phase2, phase3 = UpgradeCounter.getPhaseBreakpoints()
+	local phase1, phase2 = getPhaseBreakpoints()
 	
 	print("=== PROGRESSION CURVE PREVIEW ===")
 	print(string.format("Total Upgrades: %d", UpgradeCounter.getTotalUpgrades()))
