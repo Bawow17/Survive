@@ -288,7 +288,7 @@ local function getGroundedPosition(position: Vector3, heightOffset: number): Vec
 	return nil
 end
 
-local function adjustSpawnHeightForEnemy(groundedPos: Vector3, enemyType: string): Vector3
+local function adjustSpawnHeightForEnemy(groundedPos: Vector3, enemyType: string, scale: number?): Vector3
 	if not groundedPos then
 		return groundedPos
 	end
@@ -303,8 +303,10 @@ local function adjustSpawnHeightForEnemy(groundedPos: Vector3, enemyType: string
 	end
 
 	if hitbox and hitbox.size then
-		local offset = hitbox.offset or Vector3.new(0, 0, 0)
-		local baseY = groundedPos.Y + SPAWN_GROUND_CLEARANCE - offset.Y + (hitbox.size.Y * 0.5)
+		local scaleValue = scale or 1.0
+		local offset = (hitbox.offset or Vector3.new(0, 0, 0)) * scaleValue
+		local sizeY = hitbox.size.Y * scaleValue
+		local baseY = groundedPos.Y + SPAWN_GROUND_CLEARANCE - offset.Y + (sizeY * 0.5)
 		return Vector3.new(groundedPos.X, baseY, groundedPos.Z)
 	end
 
@@ -1010,7 +1012,6 @@ function EnemySpawner.step(dt: number)
 				continue
 			end
 
-			local finalSpawnPos = adjustSpawnHeightForEnemy(groundedPos, enemyType)
 			local tier = rollTier(superOdds, eliteOdds)
 			local tierMult = { health = 1.0, damage = 1.0, speed = 1.0, size = 1.0 }
 			if tier == "Super" then
@@ -1020,6 +1021,8 @@ function EnemySpawner.step(dt: number)
 				tierMult = tierCfg.EliteMult or tierMult
 				profInc("EliteSpawned", 1)
 			end
+
+			local finalSpawnPos = adjustSpawnHeightForEnemy(groundedPos, enemyType, tierMult.size or 1.0)
 
 			local baseScaling = playerData.scaling or {}
 			local spawnScaling = {

@@ -116,6 +116,8 @@ local DebugPauseFlag = remotes:FindFirstChild("DebugPause") :: BoolValue
 local DebugGrantLevels = remotes:FindFirstChild("DebugGrantLevels") :: RemoteEvent
 local debugEnabled = DebugPauseFlag and DebugPauseFlag.Value or false
 
+local UpgradeIcons = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UpgradeIcons"))
+
 local currentPauseToken: number? = nil
 local debugReproActive = false
 local debugReproStartTime = 0
@@ -386,6 +388,7 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 	local rarityLabel = choiceFrame:FindFirstChild("Rarity")
 	local levelLabel = choiceFrame:FindFirstChild("Level")
 	local button = choiceFrame:FindFirstChild("Button")
+	local icon = choiceFrame:FindFirstChild("UpgradeIcon") or choiceFrame:FindFirstChild("UpgradeIcon", true)
 	
 	if not upgradeData then
 		-- No upgrade for this slot, hide it
@@ -442,7 +445,7 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 			templateRow.Visible = false
 		end
 		for _, child in ipairs(descFrame:GetChildren()) do
-			if (child:IsA("Frame") and child ~= templateRow) or (child:IsA("TextLabel") and child ~= templateLabel and child ~= templateValue) then
+			if child.Name ~= "UpgradeIcon" and ((child:IsA("Frame") and child ~= templateRow) or (child:IsA("TextLabel") and child ~= templateLabel and child ~= templateValue)) then
 				child:Destroy()
 			end
 		end
@@ -628,6 +631,110 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 	if button then
 		button:SetAttribute("UpgradeId", upgradeData.id)
 		button:SetAttribute("ChoiceIndex", index)
+	end
+
+	-- Icon handling (transparent background)
+	if not icon then
+		local starterGameGui = starterGui:FindFirstChild("GameGui")
+		local starterChoice = starterGameGui
+			and starterGameGui:FindFirstChild("LevelUpFrame", true)
+			and starterGameGui:FindFirstChild("LevelUpFrame", true):FindFirstChild("Window", true)
+		if starterChoice then
+			local starterWindow = starterChoice:FindFirstChild("Window")
+			local starterTemplate = starterWindow and starterWindow:FindFirstChild("ChoiceExampleFrame")
+			local starterIcon = starterTemplate and starterTemplate:FindFirstChild("UpgradeIcon", true)
+			if starterIcon then
+				icon = starterIcon:Clone()
+				icon.Name = "UpgradeIcon"
+				icon.Parent = choiceFrame
+			end
+		end
+	end
+	if icon then
+		local iconImage: Instance? = nil
+		if icon:IsA("ImageLabel") or icon:IsA("ImageButton") then
+			iconImage = icon
+		else
+			iconImage = icon:FindFirstChildWhichIsA("ImageLabel", true) or icon:FindFirstChildWhichIsA("ImageButton", true)
+		end
+		if iconImage and (iconImage:IsA("ImageLabel") or iconImage:IsA("ImageButton")) then
+			iconImage.BackgroundTransparency = 1
+		local iconKey: string? = nil
+		if upgradeData then
+			if upgradeData.category == "passive" then
+				iconKey = upgradeData.statId
+			elseif upgradeData.category == "ability" then
+				iconKey = upgradeData.abilityId
+			elseif upgradeData.category == "ability_unlock" then
+				if upgradeData.abilityId then
+					iconKey = "unlock:" .. tostring(upgradeData.abilityId)
+				end
+			elseif upgradeData.category == "attribute" then
+				if upgradeData.abilityId and upgradeData.attributeId then
+					iconKey = "attr:" .. tostring(upgradeData.abilityId) .. ":" .. tostring(upgradeData.attributeId)
+				end
+			elseif upgradeData.category == "mobility" then
+				if upgradeData.mobilityId then
+					iconKey = "mobility:" .. tostring(upgradeData.mobilityId)
+				end
+			end
+		end
+
+		local iconId = iconKey and UpgradeIcons[iconKey] or nil
+		if (not iconId or iconId == "") and upgradeData and upgradeData.category == "attribute" then
+			if upgradeData.abilityId then
+				iconId = UpgradeIcons[upgradeData.abilityId]
+			end
+		end
+		if not iconId or iconId == "" then
+			if upgradeData then
+				if upgradeData.iconId then
+					iconId = upgradeData.iconId
+				elseif upgradeData.data and upgradeData.data.iconId then
+					iconId = upgradeData.data.iconId
+				end
+				if (not iconId or iconId == "") and upgradeData.name then
+					iconId = UpgradeIcons[upgradeData.name]
+				end
+				if (not iconId or iconId == "") and upgradeData.data and upgradeData.data.name then
+					iconId = UpgradeIcons[upgradeData.data.name]
+				end
+				if not iconId or iconId == "" then
+					local function normalizeKey(k: string): string
+						return tostring(k):lower():gsub("%s+", ""):gsub("%W", "")
+					end
+					local targetName = upgradeData.name or (upgradeData.data and upgradeData.data.name)
+					if targetName then
+						local normTarget = normalizeKey(targetName)
+						for key, value in pairs(UpgradeIcons) do
+							if normalizeKey(key) == normTarget then
+								iconId = value
+								break
+							end
+						end
+					end
+				end
+			end
+		end
+			if iconId and iconId ~= "" then
+				local iconStr = tostring(iconId)
+				if iconStr:match("^%d+$") then
+					iconStr = "rbxassetid://" .. iconStr
+				end
+				iconImage.Image = iconStr
+				iconImage.ImageTransparency = 0
+				iconImage.Visible = true
+				if icon:IsA("GuiObject") then
+					icon.Visible = true
+				end
+				if iconImage.Parent and iconImage.Parent:IsA("GuiObject") then
+					iconImage.Parent.Visible = true
+				end
+			else
+				iconImage.Image = ""
+				iconImage.Visible = false
+			end
+		end
 	end
 end
 

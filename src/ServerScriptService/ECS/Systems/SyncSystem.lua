@@ -184,6 +184,7 @@ local initialComponents = {
 	SessionStats = true,
 	PassiveEffects = true,  -- Need for mobility multipliers on client
 	BuffState = true,  -- Needed for powerup buffs (ArcaneRune, etc.)
+	EnemyTier = true,
 }
 
 -- Component tracking (legacy - all components now sync every frame)
@@ -1161,6 +1162,7 @@ function SyncSystem.init(worldRef: any, components: any, dirtyService: any, remo
 		MobilityCooldown = Components.MobilityCooldown,  -- Mobility cooldown tracking
 		PassiveEffects = Components.PassiveEffects,  -- Passive multipliers (for mobility)
 		EnemySlow = Components.EnemySlow,
+		EnemyTier = Components.EnemyTier,
 	}
 	
 	-- PERFORMANCE FIX: Cache player position query (CRITICAL for FPS!)

@@ -26,6 +26,8 @@ ChargerBalance.attackCooldown = 0.2 -- Not used for Charger (uses dash cooldown 
 ChargerBalance.dashTriggerRange = 35 -- Distance at which Charger enters dash range
 ChargerBalance.windupTime = 1.2 -- Charge-up time before dash
 ChargerBalance.directionLockDelay = 0.55 -- Time into windup when direction locks (0.55s of 0.8s windup)
+ChargerBalance.dashCollisionBuffer = 2.0 -- Extra buffer for wall collision checks
+ChargerBalance.dashCollisionInterval = 0.05 -- Throttle collision raycasts during dash
 ChargerBalance.dashSpeed = 90 -- Speed during dash (very fast)
 ChargerBalance.dashDuration = 0.85 -- Maximum dash duration
 ChargerBalance.dashOvershoot = 60 -- Distance to dash past the player
@@ -40,4 +42,3 @@ ChargerBalance.preferredRange = 26 -- Standoff distance before initiating dash
 ChargerBalance.preferredJitter = 5 -- Randomization for preferred range (±5 studs)
 
 return ChargerBalance
-

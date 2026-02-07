@@ -1252,8 +1252,8 @@ local function handleHitFlash(model: Model, hitFlashData: any)
 		return
 	end
 	
-	-- Find or create highlight directly in the model
-	local highlight = model:FindFirstChildOfClass("Highlight")
+	-- Find or create hit flash highlight (do not reuse tier outline)
+	local highlight = model:FindFirstChild("HitFlash")
 	if not highlight then
 		highlight = Instance.new("Highlight")
 		highlight.Name = "HitFlash"
@@ -1346,6 +1346,33 @@ local function handleDeathAnimation(model: Model, deathData: any)
 		impaleTokenCounter += 1
 		record.impaleToken = impaleTokenCounter
 		fadeImpaleModel(record.impaleModel, record.impaleParts, fadeDuration, record.impaleToken)
+	end
+end
+
+local function applyTierOutline(model: Model, tier: string?)
+	if not model then
+		return
+	end
+	local highlight = model:FindFirstChild("TierOutline")
+	if tier == "Super" or tier == "Elite" then
+		if not highlight then
+			highlight = Instance.new("Highlight")
+			highlight.Name = "TierOutline"
+			highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+			highlight.Parent = model
+		end
+		highlight.FillTransparency = 1
+		highlight.OutlineTransparency = 0
+		if tier == "Super" then
+			highlight.OutlineColor = Color3.fromRGB(255, 220, 60)
+		else
+			highlight.OutlineColor = Color3.fromRGB(255, 60, 60)
+		end
+		highlight.Enabled = true
+	else
+		if highlight then
+			highlight:Destroy()
+		end
 	end
 end
 
@@ -2575,6 +2602,10 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	
 	-- Validate model structure after parenting
 	if entityTypeName == "Enemy" then
+		local tierData = entityData.EnemyTier
+		local tier = tierData and tierData.tier
+		applyTierOutline(model, tier)
+
 		local primaryPart = model.PrimaryPart
 		local hasHitbox = model:FindFirstChild("Hitbox") ~= nil
 		if not primaryPart and not hasHitbox then

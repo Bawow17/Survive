@@ -843,6 +843,8 @@ function ChargerAISystem.step(dt: number)
 					windupStartTime = now,  -- NEW: Track when windup started
 					dashDirection = nil,  -- NEW: Start unlocked (will be set during windup)
 					directionLocked = false,  -- NEW: Track lock state
+					dashSpeed = nil,
+					lastDashObstacleCheck = nil,
 					hitOnThisDash = false,
 					preferredRange = chargerState.preferredRange,
 				})
@@ -853,7 +855,10 @@ function ChargerAISystem.step(dt: number)
 			setVelocity(entity, { x = 0, y = 0, z = 0 })
 			
 			-- Check if direction should be locked (based on lock delay)
-			local lockDelay = balance.directionLockDelay or 0
+			local lockDelay = balance.directionLockDelay
+			if lockDelay == nil or lockDelay <= 0 then
+				lockDelay = (balance.windupTime or 0.4) * 0.7
+			end
 			local windupElapsed = now - (chargerState.windupStartTime or now)
 			
 			if not chargerState.directionLocked and windupElapsed >= lockDelay then
@@ -864,6 +869,8 @@ function ChargerAISystem.step(dt: number)
 					windupStartTime = chargerState.windupStartTime,
 					dashDirection = faceDirVec3,  -- LOCK direction at current player position
 					directionLocked = true,  -- Mark as locked
+					dashSpeed = nil,
+					lastDashObstacleCheck = nil,
 					hitOnThisDash = false,
 					preferredRange = chargerState.preferredRange,
 				})
@@ -887,6 +894,8 @@ function ChargerAISystem.step(dt: number)
 					state = S_DASH,
 					stateEndTime = now + dashDur,
 					dashDirection = lockedDashDir,
+					dashSpeed = dashSpeed,
+					lastDashObstacleCheck = currentTime,
 					hitOnThisDash = false,
 					preferredRange = chargerState.preferredRange,
 				})
@@ -895,9 +904,44 @@ function ChargerAISystem.step(dt: number)
 		elseif chargerState.state == S_DASH then
 			-- Fast straight-line dash
 			local dashDir = chargerState.dashDirection or faceDirVec3
-			local dashSpeed = (balance.dashSpeed or 60) * speedScale * slowMultiplier
+			local dashSpeed = chargerState.dashSpeed or (balance.dashSpeed or 60) * speedScale * slowMultiplier
 			local newVel = dashDir * dashSpeed
 			setVelocity(entity, { x = newVel.X, y = 0, z = newVel.Z })
+
+			-- Dash collision check (stop on wall)
+			local dashInterval = balance.dashCollisionInterval or 0.05
+			local lastDashCheck = chargerState.lastDashObstacleCheck or 0
+			if (currentTime - lastDashCheck) >= dashInterval then
+				local params = getObstacleParams()
+				local buffer = balance.dashCollisionBuffer or 2.0
+				local checkDist = (dashSpeed * dt) + buffer
+				local hit = Workspace:Raycast(myPos, dashDir * checkDist, params)
+				if hit then
+					setVelocity(entity, { x = 0, y = 0, z = 0 })
+					setChargerState(entity, {
+						state = S_ENDLAG,
+						stateEndTime = now + (balance.endlagTime or 0.6),
+						dashDirection = dashDir,
+						dashSpeed = nil,
+						lastDashObstacleCheck = currentTime,
+						hitOnThisDash = chargerState.hitOnThisDash,
+						preferredRange = chargerState.preferredRange,
+					})
+					-- Skip remaining dash logic this frame
+					setFacingDirection(entity, { x = faceDirVec3.X, y = 0, z = faceDirVec3.Z })
+					continue
+				end
+
+				setChargerState(entity, {
+					state = chargerState.state,
+					stateEndTime = chargerState.stateEndTime,
+					dashDirection = chargerState.dashDirection,
+					dashSpeed = dashSpeed,
+					lastDashObstacleCheck = currentTime,
+					hitOnThisDash = chargerState.hitOnThisDash,
+					preferredRange = chargerState.preferredRange,
+				})
+			end
 			
 			-- Check for dash collision (deal damage once)
 			if not chargerState.hitOnThisDash then
@@ -938,6 +982,8 @@ function ChargerAISystem.step(dt: number)
 								state = chargerState.state,
 								stateEndTime = chargerState.stateEndTime,
 								dashDirection = chargerState.dashDirection,
+								dashSpeed = dashSpeed,
+								lastDashObstacleCheck = chargerState.lastDashObstacleCheck,
 								hitOnThisDash = true,
 								preferredRange = chargerState.preferredRange,
 							})
@@ -954,6 +1000,8 @@ function ChargerAISystem.step(dt: number)
 					state = S_ENDLAG,
 					stateEndTime = now + (balance.endlagTime or 0.6),
 					dashDirection = chargerState.dashDirection,
+					dashSpeed = nil,
+					lastDashObstacleCheck = nil,
 					hitOnThisDash = chargerState.hitOnThisDash,
 					preferredRange = chargerState.preferredRange,
 				})
@@ -968,6 +1016,8 @@ function ChargerAISystem.step(dt: number)
 					state = S_COOLDOWN,
 					stateEndTime = now + (balance.dashCooldown or 3.5),
 					dashDirection = nil,
+					dashSpeed = nil,
+					lastDashObstacleCheck = nil,
 					hitOnThisDash = false,
 					preferredRange = chargerState.preferredRange,
 				})
@@ -1057,6 +1107,8 @@ function ChargerAISystem.step(dt: number)
 					state = S_APPROACH,
 					stateEndTime = 0,
 					dashDirection = nil,
+					dashSpeed = nil,
+					lastDashObstacleCheck = nil,
 					hitOnThisDash = false,
 					preferredRange = newPreferredRange,
 				})

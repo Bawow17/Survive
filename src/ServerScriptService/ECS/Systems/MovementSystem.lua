@@ -21,6 +21,9 @@ local _ProjectileData: any
 local _Lifetime: any
 local _Homing: any
 local _AI: any  -- AI component for enemy speed data
+local _ChargerState: any
+
+local CHARGER_DASH_STATE = 3
 
 -- Cached query for performance
 local movingQuery: any
@@ -280,6 +283,7 @@ function MovementSystem.init(worldRef: any, components: any, dirtyService: any)
 	_Lifetime = Components.Lifetime
 	_Homing = Components.Homing
 	_AI = Components.AI  -- For enemy speed data
+	_ChargerState = Components.ChargerState
 	
 	-- Create cached query for performance
 	movingQuery = world:query(Components.Position, Components.Velocity, Components.EntityType):cached()
@@ -439,6 +443,14 @@ function MovementSystem.step(dt: number)
 			if ai and ai.speed then
 				enemySpeed = ai.speed  -- Use scaled speed (baseSpeed * globalMult * lifetimeMult)
 			end
+			local chargerState = _ChargerState and world:get(entity, _ChargerState)
+			if chargerState and chargerState.state == CHARGER_DASH_STATE and chargerState.dashSpeed then
+				enemySpeed = math.max(enemySpeed, chargerState.dashSpeed)
+			end
+			local velMag = math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z)
+			if velMag > enemySpeed then
+				enemySpeed = velMag
+			end
 			
 			-- Allow 2.5x tolerance for burst movement, repulsion, knockback, and frame spikes
 			-- This prevents false positives while still catching actual teleports
@@ -517,6 +529,9 @@ function MovementSystem.step(dt: number)
 		-- Only apply ground snapping to enemies, not projectiles
 		-- Throttle ground checks per entity (CRITICAL FIX - raycasting every frame is too expensive!)
 		if entityType.type == "Enemy" then
+			local chargerState = _ChargerState and world:get(entity, _ChargerState)
+			local isDashing = chargerState and chargerState.state == CHARGER_DASH_STATE
+			if not isDashing then
 			-- WALL CLIMBING: Skip ground snapping if enemy has significant vertical velocity
 			local isClimbing = velocity.y > 0.5  -- Climbing up
 			local isFalling = velocity.y < -0.5  -- Falling down fast
@@ -615,6 +630,7 @@ function MovementSystem.step(dt: number)
 			if isClimbing then
 				entityCurrentGroundHeight[entity] = newPosition.y
 				entityTargetGroundHeight[entity] = newPosition.y
+			end
 			end
 		end
 		-- Projectiles keep their calculated Y position (no ground snapping)

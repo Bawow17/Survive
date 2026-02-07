@@ -450,13 +450,15 @@ local function processTarget(
 		end
 
 		if hitbox and hitbox.size then
-			aabbHalfSize = hitbox.size / 2
-			aabbCenter = targetPosition + hitbox.offset
+			local scale = (targetVisual and targetVisual.scale) or 1.0
+			aabbHalfSize = (hitbox.size * scale) / 2
+			aabbCenter = targetPosition + (hitbox.offset * scale)
 		elseif targetVisual and targetVisual.modelPath then
 			local size, offset = getModelHitboxData(targetVisual.modelPath)
 			if size then
-				aabbHalfSize = size / 2
-				aabbCenter = targetPosition + (offset or Vector3.new(0, 0, 0))
+				local scale = targetVisual.scale or 1.0
+				aabbHalfSize = (size * scale) / 2
+				aabbCenter = targetPosition + ((offset or Vector3.new(0, 0, 0)) * scale)
 			end
 		elseif DEBUG and not missingHurtboxLogged[targetEntity] then
 			missingHurtboxLogged[targetEntity] = true

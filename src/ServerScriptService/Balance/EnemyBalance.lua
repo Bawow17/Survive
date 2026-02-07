@@ -18,7 +18,7 @@ EnemyBalance.DifficultyCoeff = {
 -- Difficulty coefficient -> enemy scaling exponents (modest)
 EnemyBalance.DifficultyScaling = {
 	SpawnExponent = 1.8,
-	HealthExponent = 4.0,
+	HealthExponent = 5.0,
 	DamageExponent = 0.65,
 	SpeedExponent = 0.85,
 }
@@ -28,14 +28,14 @@ EnemyBalance.SuperElite = {
 	StartMinutes = 0,
 	MidMinutes = 25,
 	LateMinutes = 50,
-
+	
 	SuperOdds = { start = 0.01, mid = 0.03, late = 0.06 },
 	EliteOdds = { start = 0.0015, mid = 0.005, late = 0.01 },
 
 	SpawnScale = 1.0,
 
-	SuperMult = { health = 3.2, damage = 2.5, speed = 2.3, size = 1.6 },
-	EliteMult = { health = 4.4, damage = 3.0, speed = 2.5, size = 2.3 },
+	SuperMult = { health = 6.1, damage = 1.25, speed = 1.15, size = 4.0 },
+	EliteMult = { health = 11.4, damage = 1.6, speed = 0.9, size = 7.5 },
 
 	SuperExpMult = 2.0,
 	EliteExpMult = 3.0,
