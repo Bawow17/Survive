@@ -18,9 +18,9 @@ EnemyBalance.DifficultyCoeff = {
 -- Difficulty coefficient -> enemy scaling exponents (modest)
 EnemyBalance.DifficultyScaling = {
 	SpawnExponent = 1.8,
-	HealthExponent = 5.0,
+	HealthExponent = 4.0,
 	DamageExponent = 0.65,
-	SpeedExponent = 0.85,
+	SpeedExponent = 0.65,
 }
 
 -- Super/Elite tier settings (rarer, stronger)
@@ -28,7 +28,7 @@ EnemyBalance.SuperElite = {
 	StartMinutes = 0,
 	MidMinutes = 25,
 	LateMinutes = 50,
-	
+
 	SuperOdds = { start = 0.01, mid = 0.03, late = 0.06 },
 	EliteOdds = { start = 0.0015, mid = 0.005, late = 0.01 },
 
@@ -148,6 +148,13 @@ EnemyBalance.MinSeparationDistance = 0.5 -- Minimum distance before applying rep
 EnemyBalance.CrowdRepulsionMultiplier = 0.086 -- How much to increase repulsion per extra enemy in crowd (0.6/7 = 0.086 to reach 1.6x at 10 enemies)
 EnemyBalance.CrowdRepulsionThreshold = 3 -- Number of nearby enemies before crowd scaling kicks in
 EnemyBalance.MaxCrowdMultiplier = 1.6 -- Maximum crowd repulsion multiplier (32 max strength: 20 * 1.6 = 32)
+
+-- Movement system tuning (clamp as backup only)
+EnemyBalance.Movement = {
+	MaxStep = 1/30, -- Max dt per movement substep (seconds)
+	MaxSubsteps = 4, -- Cap substeps per frame
+	ClampBackupMultiplier = 3.0, -- Higher = clamp only on extreme spikes
+}
 
 -- Inner crowd stability settings
 EnemyBalance.InnerCrowdThreshold = 8 -- Number of nearby enemies to be considered "inner crowd"

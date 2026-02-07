@@ -24,6 +24,8 @@ EnemyComponents.Movement = world:component()
 
 -- Repulsion component - Enemy separation and anti-stacking
 EnemyComponents.Repulsion = world:component()
+-- RepulsionVelocity component - Repulsion velocity contribution
+EnemyComponents.RepulsionVelocity = world:component()
 
 -- FacingDirection component - Direction the enemy should face (independent of movement)
 EnemyComponents.FacingDirection = world:component()

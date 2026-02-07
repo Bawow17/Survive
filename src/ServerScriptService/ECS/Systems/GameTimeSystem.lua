@@ -51,14 +51,21 @@ function GameTimeSystem.getGameTime(): number
 	return gameTime
 end
 
+function GameTimeSystem.addTime(seconds: number)
+	if typeof(seconds) ~= "number" or seconds <= 0 then
+		return
+	end
+	gameTime += seconds
+	if GameTimeUpdate then
+		GameTimeUpdate:FireAllClients(gameTime)
+	end
+end
+
 -- Reset game time (for testing or game restart)
 function GameTimeSystem.reset()
 	gameTime = 0
-	isPaused = false
-	pauseStartTime = 0
-	totalPausedTime = 0
+	broadcastAccumulator = 0
 	print("[GameTimeSystem] Fully reset to 0")
 end
 
 return GameTimeSystem
-

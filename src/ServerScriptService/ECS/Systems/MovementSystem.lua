@@ -4,6 +4,7 @@
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
@@ -22,8 +23,13 @@ local _Lifetime: any
 local _Homing: any
 local _AI: any  -- AI component for enemy speed data
 local _ChargerState: any
+local _DesiredVelocity: any
+local _RepulsionVelocity: any
+local _Knockback: any
 
 local CHARGER_DASH_STATE = 3
+local ENEMY_DISPLACEMENT_MULT = 2.5
+local DASH_DISPLACEMENT_MULT = 6.0
 
 -- Cached query for performance
 local movingQuery: any
@@ -284,6 +290,9 @@ function MovementSystem.init(worldRef: any, components: any, dirtyService: any)
 	_Homing = Components.Homing
 	_AI = Components.AI  -- For enemy speed data
 	_ChargerState = Components.ChargerState
+	_DesiredVelocity = Components.DesiredVelocity
+	_RepulsionVelocity = Components.RepulsionVelocity
+	_Knockback = Components.Knockback
 	
 	-- Create cached query for performance
 	movingQuery = world:query(Components.Position, Components.Velocity, Components.EntityType):cached()
@@ -303,10 +312,38 @@ local function getNearestPlayerDistSq(pos: Vector3, players: {Vector3}): number
 	return best
 end
 
+local function computeEnemyClampDistance(entity: number, velocity: {x: number, y: number, z: number}, dt: number): number
+	local speed = 0
+	if _AI then
+		local ai = world:get(entity, _AI)
+		if ai and ai.speed then
+			speed = ai.speed
+		end
+	end
+	local velMag = math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z)
+	if velMag > speed then
+		speed = velMag
+	end
+
+	local mult = ENEMY_DISPLACEMENT_MULT
+	if _ChargerState then
+		local chargerState = world:get(entity, _ChargerState)
+		if chargerState and chargerState.state == CHARGER_DASH_STATE then
+			mult = DASH_DISPLACEMENT_MULT
+			if chargerState.dashSpeed and chargerState.dashSpeed > speed then
+				speed = chargerState.dashSpeed
+			end
+		end
+	end
+
+	return (speed * mult) * dt
+end
+
 function MovementSystem.step(dt: number)
 	if not world then
 		return
 	end
+	local fullDt = dt
 
 	Prof.beginTimer("Movement.Time")
 	groundRaycastTime = 0
@@ -322,7 +359,7 @@ function MovementSystem.step(dt: number)
 	end
 
 	-- Periodic cache cleanup (MEMORY LEAK FIX 1.3)
-	cacheCleanupAccumulator = cacheCleanupAccumulator + dt
+	cacheCleanupAccumulator = cacheCleanupAccumulator + fullDt
 	if cacheCleanupAccumulator >= CACHE_CLEANUP_INTERVAL then
 		cacheCleanupAccumulator = 0
 		-- Clear old cache entries
@@ -352,8 +389,17 @@ function MovementSystem.step(dt: number)
 		end
 	end
 
+	local movementCfg = EnemyBalance.Movement or {}
+	local maxStep = movementCfg.MaxStep or (1 / 30)
+	local maxSubsteps = movementCfg.MaxSubsteps or 4
+	local substeps = math.max(1, math.min(maxSubsteps, math.ceil(fullDt / maxStep)))
+	local stepDt = fullDt / substeps
+
 	-- Use cached query for better performance
-	for entity, position, velocity, entityType in movingQuery do
+	for stepIndex = 1, substeps do
+		local dt = stepDt
+		local allowGroundSnap = (stepIndex == substeps)
+		for entity, position, velocity, entityType in movingQuery do
 		-- Exclude players from movement system (they have their own character movement)
 		if entityType and entityType.type == "Player" then
 			continue
@@ -368,6 +414,41 @@ function MovementSystem.step(dt: number)
 			-- If magnetPull exists, allow the orb to move
 		end
 		
+		-- Derive effective velocity (Desired + External) for enemies
+		if entityType and entityType.type == "Enemy" then
+			local desired = _DesiredVelocity and world:get(entity, _DesiredVelocity) or nil
+			local dvx = desired and (desired.x or desired.X or 0) or (velocity.x or 0)
+			local dvy = desired and (desired.y or desired.Y or 0) or (velocity.y or 0)
+			local dvz = desired and (desired.z or desired.Z or 0) or (velocity.z or 0)
+
+			local extX, extY, extZ = 0, 0, 0
+			local chargerState = _ChargerState and world:get(entity, _ChargerState)
+			local isChargerDash = chargerState and chargerState.state == CHARGER_DASH_STATE
+
+			if not isChargerDash then
+				local repulsionVel = _RepulsionVelocity and world:get(entity, _RepulsionVelocity)
+				if repulsionVel then
+					extX += repulsionVel.x or repulsionVel.X or 0
+					extY += repulsionVel.y or repulsionVel.Y or 0
+					extZ += repulsionVel.z or repulsionVel.Z or 0
+				end
+
+				local knockback = _Knockback and world:get(entity, _Knockback)
+				if knockback and knockback.velocity then
+					extX += knockback.velocity.x or knockback.velocity.X or 0
+					extY += knockback.velocity.y or knockback.velocity.Y or 0
+					extZ += knockback.velocity.z or knockback.velocity.Z or 0
+				end
+
+				if knockback and knockback.stunned then
+					dvx, dvy, dvz = 0, 0, 0
+				end
+			end
+
+			velocity = { x = dvx + extX, y = dvy + extY, z = dvz + extZ }
+			DirtyService.setIfChanged(world, entity, _Velocity, velocity, "Velocity")
+		end
+
 		-- Skip entities with very low velocity (optimization)
 		local velocityMagnitude = math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z)
 		if velocityMagnitude < 0.01 then
@@ -437,43 +518,40 @@ function MovementSystem.step(dt: number)
 		-- Clamp per-frame enemy displacement to prevent teleporting from lag spikes
 		-- DYNAMIC CLAMPING: Use enemy's actual speed (accounts for different types + scaling)
 		if entityType.type == "Enemy" and not handledByProjectileLerp then
-			-- Get enemy's current expected speed from AI component
-			local enemySpeed = 150  -- Fallback: generous default for safety
-			local ai = world:get(entity, _AI)
-			if ai and ai.speed then
-				enemySpeed = ai.speed  -- Use scaled speed (baseSpeed * globalMult * lifetimeMult)
-			end
 			local chargerState = _ChargerState and world:get(entity, _ChargerState)
-			if chargerState and chargerState.state == CHARGER_DASH_STATE and chargerState.dashSpeed then
-				enemySpeed = math.max(enemySpeed, chargerState.dashSpeed)
-			end
-			local velMag = math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z)
-			if velMag > enemySpeed then
-				enemySpeed = velMag
-			end
-			
-			-- Allow 2.5x tolerance for burst movement, repulsion, knockback, and frame spikes
-			-- This prevents false positives while still catching actual teleports
-			local maxDisplacementPerFrame = (enemySpeed * 2.5) * dt
-			
-			local dx = newPosition.x - position.x
-			local dy = newPosition.y - position.y
-			local dz = newPosition.z - position.z
-			local displacement = math.sqrt(dx*dx + dy*dy + dz*dz)
-			
-			if displacement > maxDisplacementPerFrame then
-				-- Clamp displacement
-				local scale = maxDisplacementPerFrame / displacement
-				newPosition.x = position.x + dx * scale
-				newPosition.y = position.y + dy * scale
-				newPosition.z = position.z + dz * scale
+			local isChargerDash = chargerState and chargerState.state == CHARGER_DASH_STATE
+
+			-- Skip clamping entirely during Charger dash for max dash speed
+			if not isChargerDash then
+				-- DYNAMIC CLAMPING: use AI speed, velocity, and dash speed when applicable
+				local clampMult = 1.0
+				local movementCfg = EnemyBalance.Movement
+				if movementCfg and movementCfg.ClampBackupMultiplier then
+					clampMult = movementCfg.ClampBackupMultiplier
+				elseif EnemyBalance.ClampBackupMultiplier then
+					clampMult = EnemyBalance.ClampBackupMultiplier
+				end
+				local maxDisplacementPerFrame = computeEnemyClampDistance(entity, velocity, dt) * clampMult
 				
-			-- Only log warning for normal frame times (skip when game is paused/massive lag spike)
-			-- Also skip warning for near-stationary enemies with tiny displacements (floating-point noise)
-			if DEBUG and dt < 0.1 and not (enemySpeed < 5.0 and displacement < 0.5) then
-				warn(string.format("[MovementSystem] Clamped entity %d: %.2f -> %.2f studs (speed: %.1f, dt: %.4f)", 
-					entity, displacement, maxDisplacementPerFrame, enemySpeed, dt))
-			end
+				local dx = newPosition.x - position.x
+				local dy = newPosition.y - position.y
+				local dz = newPosition.z - position.z
+				local displacement = math.sqrt(dx*dx + dy*dy + dz*dz)
+				
+				if displacement > maxDisplacementPerFrame then
+					-- Clamp displacement
+					local scale = maxDisplacementPerFrame / displacement
+					newPosition.x = position.x + dx * scale
+					newPosition.y = position.y + dy * scale
+					newPosition.z = position.z + dz * scale
+					
+					-- Only log warning for normal frame times (skip when game is paused/massive lag spike)
+					-- Also skip warning for near-stationary enemies with tiny displacements (floating-point noise)
+					if DEBUG and dt < 0.1 and not (maxDisplacementPerFrame < 5.0 and displacement < 0.5) then
+						warn(string.format("[MovementSystem] Clamped entity %d: %.2f -> %.2f studs (speed: %.1f, dt: %.4f)", 
+							entity, displacement, maxDisplacementPerFrame, maxDisplacementPerFrame / math.max(dt, 1e-6) / ENEMY_DISPLACEMENT_MULT, dt))
+					end
+				end
 			end
 		end
 		
@@ -528,7 +606,7 @@ function MovementSystem.step(dt: number)
 		
 		-- Only apply ground snapping to enemies, not projectiles
 		-- Throttle ground checks per entity (CRITICAL FIX - raycasting every frame is too expensive!)
-		if entityType.type == "Enemy" then
+		if allowGroundSnap and entityType.type == "Enemy" then
 			local chargerState = _ChargerState and world:get(entity, _ChargerState)
 			local isDashing = chargerState and chargerState.state == CHARGER_DASH_STATE
 			if not isDashing then
@@ -639,6 +717,7 @@ function MovementSystem.step(dt: number)
 		if newPosition.x ~= position.x or newPosition.y ~= position.y or newPosition.z ~= position.z then
 			DirtyService.setIfChanged(world, entity, Position, newPosition, "Position")
 		end
+	end
 	end
 
 	if groundRaycastTime > 0 then

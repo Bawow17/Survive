@@ -57,6 +57,7 @@ local EntityDespawn = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChil
 local RequestInitialSync = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):WaitForChild("RequestInitialSync")
 
 local INTERPOLATION_WINDOW = 0.25 -- default window for slow movement
+local ENEMY_INTERPOLATION_WINDOW = 0.12 -- linear interpolation window for enemies
 local FAST_MOVEMENT_INTERPOLATION_WINDOW = 0.1 -- smoother window for high-speed enemies (dashing)
 local FAST_MOVEMENT_THRESHOLD = 20 -- studs/sec; lowered from 40 to 20 for tighter interpolation
 local HARD_SNAP_THRESHOLD = 30 -- studs; if delta exceeds this, snap immediately (reduced from 50 to prevent teleporting)
@@ -69,6 +70,7 @@ local PROJECTILE_MIN_CONTINUE_SPEED = 0.5 -- studs/sec; if slower, despawn immed
 local USE_PROJECTILE_TWEENS = false
 local PROJECTILE_TWEEN_USES_FIXED_PATH = false -- ensure server updates drive visuals
 local FACE_THRESHOLD = 0.05
+local ENEMY_SMOOTHING_ENABLED = false -- keep movement linear between updates
 local BUFFERED_UPDATE_TTL = 0.75
 local BUFFERED_UPDATE_CLEAN_INTERVAL = 0.5
 local ORB_BOB_AMPLITUDE = 0.6
@@ -2454,12 +2456,14 @@ local function scheduleTransform(entityId: string | number, position: Vector3?, 
             end
         end
     elseif record.entityType == "Enemy" then
+        window = ENEMY_INTERPOLATION_WINDOW
         -- CRITICAL: Use tighter interpolation for high-speed enemies (e.g. Charger dash)
         if velocityComponent then
             local vx = velocityComponent.x or 0
             local vz = velocityComponent.z or 0
             local speed = math.sqrt(vx * vx + vz * vz)
             if speed >= FAST_MOVEMENT_THRESHOLD then
+                -- Use tight interpolation for high-speed enemies (including Charger dash)
                 window = FAST_MOVEMENT_INTERPOLATION_WINDOW
             end
         end
@@ -3890,22 +3894,29 @@ end)
 			newCFrame = fromCFrame:Lerp(toCFrame, alpha)
 		end
 		
-		-- Enemy smoothing: apply a small exponential filter to reduce jitter (especially at high speeds).
-		if record.entityType == "Enemy" then
+		-- Enemy smoothing: optional exponential filter to reduce jitter.
+		if ENEMY_SMOOTHING_ENABLED and record.entityType == "Enemy" then
 			local lastTick = record.lastRenderTick or now
 			local dt = math.max(now - lastTick, 0)
-			local smoothTau = 0.08
-			local smoothAlpha = dt > 0 and (1 - math.exp(-dt / smoothTau)) or 1
-			local prevCFrame = record.smoothedCFrame or record.currentCFrame or newCFrame
-			local prevPos = prevCFrame.Position
-			local targetPos = newCFrame.Position
-			local smoothedPos = Vector3.new(
-				prevPos.X + (targetPos.X - prevPos.X) * smoothAlpha,
-				prevPos.Y + (targetPos.Y - prevPos.Y) * smoothAlpha,
-				prevPos.Z + (targetPos.Z - prevPos.Z) * smoothAlpha
-			)
-			newCFrame = setCFramePosition(newCFrame, smoothedPos)
-			record.smoothedCFrame = newCFrame
+			local isDashSpeed = false
+			local velocityVector = toVelocityVector(record.velocity)
+			if record.entitySubtype == "Charger" and velocityVector and velocityVector.Magnitude >= FAST_MOVEMENT_THRESHOLD then
+				isDashSpeed = true
+			end
+			if not isDashSpeed then
+				local smoothTau = 0.08
+				local smoothAlpha = dt > 0 and (1 - math.exp(-dt / smoothTau)) or 1
+				local prevCFrame = record.smoothedCFrame or record.currentCFrame or newCFrame
+				local prevPos = prevCFrame.Position
+				local targetPos = newCFrame.Position
+				local smoothedPos = Vector3.new(
+					prevPos.X + (targetPos.X - prevPos.X) * smoothAlpha,
+					prevPos.Y + (targetPos.Y - prevPos.Y) * smoothAlpha,
+					prevPos.Z + (targetPos.Z - prevPos.Z) * smoothAlpha
+				)
+				newCFrame = setCFramePosition(newCFrame, smoothedPos)
+				record.smoothedCFrame = newCFrame
+			end
 		end
 
 		local forceRemoval = false

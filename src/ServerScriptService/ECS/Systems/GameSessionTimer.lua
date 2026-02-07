@@ -46,6 +46,16 @@ function GameSessionTimer.getSessionTime(): number
 	return math.max(0, elapsed)
 end
 
+function GameSessionTimer.addTime(seconds: number)
+	if typeof(seconds) ~= "number" or seconds <= 0 then
+		return
+	end
+	if sessionStartTime == 0 then
+		sessionStartTime = tick()
+	end
+	sessionStartTime -= seconds
+end
+
 function GameSessionTimer.resetSession()
 	sessionStartTime = 0
 	sessionPaused = false
@@ -54,4 +64,3 @@ function GameSessionTimer.resetSession()
 end
 
 return GameSessionTimer
-

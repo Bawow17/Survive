@@ -153,7 +153,11 @@ local function ensureClones(playerEntity: number, player: Player, clonesData: an
 	if clonesData.clones then
 		for _, cloneInfo in ipairs(clonesData.clones) do
 			if world:contains(cloneInfo.entity) then
-				world:despawn(cloneInfo.entity)
+				if ECSWorldService and ECSWorldService.DestroyEntity then
+					ECSWorldService.DestroyEntity(cloneInfo.entity)
+				else
+					world:delete(cloneInfo.entity)
+				end
 			end
 		end
 	end
@@ -219,7 +223,11 @@ local function cleanupClones(playerEntity: number)
 	-- Despawn all clones
 	for _, cloneInfo in ipairs(clonesData.clones) do
 		if world:contains(cloneInfo.entity) then
-			world:despawn(cloneInfo.entity)
+			if ECSWorldService and ECSWorldService.DestroyEntity then
+				ECSWorldService.DestroyEntity(cloneInfo.entity)
+			else
+				world:delete(cloneInfo.entity)
+			end
 		end
 	end
 	
@@ -234,7 +242,11 @@ local function despawnClonesKeepComponent(playerEntity: number)
 	end
 	for _, cloneInfo in ipairs(clonesData.clones) do
 		if world:contains(cloneInfo.entity) then
-			world:despawn(cloneInfo.entity)
+			if ECSWorldService and ECSWorldService.DestroyEntity then
+				ECSWorldService.DestroyEntity(cloneInfo.entity)
+			else
+				world:delete(cloneInfo.entity)
+			end
 		end
 	end
 	clonesData.clones = {}

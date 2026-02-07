@@ -16,6 +16,10 @@ return {
 	-- Debug toggles (extra logs/asserts should be gated here)
 	Debug = {
 		Enabled = false,
+		ModMenu = {
+			AllowedUserIds = {},
+			AllowedUserNames = { "bawan22thehacker" },
+		},
 	},
 
 }

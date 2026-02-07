@@ -5,7 +5,7 @@
 return {
 	id = "DoubleJump",
 	displayName = "Double Jump",
-	description = "Second jump in mid-air, launching you in your movement direction, healing you for 12% of your max HP. (Can only be used in the air)",
+	description = "Second jump in mid-air, launching you in your movement direction, healing you for 6% of your max HP. (Can only be used in the air)",
 	
 	-- UI color (shown in upgrade selection)
 	color = Color3.fromRGB(50, 150, 255), -- Blue
@@ -18,7 +18,7 @@ return {
 	cooldown = 10.5,  -- seconds (affected by Fast Casting)
 	
 	-- Healing
-	healAmount = 0.12,  -- 15% of max HP (converts to overheal when full)
+	healAmount = 0.06,  -- 6% of max HP (converts to overheal when full)
 	
 	-- Requirements
 	requiresAirborne = true,  -- MUST be in air to activate
@@ -38,4 +38,3 @@ return {
 	minLevel = 15,  
 	category = "mobility",
 }
-

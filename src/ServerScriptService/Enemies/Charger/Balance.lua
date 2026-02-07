@@ -11,7 +11,7 @@ ChargerBalance.modelPath = "game.ServerStorage.ContentDrawer.Enemies.Mobs.Charge
 -- Base stats (affected by global scaling)
 ChargerBalance.baseHealth = 65 -- Glass cannon: lower than Zombie
 ChargerBalance.baseDamage = 35 -- Only dealt during dash
-ChargerBalance.baseSpeed = 22 -- High base movement speed
+ChargerBalance.baseSpeed = 20 -- High base movement speed
 
 -- AI behavior identifier
 ChargerBalance.behavior = "Charger"

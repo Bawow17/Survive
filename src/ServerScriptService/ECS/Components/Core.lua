@@ -12,6 +12,8 @@ CoreComponents.Position = world:component()
 
 -- Velocity component - 3D velocity for movement
 CoreComponents.Velocity = world:component()
+-- DesiredVelocity component - AI target velocity (movement intent)
+CoreComponents.DesiredVelocity = world:component()
 
 -- Lifetime component - Entity lifetime management
 CoreComponents.Lifetime = world:component()

@@ -20,6 +20,7 @@ local function resetEnemyEntity(entity: number, enemyType: string, position: Vec
 	local posData = { x = position.X, y = position.Y, z = position.Z }
 	world:set(entity, Components.Position, posData)
 	world:set(entity, Components.Velocity, { x = 0, y = 0, z = 0 })
+	world:set(entity, Components.DesiredVelocity, { x = 0, y = 0, z = 0 })
 	world:set(entity, Components.EntityType, {
 		type = "Enemy",
 		subtype = enemyType,  -- "Zombie" or "Charger"
@@ -168,6 +169,12 @@ function EnemyPool.release(entity: number)
 		end
 		if world:has(entity, Components.Repulsion) then
 			world:remove(entity, Components.Repulsion)
+		end
+		if world:has(entity, Components.RepulsionVelocity) then
+			world:remove(entity, Components.RepulsionVelocity)
+		end
+		if world:has(entity, Components.DesiredVelocity) then
+			world:remove(entity, Components.DesiredVelocity)
 		end
 		if world:has(entity, Components.ChargerState) then
 			world:remove(entity, Components.ChargerState)

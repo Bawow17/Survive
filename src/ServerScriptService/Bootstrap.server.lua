@@ -72,6 +72,9 @@ local PickupService = require(game.ServerScriptService.Services.PickupService)
 local BankedHandsService = require(game.ServerScriptService.Services.BankedHandsService)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
 local LoopGameService = require(game.ServerScriptService.Services.LoopGameService)
+local DebugModMenuService = require(game.ServerScriptService.Services.DebugModMenuService)
+local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff)
+local GameSessionTimer = require(game.ServerScriptService.ECS.Systems.GameSessionTimer)
 
 -- Upgrade Systems
 local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
@@ -335,6 +338,7 @@ function ECSWorldService.Initialize()
 		return entityToPlayer[entityId]
 	end)
 	LoopGameService.init()
+	DebugModMenuService.init(world, Components, UpgradeSystem, GameTimeSystem, DifficultyCoeff, GameSessionTimer)
 	HitFlashSystem.init(world, Components)
 	DeathAnimationSystem.init(world, Components, ECSWorldService)
 	KnockbackSystem.init(world, Components, DirtyService)
@@ -468,6 +472,7 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 		subtype = enemyType or "Zombie",
 	}, "EntityType")
 	setComponent(entity, Velocity, { x = 0, y = 0, z = 0 }, "Velocity")
+	setComponent(entity, Components.DesiredVelocity, { x = 0, y = 0, z = 0 }, "DesiredVelocity")
 	setComponent(entity, Health, { current = baseHealth, max = baseHealth }, "Health")
 	setComponent(entity, Damage, { amount = baseDamage, type = "physical" }, "Damage")
 	-- Don't set state for Chargers - let ChargerAISystem initialize it with numeric constants

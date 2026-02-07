@@ -84,6 +84,12 @@ local function resolveNextHand(playerEntity: number, player: Player?): (any?, {q
 					color = choice.color,
 					rarity = choice.rarity,
 					level = choice.level,
+					-- Include identifiers for icon resolution on the client.
+					statId = choice.statId,
+					abilityId = choice.abilityId,
+					attributeId = choice.attributeId,
+					mobilityId = choice.mobilityId,
+					iconId = choice.iconId,
 				}
 			end
 			changed = true

@@ -12,11 +12,10 @@ return {
 	-- Base stats (before multipliers and scaling)
 	baseHealth = 85,
 	baseDamage = 25,
-	baseSpeed = 14,
+	baseSpeed = 12,
 	
 	-- AI behavior
 	behavior = "Melee",
 	attackRange = 4,  -- Default if attackbox not found in model
 	attackCooldown = 0.7,
 }
-

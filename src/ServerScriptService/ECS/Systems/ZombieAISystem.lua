@@ -28,6 +28,7 @@ local QueryPool: any
 
 local Position: any
 local Velocity: any
+local DesiredVelocity: any
 local AI: any
 local Target: any
 local AttackCooldown: any
@@ -159,7 +160,11 @@ local function findNearestPlayer(enemyPosition: {x: number, y: number, z: number
 end
 
 local function setVelocity(entity: number, velocity: {x: number, y: number, z: number})
-	DirtyService.setIfChanged(world, entity, Velocity, velocity, "Velocity")
+	if DesiredVelocity then
+		DirtyService.setIfChanged(world, entity, DesiredVelocity, velocity, "DesiredVelocity")
+	else
+		DirtyService.setIfChanged(world, entity, Velocity, velocity, "Velocity")
+	end
 end
 
 local function setAttackCooldown(entity: number, remaining: number, maximum: number)
@@ -493,6 +498,7 @@ function ZombieAISystem.init(worldRef: any, components: any, dirtyService: any, 
 
 	Position = Components.Position
 	Velocity = Components.Velocity
+	DesiredVelocity = Components.DesiredVelocity
 	AI = Components.AI
 	Target = Components.Target
 	AttackCooldown = Components.AttackCooldown
@@ -784,12 +790,9 @@ function ZombieAISystem.step(dt: number)
 		local entityType = enemyData.entityType -- Pre-fetched, no world:get needed
 		local target = enemyData.target -- Pre-fetched, may be nil
 
-		-- Check for knockback stun - skip normal AI if stunned
+		-- Check for knockback stun - still allow attacks, but skip movement
 		local knockback = world:get(enemyEntity, Components.Knockback)
-		if knockback and knockback.stunned then
-			-- Enemy is stunned by knockback, skip normal AI movement
-			continue
-		end
+		local isStunned = knockback and knockback.stunned or false
 
 		-- Update activity tracking
 		entityLastActivity[enemyEntity] = tick()
@@ -901,6 +904,7 @@ function ZombieAISystem.step(dt: number)
 
 		-- Calculate movement velocity (will be modified by repulsion system)
 		local newVelocity = { x = 0, y = 0, z = 0 }
+		if not isStunned then
 		if distSq > 0 and distance > 0 then
 			-- Use AI speed set at spawn (already scaled for owner pressure)
 			local baseSpeed = (ai and ai.speed) or (ai and ai.balance and ai.balance.baseSpeed) or 8
@@ -1058,6 +1062,7 @@ function ZombieAISystem.step(dt: number)
 			
 			-- Update PathfindingState with new Y velocities
 			setPathfindingState(enemyEntity, pathfindingState)
+		end
 		end
 
 		-- Attack logic (attack when in range and cooldown is ready)

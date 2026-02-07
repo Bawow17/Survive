@@ -15,7 +15,9 @@ local Position: any
 local Velocity: any
 local AI: any
 local Repulsion: any
+local RepulsionVelocity: any
 local EntityTypeComponent: any
+local ChargerState: any
 
 -- Import balance settings
 EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
@@ -150,7 +152,9 @@ function EnemyRepulsionSystem.init(worldRef: any, components: any, dirtyService:
     Velocity = Components.Velocity
     AI = Components.AI
     Repulsion = Components.Repulsion
+    RepulsionVelocity = Components.RepulsionVelocity
     EntityTypeComponent = Components.EntityType
+    ChargerState = Components.ChargerState
     
     -- Create cached queries for performance (CRITICAL FIX - was creating new queries every frame!)
     enemyQuery = world:query(Components.Position, Components.Velocity, Components.AI, Components.Repulsion, Components.EntityType)
@@ -228,8 +232,13 @@ function EnemyRepulsionSystem.step(dt: number)
         end
     end
     
-    -- Skip if no enemies or only one enemy
+    -- If no enemies or only one enemy, clear repulsion velocity and exit
     if #enemies <= 1 then
+        if RepulsionVelocity then
+            for _, enemyData in ipairs(enemies) do
+                DirtyService.setIfChanged(world, enemyData.entity, RepulsionVelocity, { x = 0, y = 0, z = 0 }, "RepulsionVelocity")
+            end
+        end
         return
     end
     
@@ -247,6 +256,15 @@ function EnemyRepulsionSystem.step(dt: number)
         local position = enemyData.position
         local velocity = enemyData.velocity
         local repulsion = enemyData.repulsion
+
+        -- Skip repulsion during Charger dash to avoid slowing/deflecting dash
+        local chargerState = ChargerState and world:get(entity, ChargerState)
+        if chargerState and chargerState.state == 3 then
+            if RepulsionVelocity then
+                DirtyService.setIfChanged(world, entity, RepulsionVelocity, { x = 0, y = 0, z = 0 }, "RepulsionVelocity")
+            end
+            continue
+        end
         
         -- Get repulsion parameters (with defaults)
         local repulsionRadius = repulsion.radius or EnemyBalance.RepulsionRadius
@@ -283,7 +301,8 @@ function EnemyRepulsionSystem.step(dt: number)
             end
         end
         
-        -- Apply repulsion force to velocity (additive, doesn't override AI movement)
+        -- Build repulsion velocity (external contribution only)
+        local repulsionVel = { x = 0, y = 0, z = 0 }
         if repulsionData.nearbyCount > 0 then
             -- Crowd-density scaling: increase repulsion strength for large groups
             local crowdMultiplier = 1.0
@@ -312,30 +331,24 @@ function EnemyRepulsionSystem.step(dt: number)
             
             -- Smooth the forces to prevent jittery movement
             local smoothedRepulsionX, smoothedRepulsionZ = smoothRepulsionForce(entity, rawRepulsionX, rawRepulsionZ)
-            
-			-- Add repulsion to current velocity (preserving Y component and AI movement)
-			local proposedVelocity = {
-				x = velocity.x + smoothedRepulsionX,
-				y = velocity.y, -- Preserve Y component
-				z = velocity.z + smoothedRepulsionZ
-			}
-			
-			-- Cap velocity changes to prevent aggressive jumping
-			local finalVelocity = capVelocityChange(velocity, proposedVelocity)
-			
-			-- PHYSICS BUG FIX 2.3: Cap total velocity magnitude to prevent launching
-			local MAX_TOTAL_VELOCITY = 20.0  -- studs/second
-			local velocityMag = math.sqrt(finalVelocity.x^2 + finalVelocity.z^2)
-			if velocityMag > MAX_TOTAL_VELOCITY then
-				local scale = MAX_TOTAL_VELOCITY / velocityMag
-				finalVelocity.x = finalVelocity.x * scale
-				finalVelocity.z = finalVelocity.z * scale
-			end
-			
-			-- Update velocity through DirtyService
-			DirtyService.setIfChanged(world, entity, Velocity, finalVelocity, "Velocity")
+
+            repulsionVel.x = smoothedRepulsionX
+            repulsionVel.z = smoothedRepulsionZ
+
+            -- Cap repulsion velocity magnitude to prevent excessive pushing
+            local MAX_TOTAL_REPULSION = 20.0
+            local velocityMag = math.sqrt(repulsionVel.x^2 + repulsionVel.z^2)
+            if velocityMag > MAX_TOTAL_REPULSION then
+                local scale = MAX_TOTAL_REPULSION / velocityMag
+                repulsionVel.x = repulsionVel.x * scale
+                repulsionVel.z = repulsionVel.z * scale
+            end
         end
-        
+
+        if RepulsionVelocity then
+            DirtyService.setIfChanged(world, entity, RepulsionVelocity, repulsionVel, "RepulsionVelocity")
+        end
+
         returnRepulsionData(repulsionData)
     end
 end

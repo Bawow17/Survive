@@ -13,6 +13,16 @@ function DifficultyCoeff.reset(startTime: number?)
 	runStartTime = startTime or os.clock()
 end
 
+function DifficultyCoeff.addTime(seconds: number)
+	if typeof(seconds) ~= "number" or seconds <= 0 then
+		return
+	end
+	if not runStartTime then
+		runStartTime = os.clock()
+	end
+	runStartTime -= seconds
+end
+
 local function getPlayerCount(): number
 	local count = 0
 	for _, player in ipairs(Players:GetPlayers()) do

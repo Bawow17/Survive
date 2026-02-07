@@ -12,6 +12,8 @@ local UpgradeDefs = require(game.ServerScriptService.Balance.Upgrades.UpgradeDef
 local DashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Dash)
 local ShieldBashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.ShieldBash)
 local DoubleJumpConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.DoubleJump)
+local BlinkConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Blink)
+local ManaGrappleConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.ManaGrapple)
 
 local UpgradeSystem = {}
 
@@ -511,13 +513,24 @@ local function pickPassiveStatDefs(upgrades: any, playerEntity: number, choiceRa
 	return statPool
 end
 
-local function rollStatValues(selectedStats: {any}, rarity: any, playerEntity: number?): ({[string]: number}, {[string]: number}, {[string]: string})
+local function rollStatValues(
+	selectedStats: {any},
+	rarity: any,
+	playerEntity: number?,
+	forcedStatRarityId: string?
+): ({[string]: number}, {[string]: number}, {[string]: string})
 	local rolls: {[string]: number} = {}
 	local counts: {[string]: number} = {}
 	local statRarities: {[string]: string} = {}
 	local choiceRarityId = (rarity and rarity.id) or "Common"
+	if forcedStatRarityId and forcedStatRarityId ~= "" then
+		choiceRarityId = forcedStatRarityId
+	end
 
 	local function rollRarityId(): string
+		if forcedStatRarityId and forcedStatRarityId ~= "" then
+			return forcedStatRarityId
+		end
 		if playerEntity then
 			return rollRarity(playerEntity).id
 		end
@@ -856,13 +869,21 @@ local function getAvailableAttributesForAbility(playerEntity: number, abilityId:
 
 	return available
 end
-local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string, upgrades: any): any?
+local function buildAbilityUpgradeChoice(
+	playerEntity: number,
+	abilityId: string,
+	upgrades: any,
+	forcedChoiceRarityId: string?,
+	forcedStatRarityId: string?
+): any?
 	local ability = AbilityRegistry.get(abilityId)
 	if not ability then
 		return nil
 	end
 	local abilityState = ensureAbilityUpgradeState(upgrades, abilityId)
-	local rarity = rollRarity(playerEntity)
+	local rarity = if forcedChoiceRarityId and UpgradeDefs.Rarities[forcedChoiceRarityId]
+		then UpgradeDefs.Rarities[forcedChoiceRarityId]
+		else rollRarity(playerEntity)
 	local statPool = pickAbilityStatDefs(ability.balance, upgrades, abilityId, rarity.id)
 	if #statPool == 0 then
 		return nil
@@ -887,7 +908,7 @@ local function buildAbilityUpgradeChoice(playerEntity: number, abilityId: string
 		return nil
 	end
 
-	local rolls, counts, statRarities = rollStatValues(selected, rarity, playerEntity)
+	local rolls, counts, statRarities = rollStatValues(selected, rarity, playerEntity, forcedStatRarityId)
 	local desc, descParts = buildStatDescription(selected, rolls, counts, statRarities)
 	local finalRarityId = getHighestRarityId(statRarities, rarity.id)
 	local finalRarity = UpgradeDefs.Rarities[finalRarityId] or rarity
@@ -1051,6 +1072,28 @@ local function buildMobilityChoices(playerEntity: number): {any}
 			name = DoubleJumpConfig.displayName,
 			desc = DoubleJumpConfig.description,
 			color = DoubleJumpConfig.color,
+		})
+	end
+
+	if playerLevel >= BlinkConfig.minLevel then
+		table.insert(choices, {
+			id = "mobility_Blink",
+			category = "mobility",
+			mobilityId = "Blink",
+			name = BlinkConfig.displayName,
+			desc = BlinkConfig.description,
+			color = BlinkConfig.color,
+		})
+	end
+
+	if playerLevel >= ManaGrappleConfig.minLevel then
+		table.insert(choices, {
+			id = "mobility_ManaGrapple",
+			category = "mobility",
+			mobilityId = "ManaGrapple",
+			name = ManaGrappleConfig.displayName,
+			desc = ManaGrappleConfig.description,
+			color = ManaGrappleConfig.color,
 		})
 	end
 
@@ -1320,6 +1363,255 @@ function UpgradeSystem.selectUpgradeChoices(playerEntity: number, level: number,
 
 	return choices
 end
+
+local function getAllAttributesForAbility(playerEntity: number, abilityId: string): {{id: string, data: any}}
+	local available = {}
+	local abilityData = world:get(playerEntity, AbilityData)
+	if not abilityData or not abilityData.abilities or not abilityData.abilities[abilityId] then
+		return available
+	end
+
+	local success, attributesModule = pcall(function()
+		return require(game.ServerScriptService.Abilities[abilityId].Attributes)
+	end)
+	if not success or not attributesModule then
+		return available
+	end
+
+	for _, attributeData in pairs(attributesModule) do
+		if type(attributeData) == "table" and attributeData.id then
+			table.insert(available, {
+				id = attributeData.id,
+				data = attributeData,
+			})
+		end
+	end
+
+	table.sort(available, function(a, b)
+		return tostring(a.data.name or a.id) < tostring(b.data.name or b.id)
+	end)
+	return available
+end
+
+local function rarityAtLeast(rarity: any, minRarityId: string?): any
+	if not minRarityId then
+		return rarity
+	end
+	local minRarity = UpgradeDefs.Rarities[minRarityId]
+	if not minRarity then
+		return rarity
+	end
+	local currentIndex = RARITY_ORDER[rarity.id] or 1
+	local minIndex = RARITY_ORDER[minRarity.id] or 1
+	if currentIndex >= minIndex then
+		return rarity
+	end
+	return minRarity
+end
+
+local function buildDebugPassiveChoice(playerEntity: number, upgrades: any, statId: string): any?
+	local def = passiveStatById[statId]
+	if not def or def.hidden then
+		return nil
+	end
+
+	local forcedRarityId = clampRarityId("Legendary", def.minRarity)
+	local rarity = UpgradeDefs.Rarities[forcedRarityId] or rarityAtLeast(rollRarity(playerEntity), def.minRarity)
+	local rolls, counts, statRarities = rollStatValues({def}, rarity, playerEntity, forcedRarityId)
+	local desc, descParts = buildStatDescription({def}, rolls, counts, statRarities)
+	local finalRarityId = getHighestRarityId(statRarities, rarity.id)
+	local finalRarity = UpgradeDefs.Rarities[finalRarityId] or rarity
+	assignPartColors(descParts, finalRarity)
+
+	local levels = upgrades.passives.levels or {}
+	local levelValue = levels[def.id] or 0
+	if def.kind == "paired" then
+		levelValue = 0
+		for _, subId in ipairs(def.subStats or {}) do
+			levelValue = math.max(levelValue, levels[subId] or 0)
+		end
+	end
+
+	return {
+		id = HttpService:GenerateGUID(false),
+		category = "passive",
+		statId = def.id,
+		name = def.display,
+		desc = desc,
+		descParts = descParts,
+		color = finalRarity.color,
+		rarity = finalRarity.id,
+		level = levelValue + 1,
+		rolls = rolls,
+		counts = counts,
+	}
+end
+
+function UpgradeSystem.getDebugCatalog(playerEntity: number): {any}
+	if not world then
+		return {}
+	end
+	local entries = {}
+
+	local unlockChoices = buildUnlockChoices(playerEntity)
+	for _, choice in ipairs(unlockChoices) do
+		table.insert(entries, {
+			entryId = "unlock:" .. tostring(choice.abilityId),
+			category = "unlock",
+			name = tostring(choice.name),
+			subtitle = "Unlock ability",
+			iconKey = "unlock:" .. tostring(choice.abilityId),
+		})
+	end
+
+	local ownedAbilities = getOwnedAbilities(playerEntity)
+	table.sort(ownedAbilities)
+	for _, abilityId in ipairs(ownedAbilities) do
+		local ability = AbilityRegistry.get(abilityId)
+		local abilityName = ability and (ability.balance.Name or abilityId) or abilityId
+		table.insert(entries, {
+			entryId = "ability:" .. tostring(abilityId),
+			category = "ability",
+			name = tostring(abilityName),
+			subtitle = "Grant ability upgrade",
+			iconKey = tostring(abilityId),
+		})
+	end
+
+	local passiveDefs = {}
+	for _, def in pairs(UpgradeDefs.PassiveStats) do
+		if def.id and not def.hidden then
+			table.insert(passiveDefs, def)
+		end
+	end
+	table.sort(passiveDefs, function(a, b)
+		return tostring(a.display or a.id) < tostring(b.display or b.id)
+	end)
+	for _, def in ipairs(passiveDefs) do
+		table.insert(entries, {
+			entryId = "passive:" .. tostring(def.id),
+			category = "passive",
+			name = tostring(def.display or def.id),
+			subtitle = "Grant passive upgrade",
+			iconKey = tostring(def.id),
+		})
+	end
+
+	for _, abilityId in ipairs(ownedAbilities) do
+		local attrs = getAllAttributesForAbility(playerEntity, abilityId)
+		for _, attr in ipairs(attrs) do
+			table.insert(entries, {
+				entryId = "attribute:" .. tostring(abilityId) .. ":" .. tostring(attr.id),
+				category = "attribute",
+				name = tostring(attr.data.name or attr.id),
+				subtitle = tostring(abilityId),
+				iconKey = "attr:" .. tostring(abilityId) .. ":" .. tostring(attr.id),
+			})
+		end
+	end
+
+	local mobilityDefs = {
+		{ id = "Dash", name = DashConfig.displayName },
+		{ id = "ShieldBash", name = ShieldBashConfig.displayName },
+		{ id = "DoubleJump", name = DoubleJumpConfig.displayName },
+		{ id = "Blink", name = BlinkConfig.displayName },
+		{ id = "ManaGrapple", name = ManaGrappleConfig.displayName },
+	}
+	for _, mobility in ipairs(mobilityDefs) do
+		table.insert(entries, {
+			entryId = "mobility:" .. tostring(mobility.id),
+			category = "mobility",
+			name = tostring(mobility.name or mobility.id),
+			subtitle = "Equip mobility",
+			iconKey = "mobility:" .. tostring(mobility.id),
+		})
+	end
+
+	table.sort(entries, function(a, b)
+		local categoryOrder = {
+			unlock = 1,
+			ability = 2,
+			passive = 3,
+			attribute = 4,
+			mobility = 5,
+		}
+		local aOrder = categoryOrder[a.category] or 99
+		local bOrder = categoryOrder[b.category] or 99
+		if aOrder ~= bOrder then
+			return aOrder < bOrder
+		end
+		if a.name ~= b.name then
+			return a.name < b.name
+		end
+		return a.entryId < b.entryId
+	end)
+
+	return entries
+end
+
+function UpgradeSystem.applyDebugEntry(playerEntity: number, entryId: string): boolean
+	if not world or type(entryId) ~= "string" or entryId == "" then
+		return false
+	end
+
+	local upgrades = ensureUpgradeState(playerEntity)
+	local prefix, rest = entryId:match("^(%w+)%:(.+)$")
+	if not prefix or not rest then
+		return false
+	end
+
+	if prefix == "unlock" then
+		local abilityId = rest
+		return UpgradeSystem.applyUpgrade(playerEntity, {
+			category = "ability_unlock",
+			abilityId = abilityId,
+			id = "unlock_" .. abilityId,
+		})
+	end
+
+	if prefix == "ability" then
+		local abilityId = rest
+		local choice = buildAbilityUpgradeChoice(playerEntity, abilityId, upgrades, "Legendary", "Legendary")
+		if not choice then
+			return false
+		end
+		return UpgradeSystem.applyUpgrade(playerEntity, choice)
+	end
+
+	if prefix == "passive" then
+		local statId = rest
+		local choice = buildDebugPassiveChoice(playerEntity, upgrades, statId)
+		if not choice then
+			return false
+		end
+		return UpgradeSystem.applyUpgrade(playerEntity, choice)
+	end
+
+	if prefix == "attribute" then
+		local abilityId, attributeId = rest:match("^([^:]+)%:(.+)$")
+		if not abilityId or not attributeId then
+			return false
+		end
+		return UpgradeSystem.applyUpgrade(playerEntity, {
+			category = "attribute",
+			id = abilityId .. "_attr_" .. attributeId,
+			abilityId = abilityId,
+			attributeId = attributeId,
+		})
+	end
+
+	if prefix == "mobility" then
+		local mobilityId = rest
+		return UpgradeSystem.applyUpgrade(playerEntity, {
+			category = "mobility",
+			mobilityId = mobilityId,
+			id = "mobility_" .. mobilityId,
+		})
+	end
+
+	return false
+end
+
 local function rebuildAbilityStats(playerEntity: number, abilityId: string, upgrades: any)
 	local ability = AbilityRegistry.get(abilityId)
 	if not ability then
@@ -1483,7 +1775,7 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 		critDamage = 0,
 		armorReduction = 0,
 		lifesteal = 0,
-		luck = 0,
+		luck = 1.0,
 		powerupChance = 0,
 		projectileCountBonus = upgrades.passives.counts.projectileCount or 0,
 		activeSpeedBuffs = (world:get(playerEntity, PassiveEffects) or {}).activeSpeedBuffs or {},
@@ -1692,6 +1984,10 @@ local function applyMobilityUpgrade(playerEntity: number, mobilityId: string): b
 		mobilityConfig = ShieldBashConfig
 	elseif mobilityId == "DoubleJump" then
 		mobilityConfig = DoubleJumpConfig
+	elseif mobilityId == "Blink" then
+		mobilityConfig = BlinkConfig
+	elseif mobilityId == "ManaGrapple" then
+		mobilityConfig = ManaGrappleConfig
 	end
 
 	if not mobilityConfig then
@@ -1711,6 +2007,43 @@ local function applyMobilityUpgrade(playerEntity: number, mobilityId: string): b
 		end
 	end
 
+	if mobilityId == "Blink" then
+		local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+		local paths = {
+			mobilityConfig.blinkJumpStartModelPath,
+			mobilityConfig.blinkJumpEndModelPath,
+			mobilityConfig.blinkGroundStartModelPath,
+			mobilityConfig.blinkGroundEndModelPath,
+			mobilityConfig.blinkGroundBeamModelPath,
+		}
+		for _, serverPath in ipairs(paths) do
+			if type(serverPath) == "string" and serverPath ~= "" then
+				local success = ModelReplicationService.replicateMobilityModel(serverPath)
+				if not success then
+					warn("[UpgradeSystem] Could not find Blink VFX model in ServerStorage (expected at: ServerStorage." .. serverPath .. ").")
+				end
+			end
+		end
+	end
+
+	if mobilityId == "ManaGrapple" then
+		local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+		local paths = {
+			mobilityConfig.grappleStartModelPath,
+			mobilityConfig.grappleManaPointModelPath,
+			mobilityConfig.grappleEndModelPath,
+			mobilityConfig.grappleBeamModelPath,
+		}
+		for _, serverPath in ipairs(paths) do
+			if type(serverPath) == "string" and serverPath ~= "" then
+				local success = ModelReplicationService.replicateMobilityModel(serverPath)
+				if not success then
+					warn("[UpgradeSystem] Could not find Grapple VFX model in ServerStorage (expected at: ServerStorage." .. serverPath .. ").")
+				end
+			end
+		end
+	end
+
 	local mobilityData = {
 		equippedMobility = mobilityId,
 		distance = mobilityConfig.distance or (mobilityConfig.horizontalDistance and mobilityConfig.horizontalDistance or 25),
@@ -1722,6 +2055,28 @@ local function applyMobilityUpgrade(playerEntity: number, mobilityId: string): b
 		damage = mobilityConfig.damage,
 		knockbackDistance = mobilityConfig.knockbackDistance,
 		invincibilityPerHit = mobilityConfig.invincibilityPerHit,
+		groundDistance = mobilityConfig.groundDistance,
+		airDistance = mobilityConfig.airDistance,
+		airAngleDeg = mobilityConfig.airAngleDeg,
+		airWindup = mobilityConfig.airWindup,
+		groundCooldown = mobilityConfig.groundCooldown,
+		airCooldown = mobilityConfig.airCooldown,
+		blinkJumpStartPath = mobilityConfig.blinkJumpStartModelPath and ("ReplicatedStorage." .. mobilityConfig.blinkJumpStartModelPath) or nil,
+		blinkJumpEndPath = mobilityConfig.blinkJumpEndModelPath and ("ReplicatedStorage." .. mobilityConfig.blinkJumpEndModelPath) or nil,
+		blinkGroundStartPath = mobilityConfig.blinkGroundStartModelPath and ("ReplicatedStorage." .. mobilityConfig.blinkGroundStartModelPath) or nil,
+		blinkGroundEndPath = mobilityConfig.blinkGroundEndModelPath and ("ReplicatedStorage." .. mobilityConfig.blinkGroundEndModelPath) or nil,
+		blinkGroundBeamPath = mobilityConfig.blinkGroundBeamModelPath and ("ReplicatedStorage." .. mobilityConfig.blinkGroundBeamModelPath) or nil,
+		grappleHorizontalDistance = mobilityConfig.grappleHorizontalDistance,
+		grappleVerticalHeight = mobilityConfig.grappleVerticalHeight,
+		grappleCooldown = mobilityConfig.grappleCooldown,
+		grappleManaForward = mobilityConfig.grappleManaForward,
+		grappleManaUp = mobilityConfig.grappleManaUp,
+		grappleDampStartFrac = mobilityConfig.grappleDampStartFrac,
+		grappleDampStrength = mobilityConfig.grappleDampStrength,
+		grappleStartPath = mobilityConfig.grappleStartModelPath and ("ReplicatedStorage." .. mobilityConfig.grappleStartModelPath) or nil,
+		grappleManaPointPath = mobilityConfig.grappleManaPointModelPath and ("ReplicatedStorage." .. mobilityConfig.grappleManaPointModelPath) or nil,
+		grappleEndPath = mobilityConfig.grappleEndModelPath and ("ReplicatedStorage." .. mobilityConfig.grappleEndModelPath) or nil,
+		grappleBeamPath = mobilityConfig.grappleBeamModelPath and ("ReplicatedStorage." .. mobilityConfig.grappleBeamModelPath) or nil,
 	}
 
 	DirtyService.setIfChanged(world, playerEntity, Components.MobilityData, mobilityData, "MobilityData")

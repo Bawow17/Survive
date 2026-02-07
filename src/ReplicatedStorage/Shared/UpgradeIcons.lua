@@ -30,26 +30,28 @@ local UpgradeIcons = {
 	["unlock:Refractions"] = "87778366744205",
 
 	-- Passive upgrades
-	damage = "",
+	damage = "108126005649243",
 	critChance = "117447607456881",
 	critDamage = "74895737431797",
 	projectileCount = "124099181412764",
 	healthArmor = "108071713789743",
 	vampiric = "72194263039152",
 	abilitySize = "126546245240667",
-	cooldownReduction = "72605923567526",
+	cooldownReduction = "71832146367825",
 	abilityDuration = "113652545092588",
-	penetration = "",
-	moveSpeed = "",
-	mobilityCooldown = "",
-	dashDistance = "",
+	penetration = "118848371871533",
+	moveSpeed = "99817712946636",
+	mobilityCooldown = "78598550205745",
+	dashDistance = "73388896129650",
 	luck = "82318061048285",
-	expGain = "113673838028786",
+	expGain = "91526535217647",
 
 	-- Mobility upgrades
 	["mobility:Dash"] = "",
 	["mobility:ShieldBash"] = "",
 	["mobility:DoubleJump"] = "",
+	["mobility:Blink"] = "",
+	["mobility:ManaGrapple"] = "",
 
 	-- Attributes
 	["attr:MagicBolt:ChainCasting"] = "",

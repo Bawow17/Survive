@@ -5,7 +5,7 @@
 return {
 	id = "ShieldBash",
 	displayName = "Shield Bash",
-	description = "Powerful dash that damages enemies, negates damage, and grants overshield. (5% max HP per enemy hit)",
+	description = "Powerful dash that damages enemies, negates damage, and grants overshield. (10% max HP per enemy hit)",
 	
 	-- UI color (shown in upgrade selection)
 	color = Color3.fromRGB(180, 80, 0), -- Dark orange
@@ -22,7 +22,7 @@ return {
 	knockbackDistance = 50,  -- studs
 	preDashInvincibility = 0.0,  -- no pre-dash invincibility (invincibility is granted on hit)
 	invincibilityPerHit = 0.25,  -- seconds of invincibility per enemy hit (stacks)
-	overshieldPerHit = 0.05,  -- 5% of max health as overshield per enemy hit (stacks)
+	overshieldPerHit = 0.10,  -- 10% of max health as overshield per enemy hit (stacks)
 	
 	-- Visual
 	afterimageCount = 6,

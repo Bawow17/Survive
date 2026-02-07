@@ -506,11 +506,13 @@ local puzzleSolved = false
 local objectiveModel: Model? = nil
 local objectivePrompt: ProximityPrompt? = nil
 local fadeToken = 0
+local solvedCloseToken = 0
 
 local tiles: {{any}} = {}
 local gridSize = 0
 
 local function closeUI(sendClose: boolean)
+	solvedCloseToken += 1
 	local objectiveId = activeObjectiveId
 	loopGui.Enabled = false
 	puzzleSolved = false
@@ -676,6 +678,9 @@ local function startDistanceCheck()
 		if not objectivePosition then
 			return
 		end
+		if puzzleSolved then
+			return
+		end
 		local root = getPlayerRoot()
 		if root then
 			if (root.Position - objectivePosition).Magnitude > AUTO_CLOSE_DIST then
@@ -723,7 +728,6 @@ local function tryCompletePuzzle()
 	if activeObjectiveId then
 		completeRemote:FireServer(activeObjectiveId)
 	end
-	closeUI(false)
 end
 
 openPuzzleForObjective = function(objectiveId: number)
@@ -950,6 +954,9 @@ buildPuzzle = function(seed: number, size: number)
 				if not loopGui.Enabled then
 					return
 				end
+				if puzzleSolved then
+					return
+				end
 				local now = os.clock()
 				if now - (tile.lastClickTime or 0) < 0.05 then
 					return
@@ -1018,6 +1025,18 @@ closeAllRemote.OnClientEvent:Connect(function(payload: any)
 		if activeObjectiveId and typeof(objectiveId) == "number" and objectiveId ~= activeObjectiveId then
 			return
 		end
+	end
+	if puzzleSolved then
+		solvedCloseToken += 1
+		local token = solvedCloseToken
+		task.delay(1, function()
+			if token ~= solvedCloseToken then
+				return
+			end
+			closeUI(false)
+			fadeAndClearObjectiveModel()
+		end)
+		return
 	end
 	closeUI(false)
 	fadeAndClearObjectiveModel()

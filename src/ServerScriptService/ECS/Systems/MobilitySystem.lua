@@ -19,6 +19,8 @@ local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitbox
 local DashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Dash)
 local ShieldBashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.ShieldBash)
 local DoubleJumpConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.DoubleJump)
+local BlinkConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Blink)
+local ManaGrappleConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.ManaGrapple)
 
 local MobilitySystem = {}
 
@@ -42,6 +44,7 @@ local activeShieldBashes: {{
 	playerEntity: number,
 	player: Player,
 	startTime: number,
+	endTime: number,
 	duration: number,
 	damage: number,
 	knockbackDistance: number,
@@ -63,6 +66,8 @@ local MOBILITY_CONFIGS = {
 	Dash = DashConfig,
 	ShieldBash = ShieldBashConfig,
 	DoubleJump = DoubleJumpConfig,
+	Blink = BlinkConfig,
+	ManaGrapple = ManaGrappleConfig,
 }
 
 -- Mobility display names for UI
@@ -70,6 +75,8 @@ local MOBILITY_DISPLAY_NAMES = {
 	Dash = "Dash",
 	ShieldBash = "Shield Bash",
 	DoubleJump = "Double Jump",
+	Blink = "Blink",
+	ManaGrapple = "Mana Grapple",
 }
 
 -- Get player entity from Player instance
@@ -87,7 +94,7 @@ local function getPlayerEntity(player: Player): number?
 end
 
 -- Validate and handle mobility activation
-local function handleMobilityActivation(player: Player, mobilityId: string)
+local function handleMobilityActivation(player: Player, mobilityId: string, variant: string?)
 	-- Get player entity
 	local playerEntity = getPlayerEntity(player)
 	if not playerEntity then
@@ -128,6 +135,17 @@ local function handleMobilityActivation(player: Player, mobilityId: string)
 	
 	-- Apply cooldown multiplier from passive effects
 	local effectiveCooldown = config.cooldown
+	if mobilityId == "Blink" then
+		local groundCooldown = mobilityData.groundCooldown or config.groundCooldown or config.cooldown
+		local airCooldown = mobilityData.airCooldown or config.airCooldown or config.cooldown
+		if variant == "air" then
+			effectiveCooldown = airCooldown
+		else
+			effectiveCooldown = groundCooldown
+		end
+	elseif mobilityId == "ManaGrapple" then
+		effectiveCooldown = mobilityData.grappleCooldown or config.grappleCooldown or config.cooldown
+	end
 	local passiveEffects = world:get(playerEntity, PassiveEffects)
 	if passiveEffects then
 		local mobilityCooldownMult = passiveEffects.mobilityCooldownMultiplier or passiveEffects.cooldownMultiplier
@@ -162,6 +180,7 @@ local function handleMobilityActivation(player: Player, mobilityId: string)
 	
 	-- Validation passed - apply cooldown
 	mobilityCooldown.lastUsedTime = currentTime
+	mobilityCooldown.lastUsedCooldown = effectiveCooldown
 	DirtyService.setIfChanged(world, playerEntity, MobilityCooldown, mobilityCooldown, "MobilityCooldown")
 	
 	-- Notify client for cooldown UI display
@@ -216,6 +235,7 @@ local function handleMobilityActivation(player: Player, mobilityId: string)
 			playerEntity = playerEntity,
 			player = player,
 			startTime = currentTime,
+			endTime = currentTime + dashDuration,
 			duration = dashDuration,
 			damage = mobilityData.damage or 50,
 			knockbackDistance = mobilityData.knockbackDistance or 20,
@@ -325,6 +345,15 @@ local function handleMobilityActivation(player: Player, mobilityId: string)
 	
 	-- Movement is handled by client (client-predicted)
 	-- Server validates but does not force position correction
+end
+
+local function isShieldBashing(playerEntity: number, now: number): boolean
+	for _, bashData in ipairs(activeShieldBashes) do
+		if bashData.playerEntity == playerEntity and now < bashData.endTime then
+			return true
+		end
+	end
+	return false
 end
 
 -- Process active Shield Bash collisions (server-side, like projectiles)
@@ -443,6 +472,10 @@ end
 
 -- Public function to check if a player is currently Shield Bashing and absorb damage
 function MobilitySystem.absorbShieldBashDamage(playerEntity: number, damageAmount: number): boolean
+	local now = GameTimeSystem.getGameTime()
+	if isShieldBashing(playerEntity, now) then
+		return true
+	end
 	return false
 end
 
@@ -479,8 +512,8 @@ function MobilitySystem.init(worldRef: any, components: any, dirtyService: any)
 	end
 	
 	-- Handle client activation requests
-	MobilityActivateRemote.OnServerEvent:Connect(function(player: Player, mobilityId: string)
-		handleMobilityActivation(player, mobilityId)
+	MobilityActivateRemote.OnServerEvent:Connect(function(player: Player, mobilityId: string, variant: string?)
+		handleMobilityActivation(player, mobilityId, variant)
 	end)
 end
 

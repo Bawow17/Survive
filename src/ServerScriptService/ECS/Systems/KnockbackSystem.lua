@@ -43,23 +43,8 @@ function KnockbackSystem.step(dt: number)
 			-- Remove knockback component (resumes normal AI)
 			world:remove(entity, Knockback)
 		else
-			-- Apply knockback velocity to position
-			local kbVel = knockback.velocity
-			if kbVel then
-				local newPos = {
-					x = position.x + kbVel.x * dt,
-					y = position.y + kbVel.y * dt,
-					z = position.z + kbVel.z * dt
-				}
-				
-				DirtyService.setIfChanged(world, entity, Position, newPos, "Position")
-				
-				-- Also set velocity component if it exists (for smooth movement)
-				local velocityComponent = world:get(entity, Velocity)
-				if velocityComponent then
-					DirtyService.setIfChanged(world, entity, Velocity, kbVel, "Velocity")
-				end
-			end
+			-- Movement handled by MovementSystem (uses Knockback component velocity as external)
+			-- No direct position/velocity writes here to avoid double integration.
 		end
 	end
 end

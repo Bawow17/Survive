@@ -556,7 +556,7 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 							z = knockbackVelocity.Z
 						},
 						endTime = currentTime + KNOCKBACK_DURATION,
-						stunned = true
+						stunned = isEnemy and false or true
 					}, "Knockback")
 				end
 			end
@@ -635,8 +635,11 @@ function DamageSystem.applyKnockback(targetEntity: number, direction: Vector3, d
 	if not entityPos then
 		return false
 	end
+	local entityType = world:get(targetEntity, EntityType)
+	local isEnemyTarget = entityType and entityType.type == "Enemy"
 	local knockbackDuration = math.max(duration or 0.2, 0.05)
 	local knockbackVelocity = direction.Unit * (math.max(distance or 0, 0) / knockbackDuration)
+	local stunFlag = isEnemyTarget and false or (stunned == nil and true or stunned)
 	DirtyService.setIfChanged(world, targetEntity, Knockback, {
 		velocity = {
 			x = knockbackVelocity.X,
@@ -644,7 +647,7 @@ function DamageSystem.applyKnockback(targetEntity: number, direction: Vector3, d
 			z = knockbackVelocity.Z,
 		},
 		endTime = tick() + knockbackDuration,
-		stunned = stunned == nil and true or stunned,
+		stunned = stunFlag,
 	}, "Knockback")
 	return true
 end

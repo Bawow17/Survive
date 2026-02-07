@@ -30,6 +30,7 @@ local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSy
 -- Component references
 local _Position
 local Velocity
+local DesiredVelocity
 local _AI
 local ChargerState
 local FacingDirection
@@ -255,6 +256,7 @@ function ChargerAISystem.init(worldRef: any, components: any, dirtyService: any)
 	
 	_Position = Components.Position
 	Velocity = Components.Velocity
+	DesiredVelocity = Components.DesiredVelocity
 	_AI = Components.AI
 	ChargerState = Components.ChargerState
 	FacingDirection = Components.FacingDirection
@@ -271,7 +273,11 @@ end
 
 -- Helper functions (same pattern as ZombieAISystem)
 local function setVelocity(entity: number, velocity: {x: number, y: number, z: number})
-	DirtyService.setIfChanged(world, entity, Velocity, velocity, "Velocity")
+	if DesiredVelocity then
+		DirtyService.setIfChanged(world, entity, DesiredVelocity, velocity, "DesiredVelocity")
+	else
+		DirtyService.setIfChanged(world, entity, Velocity, velocity, "Velocity")
+	end
 end
 
 local function setFacingDirection(entity: number, direction: {x: number, y: number, z: number})
@@ -881,7 +887,7 @@ function ChargerAISystem.step(dt: number)
 				local lockedDashDir = chargerState.dashDirection or faceDirVec3  -- Fallback if lock failed
 				
 				-- Calculate dash duration
-				local dashSpeed = (balance.dashSpeed or 60) * speedScale * slowMultiplier
+				local dashSpeed = (balance.dashSpeed or 60)
 				local dashDist = dist + (balance.dashOvershoot or 30)
 				local dashDur = dashSpeed > 0 and (dashDist / dashSpeed) or (balance.dashDuration or 0.75)
 				dashDur = math.max(balance.dashDuration or 0.75, dashDur)
@@ -904,7 +910,7 @@ function ChargerAISystem.step(dt: number)
 		elseif chargerState.state == S_DASH then
 			-- Fast straight-line dash
 			local dashDir = chargerState.dashDirection or faceDirVec3
-			local dashSpeed = chargerState.dashSpeed or (balance.dashSpeed or 60) * speedScale * slowMultiplier
+			local dashSpeed = chargerState.dashSpeed or (balance.dashSpeed or 60)
 			local newVel = dashDir * dashSpeed
 			setVelocity(entity, { x = newVel.X, y = 0, z = newVel.Z })
 
