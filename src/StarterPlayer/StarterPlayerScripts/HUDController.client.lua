@@ -13,6 +13,30 @@ local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
 
 local mainHud = playerGui:WaitForChild("MainHUD")
+local gameGui = playerGui:FindFirstChild("GameGui")
+
+local existingMainScale = mainHud:FindFirstChild("SettingsUIScale")
+if existingMainScale and existingMainScale:IsA("UIScale") then
+	existingMainScale:Destroy()
+end
+
+if gameGui and gameGui:IsA("ScreenGui") then
+	local existingGameScale = gameGui:FindFirstChild("SettingsUIScale")
+	if existingGameScale and existingGameScale:IsA("UIScale") then
+		existingGameScale:Destroy()
+	end
+else
+	task.spawn(function()
+		local loadedGameGui = playerGui:WaitForChild("GameGui", 30)
+		if loadedGameGui and loadedGameGui:IsA("ScreenGui") then
+			local loadedScale = loadedGameGui:FindFirstChild("SettingsUIScale")
+			if loadedScale and loadedScale:IsA("UIScale") then
+				loadedScale:Destroy()
+			end
+		end
+	end)
+end
+
 local topBarFrame = mainHud:WaitForChild("TopBarFrame")
 local hpFrame = topBarFrame:WaitForChild("HPFrame")
 local hpFill = hpFrame:WaitForChild("HPFill") :: Frame

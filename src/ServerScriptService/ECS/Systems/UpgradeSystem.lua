@@ -1816,6 +1816,17 @@ local function rebuildPassiveEffects(playerEntity: number, upgrades: any)
 			continue
 		end
 
+		if def.id == "mobilityCooldown" then
+			local stack = upgrades.passives.statStacks and upgrades.passives.statStacks[def.id]
+			if stack and #stack > 0 then
+				effects.mobilityCooldownMultiplier = effects.mobilityCooldownMultiplier * computeStackMultiplier(stack)
+			else
+				local effective = applySoftCap(rawValue, def.softCap, def.curveK)
+				effects.mobilityCooldownMultiplier = effects.mobilityCooldownMultiplier * (1 - effective)
+			end
+			continue
+		end
+
 		local effective = applySoftCap(rawValue, def.softCap, def.curveK)
 
 		if def.field == "damageMultiplier"
@@ -2177,7 +2188,7 @@ function UpgradeSystem.applyUpgrade(playerEntity: number, upgrade: any): boolean
 		for statKey, value in pairs(rolls) do
 			upgrades.passives.stats[statKey] = (upgrades.passives.stats[statKey] or 0) + value
 			local def = passiveStatById[statKey]
-			if def and def.id == "cooldownReduction" then
+			if def and (def.id == "cooldownReduction" or def.id == "mobilityCooldown") then
 				local stack = upgrades.passives.statStacks[statKey]
 				if not stack then
 					stack = {}

@@ -19,14 +19,27 @@ local projectilesFolder: Instance = workspace:FindFirstChild("Projectiles") or I
 projectilesFolder.Name = "Projectiles"
 projectilesFolder.Parent = workspace
 
-local RENDER_DISTANCE = 300
-local RENDER_DISABLE_DISTANCE = 340
+local BASE_RENDER_DISTANCE = 300
+local BASE_RENDER_DISABLE_DISTANCE = 340
 local HOMING_UPDATE_INTERVAL = 0.1
 local ENEMY_SNAPSHOT_INTERVAL = 0.2
 local DEFAULT_HOMING_STRENGTH = 180
 local EXPLOSION_STEPS = 10
 local EXPLOSION_EXPAND_DURATION = 0.25
 local EXPLOSION_FADE_DURATION = 0.25
+
+local ATTR_RENDER_SCALE = "Setting_graphics_renderScale"
+local ATTR_PROJECTILE_OPACITY_SELF = "Setting_graphics_projectileOpacitySelf"
+local ATTR_PROJECTILE_OPACITY_OTHERS = "Setting_graphics_projectileOpacityOthers"
+local ATTR_OTHER_PLAYER_VFX_OPACITY = "Setting_graphics_otherPlayerVfxOpacity"
+local ATTR_REDUCE_MOTION = "Setting_accessibility_reduceMotion"
+
+local renderDistance = BASE_RENDER_DISTANCE
+local renderDisableDistance = BASE_RENDER_DISABLE_DISTANCE
+local projectileOpacitySelf = 1.0
+local projectileOpacityOthers = 1.0
+local otherPlayerVfxOpacity = 1.0
+local reduceMotion = false
 
 type HomingPayload = {
 	acquireRadius: number?,
@@ -123,6 +136,25 @@ local lastEnemySnapshot = 0
 local refractionsTemplate: Instance? = nil
 local beamPool: {Instance} = {}
 local beamVisualsByModel: {[Instance]: {start: BasePart?, ending: BasePart?, hitbox: BasePart?, baseHitboxSize: Vector3?, parts: {BasePart}?}} = {}
+local emitterTransparencyByInstance: {[ParticleEmitter]: NumberSequence} = setmetatable({}, { __mode = "k" }) :: any
+local trailTransparencyByInstance: {[Trail]: NumberSequence} = setmetatable({}, { __mode = "k" }) :: any
+local beamTransparencyByInstance: {[Beam]: NumberSequence} = setmetatable({}, { __mode = "k" }) :: any
+
+local function readNumberSetting(attributeName: string, fallback: number, minimum: number, maximum: number): number
+	local raw = player:GetAttribute(attributeName)
+	if typeof(raw) == "number" then
+		return math.clamp(raw, minimum, maximum)
+	end
+	return fallback
+end
+
+local function readBoolSetting(attributeName: string, fallback: boolean): boolean
+	local raw = player:GetAttribute(attributeName)
+	if typeof(raw) == "boolean" then
+		return raw
+	end
+	return fallback
+end
 
 local function toVector3(value: any): Vector3?
 	if typeof(value) == "Vector3" then
@@ -344,10 +376,76 @@ local function releaseModel(record: ProjectileRecord)
 	record.renderEnabled = false
 end
 
-local function applyVisual(record: ProjectileRecord)
-	if record.beam and record.beamVisual then
+local function getProjectileOpacity(record: ProjectileRecord): number
+	if record.ownerUserId and record.ownerUserId ~= player.UserId then
+		return projectileOpacityOthers
+	end
+	return projectileOpacitySelf
+end
+
+local function scaleTransparencyValue(original: number, opacityScale: number): number
+	return original + (1 - original) * (1 - opacityScale)
+end
+
+local function scaleNumberSequenceTransparency(original: NumberSequence, opacityScale: number): NumberSequence
+	local keypoints = table.create(#original.Keypoints)
+	for index, keypoint in ipairs(original.Keypoints) do
+		keypoints[index] = NumberSequenceKeypoint.new(
+			keypoint.Time,
+			scaleTransparencyValue(keypoint.Value, opacityScale),
+			keypoint.Envelope
+		)
+	end
+	return NumberSequence.new(keypoints)
+end
+
+local function applyProjectileVfxOpacity(record: ProjectileRecord, opacityScale: number)
+	local model = record.model
+	if not model then
 		return
 	end
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("ParticleEmitter") then
+			local original = emitterTransparencyByInstance[descendant]
+			if not original then
+				original = descendant.Transparency
+				emitterTransparencyByInstance[descendant] = original
+			end
+			descendant.Transparency = scaleNumberSequenceTransparency(original, opacityScale)
+		elseif descendant:IsA("Trail") then
+			local original = trailTransparencyByInstance[descendant]
+			if not original then
+				original = descendant.Transparency
+				trailTransparencyByInstance[descendant] = original
+			end
+			descendant.Transparency = scaleNumberSequenceTransparency(original, opacityScale)
+		elseif descendant:IsA("Beam") then
+			local original = beamTransparencyByInstance[descendant]
+			if not original then
+				original = descendant.Transparency
+				beamTransparencyByInstance[descendant] = original
+			end
+			descendant.Transparency = scaleNumberSequenceTransparency(original, opacityScale)
+		end
+	end
+end
+
+local function applyProjectileOpacity(record: ProjectileRecord)
+	local opacityScale = getProjectileOpacity(record)
+	if record.parts then
+		for _, part in ipairs(record.parts) do
+			local originalTransparency = part:GetAttribute("__OrigTransparency")
+			if typeof(originalTransparency) ~= "number" then
+				originalTransparency = part.Transparency
+				part:SetAttribute("__OrigTransparency", originalTransparency)
+			end
+			part.Transparency = scaleTransparencyValue(originalTransparency, opacityScale)
+		end
+	end
+	applyProjectileVfxOpacity(record, opacityScale)
+end
+
+local function applyVisual(record: ProjectileRecord)
 	local model = record.model
 	if not model then
 		return
@@ -357,11 +455,13 @@ local function applyVisual(record: ProjectileRecord)
 			part.Color = record.visualColor
 		end
 	end
-	local scale = record.visualScale or 1
-	pcall(function()
-		model:ScaleTo(scale :: number)
-	end)
-	if record.petal and record.petal.role then
+	if not record.beam then
+		local scale = record.visualScale or 1
+		pcall(function()
+			model:ScaleTo(scale :: number)
+		end)
+	end
+	if not record.beam and record.petal and record.petal.role then
 		local hitbox = model:FindFirstChild("Hitbox", true)
 		if hitbox then
 			local emitter = hitbox:FindFirstChild("Petals")
@@ -374,6 +474,7 @@ local function applyVisual(record: ProjectileRecord)
 			end
 		end
 	end
+	applyProjectileOpacity(record)
 end
 
 local function updateModelTransform(record: ProjectileRecord, position: Vector3, direction: Vector3)
@@ -454,7 +555,7 @@ local function updateBeamTransform(record: ProjectileRecord, pivot: Vector3, dir
 	end
 end
 
-local function playExplosionVfx(model: Model)
+local function playExplosionVfx(model: Model, visibilityScale: number?)
 	local parts = {}
 	for _, descendant in ipairs(model:GetDescendants()) do
 		if descendant:IsA("BasePart") then
@@ -467,6 +568,7 @@ local function playExplosionVfx(model: Model)
 	explosionTokenCounter += 1
 	local token = explosionTokenCounter
 	model:SetAttribute("__ExplosionToken", token)
+	local visibility = math.clamp(visibilityScale or 1, 0, 1)
 
 	local startScale = 0.001
 	for _, part in ipairs(parts) do
@@ -485,7 +587,7 @@ local function playExplosionVfx(model: Model)
 			originalSize.Y * startScale,
 			originalSize.Z * startScale
 		)
-		part.Transparency = originalTransparency
+		part.Transparency = originalTransparency + (1 - originalTransparency) * (1 - visibility)
 	end
 
 	local expandStepDuration = EXPLOSION_STEPS > 0 and (EXPLOSION_EXPAND_DURATION / EXPLOSION_STEPS) or 0
@@ -523,7 +625,8 @@ local function playExplosionVfx(model: Model)
 					if typeof(originalTransparency) ~= "number" then
 						originalTransparency = part.Transparency
 					end
-					local transparencyTarget = originalTransparency + (1 - originalTransparency) * fadeAlpha
+					local startTransparency = originalTransparency + (1 - originalTransparency) * (1 - visibility)
+					local transparencyTarget = startTransparency + (1 - startTransparency) * fadeAlpha
 					part.Transparency = transparencyTarget
 				end
 			end
@@ -547,12 +650,17 @@ local function playExplosionVfx(model: Model)
 	end)
 end
 
-local function spawnImpactEffect(effect: any, position: Vector3)
+local function spawnImpactEffect(effect: any, position: Vector3, ownerUserId: number?)
 	if typeof(effect) ~= "table" then
 		return
 	end
 	local modelPath = effect.modelPath
 	if typeof(modelPath) ~= "string" then
+		return
+	end
+	local isOtherPlayer = ownerUserId ~= nil and ownerUserId ~= player.UserId
+	local visibility = if isOtherPlayer then otherPlayerVfxOpacity else 1.0
+	if visibility <= 0 then
 		return
 	end
 	local delayTime = typeof(effect.delay) == "number" and effect.delay or 0
@@ -562,6 +670,9 @@ local function spawnImpactEffect(effect: any, position: Vector3)
 			return
 		end
 		local scale = typeof(effect.scale) == "number" and effect.scale or nil
+		if scale and isOtherPlayer and reduceMotion then
+			scale *= 0.8
+		end
 		if scale then
 			pcall(function()
 				model:ScaleTo(scale)
@@ -573,9 +684,12 @@ local function spawnImpactEffect(effect: any, position: Vector3)
 			end
 		end
 		model:PivotTo(CFrame.new(position))
-		playExplosionVfx(model)
+		playExplosionVfx(model, visibility)
 
 		local duration = typeof(effect.duration) == "number" and effect.duration or (EXPLOSION_EXPAND_DURATION + EXPLOSION_FADE_DURATION)
+		if isOtherPlayer and reduceMotion then
+			duration *= 0.55
+		end
 		local cleanupDelay = math.max(duration, EXPLOSION_EXPAND_DURATION + EXPLOSION_FADE_DURATION) + 0.1
 		task.delay(cleanupDelay, function()
 			if model and model.Parent then
@@ -819,7 +933,7 @@ local function ensureModel(record: ProjectileRecord, position: Vector3)
 	if record.model then
 		return
 	end
-	if not shouldRenderAt(position, RENDER_DISTANCE) then
+	if not shouldRenderAt(position, renderDistance) then
 		record.renderEnabled = false
 		return
 	end
@@ -830,6 +944,7 @@ local function ensureModel(record: ProjectileRecord, position: Vector3)
 			record.parts = visual.parts
 			record.beamVisual = visual
 			record.renderEnabled = true
+			applyVisual(record)
 		else
 			local fallbackModel, _, parts = acquireModel(record.modelPath)
 			if not fallbackModel then
@@ -860,6 +975,33 @@ local function despawnProjectile(id: number)
 	releaseModel(record)
 	activeProjectiles[id] = nil
 end
+
+local function applySettingsFromAttributes()
+	local renderScale = readNumberSetting(ATTR_RENDER_SCALE, 1.0, 0.25, 5.00)
+	renderDistance = BASE_RENDER_DISTANCE * renderScale
+	renderDisableDistance = BASE_RENDER_DISABLE_DISTANCE * renderScale
+	projectileOpacitySelf = readNumberSetting(ATTR_PROJECTILE_OPACITY_SELF, 1.0, 0.25, 1.00)
+	projectileOpacityOthers = readNumberSetting(ATTR_PROJECTILE_OPACITY_OTHERS, 1.0, 0.05, 1.00)
+	otherPlayerVfxOpacity = readNumberSetting(ATTR_OTHER_PLAYER_VFX_OPACITY, 1.0, 0.00, 1.00)
+	reduceMotion = readBoolSetting(ATTR_REDUCE_MOTION, false)
+
+	for _, record in pairs(activeProjectiles) do
+		if record.model then
+			applyProjectileOpacity(record)
+			local pos = record.lastPos or record.origin
+			if not shouldRenderAt(pos, renderDisableDistance) then
+				releaseModel(record)
+			end
+		end
+	end
+end
+
+player:GetAttributeChangedSignal(ATTR_RENDER_SCALE):Connect(applySettingsFromAttributes)
+player:GetAttributeChangedSignal(ATTR_PROJECTILE_OPACITY_SELF):Connect(applySettingsFromAttributes)
+player:GetAttributeChangedSignal(ATTR_PROJECTILE_OPACITY_OTHERS):Connect(applySettingsFromAttributes)
+player:GetAttributeChangedSignal(ATTR_OTHER_PLAYER_VFX_OPACITY):Connect(applySettingsFromAttributes)
+player:GetAttributeChangedSignal(ATTR_REDUCE_MOTION):Connect(applySettingsFromAttributes)
+applySettingsFromAttributes()
 
 ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 	if typeof(payloads) ~= "table" then
@@ -1010,7 +1152,8 @@ ProjectilesImpactBatch.OnClientEvent:Connect(function(payloads: any)
 			end
 		end
 		if impactPos and entry.effect then
-			spawnImpactEffect(entry.effect, impactPos)
+			local effectOwner = typeof(entry.ownerUserId) == "number" and entry.ownerUserId or nil
+			spawnImpactEffect(entry.effect, impactPos, effectOwner)
 		end
 		if entry.despawn ~= false then
 			despawnProjectile(id)
@@ -1117,7 +1260,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 		end
 
 		if record.model then
-			if not shouldRenderAt(pos, RENDER_DISABLE_DISTANCE) then
+			if not shouldRenderAt(pos, renderDisableDistance) then
 				releaseModel(record)
 			end
 		else

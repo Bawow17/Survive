@@ -68,6 +68,8 @@ local chargerQuery: any
 local playerQueryCached: any  -- Player positions (for nearest player lookup)
 local entityTypeAIQuery: any  -- EntityType + AI (for pause handling)
 local OBSTACLE_CHECK_MAX_DISTANCE_SQ = OBSTACLE_CHECK_MAX_DISTANCE * OBSTACLE_CHECK_MAX_DISTANCE
+local BASE_ENEMY_VISUAL_SCALE = 1.0
+local CHARGER_RANGE_SCALE_PER_SIZE = 0.4
 
 -- Profiling accumulators (reset per step)
 local aiRaycastTime = 0
@@ -278,6 +280,14 @@ local function setVelocity(entity: number, velocity: {x: number, y: number, z: n
 	else
 		DirtyService.setIfChanged(world, entity, Velocity, velocity, "Velocity")
 	end
+end
+
+local function getScaledChargerPreferredRange(baseRange: number, visualScale: number?): number
+	local scale = if typeof(visualScale) == "number" then visualScale else BASE_ENEMY_VISUAL_SCALE
+	local sizeDelta = scale - BASE_ENEMY_VISUAL_SCALE
+	local rangeMultiplier = 1 + (sizeDelta * CHARGER_RANGE_SCALE_PER_SIZE)
+	rangeMultiplier = math.max(0.1, rangeMultiplier)
+	return baseRange * rangeMultiplier
 end
 
 local function setFacingDirection(entity: number, direction: {x: number, y: number, z: number})
@@ -603,7 +613,9 @@ function ChargerAISystem.step(dt: number)
 		if not chargerState or not chargerState.state or type(chargerState.state) == "string" then
 			local base = balance.preferredRange or 35
 			local jitter = balance.preferredJitter or 5
-			local preferredRange = base + (math.random() * 2 - 1) * jitter
+			local visual = world:get(entity, Components.Visual)
+			local scaledBase = getScaledChargerPreferredRange(base, visual and visual.scale)
+			local preferredRange = scaledBase + (math.random() * 2 - 1) * jitter
 			
 			setChargerState(entity, {
 				state = S_APPROACH,
@@ -1107,7 +1119,9 @@ function ChargerAISystem.step(dt: number)
 				-- Re-roll preferred range
 				local base = balance.preferredRange or 26
 				local jitter = balance.preferredJitter or 5
-				local newPreferredRange = base + (math.random() * 2 - 1) * jitter
+				local visual = world:get(entity, Components.Visual)
+				local scaledBase = getScaledChargerPreferredRange(base, visual and visual.scale)
+				local newPreferredRange = scaledBase + (math.random() * 2 - 1) * jitter
 				
 				setChargerState(entity, {
 					state = S_APPROACH,

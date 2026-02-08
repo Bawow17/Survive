@@ -9,6 +9,12 @@ local TweenService = game:GetService("TweenService")
 
 local _player = Players.LocalPlayer
 
+local ATTR_OTHER_PLAYER_VFX_OPACITY = "Setting_graphics_otherPlayerVfxOpacity"
+local ATTR_REDUCE_MOTION = "Setting_accessibility_reduceMotion"
+
+local otherPlayerVfxOpacity = 1.0
+local reduceMotion = false
+
 -- Workspace folder for afterimages (use Trash folder)
 local Workspace = game:GetService("Workspace")
 local afterimagesFolder = Workspace.Trash
@@ -27,6 +33,26 @@ local activeFades: {[Model]: {
 	totalPausedTime: number,
 	lastPauseCheckTime: number,
 }} = {}
+
+local function applySettingsFromAttributes()
+	local vfxOpacity = _player:GetAttribute(ATTR_OTHER_PLAYER_VFX_OPACITY)
+	if typeof(vfxOpacity) == "number" then
+		otherPlayerVfxOpacity = math.clamp(vfxOpacity, 0, 1)
+	else
+		otherPlayerVfxOpacity = 1.0
+	end
+
+	local reduce = _player:GetAttribute(ATTR_REDUCE_MOTION)
+	if typeof(reduce) == "boolean" then
+		reduceMotion = reduce
+	else
+		reduceMotion = false
+	end
+end
+
+_player:GetAttributeChangedSignal(ATTR_OTHER_PLAYER_VFX_OPACITY):Connect(applySettingsFromAttributes)
+_player:GetAttributeChangedSignal(ATTR_REDUCE_MOTION):Connect(applySettingsFromAttributes)
+applySettingsFromAttributes()
 
 -- Helper function to find model by path
 local function findModelByPath(path: string): Model?
@@ -73,7 +99,7 @@ local function copyR6Pose(characterModel: Model, afterimageModel: Model)
 end
 
 -- Render an afterimage matching the character's current pose
-local function renderAfterimage(characterModel: Model, mobilityType: string, fadeDuration: number, transparency: number)
+local function renderAfterimage(characterModel: Model, mobilityType: string, fadeDuration: number, visibilityScale: number)
 	-- Determine which afterimage template to use
 	local modelPath = ""
 	if mobilityType == "Dash" then
@@ -108,6 +134,7 @@ local function renderAfterimage(characterModel: Model, mobilityType: string, fad
 	
 	-- Set initial properties for all parts (preserve original transparency from model)
 	local partsToFade = {}
+	local visibility = math.clamp(visibilityScale, 0, 1)
 	for _, part in ipairs(afterimage:GetDescendants()) do
 		if part:IsA("BasePart") then
 			part.Anchored = true
@@ -115,9 +142,8 @@ local function renderAfterimage(characterModel: Model, mobilityType: string, fad
 			part.Massless = true
 			part.CanQuery = false
 			part.CanTouch = false
-			
-			-- Keep original transparency from the model (don't override it)
-			-- The model parts already have their intended starting transparency
+			local baseTransparency = part.Transparency
+			part.Transparency = baseTransparency + (1 - baseTransparency) * (1 - visibility)
 			
 			table.insert(partsToFade, part)
 		end
@@ -158,7 +184,7 @@ local function renderAfterimage(characterModel: Model, mobilityType: string, fad
 end
 
 -- Handle afterimage spawn requests from server
-local function handleAfterimageSpawn(characterModel: Model, mobilityType: string, fadeDuration: number, transparency: number)
+local function handleAfterimageSpawn(characterModel: Model, mobilityType: string, fadeDuration: number, _transparency: number)
 	-- Validate inputs
 	if not characterModel or not characterModel:IsA("Model") then
 		warn("[DashAfterimageRenderer] Invalid character model")
@@ -169,6 +195,23 @@ local function handleAfterimageSpawn(characterModel: Model, mobilityType: string
 		warn("[DashAfterimageRenderer] Invalid mobility type")
 		return
 	end
+
+	local sourcePlayer = Players:GetPlayerFromCharacter(characterModel)
+	local isOtherPlayer = sourcePlayer ~= nil and sourcePlayer ~= _player
+
+	local visibilityScale = 1.0
+	local effectiveDuration = fadeDuration or 0.2
+	if isOtherPlayer then
+		visibilityScale = otherPlayerVfxOpacity
+		if reduceMotion then
+			visibilityScale *= 0.4
+			effectiveDuration *= 0.6
+		end
+	end
+
+	if visibilityScale <= 0 then
+		return
+	end
 	
 	-- Debug logging for Shield Bash
 	if mobilityType == "ShieldBash" then
@@ -176,7 +219,7 @@ local function handleAfterimageSpawn(characterModel: Model, mobilityType: string
 	end
 	
 	-- Render the afterimage
-	renderAfterimage(characterModel, mobilityType, fadeDuration or 0.2, transparency or 0.7)
+	renderAfterimage(characterModel, mobilityType, effectiveDuration, visibilityScale)
 end
 
 -- Process active fades (for pause handling)
@@ -272,4 +315,3 @@ local function init()
 end
 
 init()
-

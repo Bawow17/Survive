@@ -60,6 +60,15 @@ if not playButton then
 	warn("[MainMenu] PlayButton not found!")
 	return
 end
+local settingsButton = playButtonsFrame:FindFirstChild("SettingsButton")
+
+local openSettingsSignal = ReplicatedStorage:FindFirstChild("OpenSettingsPanel")
+if not openSettingsSignal then
+	local bindable = Instance.new("BindableEvent")
+	bindable.Name = "OpenSettingsPanel"
+	bindable.Parent = ReplicatedStorage
+	openSettingsSignal = bindable
+end
 
 local confirmButton = confirmationFrame:WaitForChild("ConfirmButton")
 local cancelButton = confirmationFrame:WaitForChild("CancelButton")
@@ -232,6 +241,17 @@ playButton.MouseButton1Click:Connect(function()
 	confirmationFrame.Visible = true
 end)
 
+if settingsButton and settingsButton:IsA("GuiButton") then
+	(settingsButton :: GuiButton).Activated:Connect(function()
+		local signal = openSettingsSignal
+		if signal and signal:IsA("BindableEvent") then
+			(signal :: BindableEvent):Fire()
+		end
+	end)
+else
+	warn("[MainMenu] SettingsButton not found; P hotkey fallback remains available")
+end
+
 -- Confirm button clicked
 confirmButton.MouseButton1Click:Connect(function()
 	confirmationFrame.Visible = false
@@ -403,4 +423,3 @@ end)
 
 -- Show menu initially
 showMenu()
-

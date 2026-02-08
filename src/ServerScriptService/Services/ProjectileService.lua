@@ -302,6 +302,7 @@ local function sendImpact(record: ProjectileRecord, position: Vector3, reason: s
 			queueForPlayer(pendingImpacts, player, {
 				id = record.id,
 				pos = position,
+				ownerUserId = record.ownerUserId,
 				reason = reason,
 				despawn = shouldDespawn ~= false,
 				aoe = aoe and {

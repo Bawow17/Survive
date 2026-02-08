@@ -671,11 +671,17 @@ local deathAnimations: {[Model]: {
 }} = {}
 local STATUS_EFFECT_OFFSETS: {[string]: {offset: Vector3, rotation: Vector3}} = {}
 
+local ATTR_RENDER_SCALE = "Setting_graphics_renderScale"
+local ATTR_REDUCE_FLASH = "Setting_accessibility_reduceFlash"
+
 -- Maximum render distance for projectiles
-local MAX_RENDER_DISTANCE = 500 -- Cull projectiles beyond this distance
+local BASE_MAX_RENDER_DISTANCE = 500
+local MAX_RENDER_DISTANCE = BASE_MAX_RENDER_DISTANCE -- Cull projectiles beyond this distance
 -- Enemy visuals should only cull when quite far away.
-local ENEMY_CULL_OUT_DIST = 300
-local ENEMY_CULL_IN_DIST = 280
+local BASE_ENEMY_CULL_OUT_DIST = 300
+local BASE_ENEMY_CULL_IN_DIST = 280
+local ENEMY_CULL_OUT_DIST = BASE_ENEMY_CULL_OUT_DIST
+local ENEMY_CULL_IN_DIST = BASE_ENEMY_CULL_IN_DIST
 
 -- Enemy culling stabilization
 local CULL_OUT_DIST = ENEMY_CULL_OUT_DIST
@@ -683,6 +689,34 @@ local CULL_IN_DIST = ENEMY_CULL_IN_DIST -- Small hysteresis window (keeps visual
 local CULL_TOGGLE_COOLDOWN = 0.75
 local CULL_OUT_DIST_SQ = CULL_OUT_DIST * CULL_OUT_DIST
 local CULL_IN_DIST_SQ = CULL_IN_DIST * CULL_IN_DIST
+local reduceFlashEnabled = false
+
+local function readNumberAttribute(attributeName: string, fallback: number, minimum: number, maximum: number): number
+	local raw = player:GetAttribute(attributeName)
+	if typeof(raw) == "number" then
+		return math.clamp(raw, minimum, maximum)
+	end
+	return fallback
+end
+
+local function readBoolAttribute(attributeName: string, fallback: boolean): boolean
+	local raw = player:GetAttribute(attributeName)
+	if typeof(raw) == "boolean" then
+		return raw
+	end
+	return fallback
+end
+
+local function applyRenderDistanceScale(scale: number)
+	local clampedScale = math.clamp(scale, 0.25, 5.00)
+	MAX_RENDER_DISTANCE = BASE_MAX_RENDER_DISTANCE * clampedScale
+	ENEMY_CULL_OUT_DIST = BASE_ENEMY_CULL_OUT_DIST * clampedScale
+	ENEMY_CULL_IN_DIST = BASE_ENEMY_CULL_IN_DIST * clampedScale
+	CULL_OUT_DIST = ENEMY_CULL_OUT_DIST
+	CULL_IN_DIST = ENEMY_CULL_IN_DIST
+	CULL_OUT_DIST_SQ = CULL_OUT_DIST * CULL_OUT_DIST
+	CULL_IN_DIST_SQ = CULL_IN_DIST * CULL_IN_DIST
+end
 
 -- Status effect offsets per enemy subtype (forward = -Z in model space)
 STATUS_EFFECT_OFFSETS = {
@@ -1223,6 +1257,24 @@ local function processFades()
 	end
 end
 
+local function applyHitFlashStyle(highlight: Highlight, isCrit: boolean)
+	if isCrit then
+		highlight.FillColor = reduceFlashEnabled and Color3.fromRGB(210, 90, 90) or Color3.fromRGB(255, 60, 60)
+		highlight.OutlineColor = reduceFlashEnabled and Color3.fromRGB(210, 90, 90) or Color3.fromRGB(255, 60, 60)
+	else
+		highlight.FillColor = Color3.new(1, 1, 1)
+		highlight.OutlineColor = Color3.new(1, 1, 1)
+	end
+
+	if reduceFlashEnabled then
+		highlight.FillTransparency = 0.82
+		highlight.OutlineTransparency = 0.62
+	else
+		highlight.FillTransparency = 0.5
+		highlight.OutlineTransparency = 0
+	end
+end
+
 
 -- Handle hit flash VFX (white highlight effect)
 local function handleHitFlash(model: Model, hitFlashData: any)
@@ -1243,13 +1295,7 @@ local function handleHitFlash(model: Model, hitFlashData: any)
 		existing.endTime = endTime
 		existing.isCrit = existing.isCrit or isCrit
 		if existing.highlight then
-			if existing.isCrit then
-				existing.highlight.FillColor = Color3.fromRGB(255, 60, 60)
-				existing.highlight.OutlineColor = Color3.fromRGB(255, 60, 60)
-			else
-				existing.highlight.FillColor = Color3.new(1, 1, 1)
-				existing.highlight.OutlineColor = Color3.new(1, 1, 1)
-			end
+			applyHitFlashStyle(existing.highlight, existing.isCrit == true)
 		end
 		return
 	end
@@ -1259,18 +1305,10 @@ local function handleHitFlash(model: Model, hitFlashData: any)
 	if not highlight then
 		highlight = Instance.new("Highlight")
 		highlight.Name = "HitFlash"
-		if isCrit then
-			highlight.FillColor = Color3.fromRGB(255, 60, 60) -- Red for crit
-			highlight.OutlineColor = Color3.fromRGB(255, 60, 60)
-		else
-			highlight.FillColor = Color3.new(1, 1, 1) -- White
-			highlight.OutlineColor = Color3.new(1, 1, 1)
-		end
-		highlight.FillTransparency = 0.5
-		highlight.OutlineTransparency = 0
 		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 		highlight.Parent = model
 	end
+	applyHitFlashStyle(highlight, isCrit)
 	
 	hitFlashHighlights[model] = {
 		highlight = highlight,
@@ -2773,10 +2811,12 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			-- Store original size and transparency
 			local originalSize = vfxPart.Size
 			local originalTransparency = vfxPart.Transparency
+			local flashIntensity = reduceFlashEnabled and 0.45 or 1.0
+			local startTransparency = originalTransparency + (1 - originalTransparency) * (1 - flashIntensity)
 			
 			-- Start at scale 0
 			vfxPart.Size = Vector3.new(0, 0, 0)
-			vfxPart.Transparency = originalTransparency
+			vfxPart.Transparency = startTransparency
 
 			local expandStepDuration = EXPLOSION_STEPS > 0 and (EXPLOSION_EXPAND_DURATION / EXPLOSION_STEPS) or 0
 			for step = 1, EXPLOSION_STEPS do
@@ -2792,7 +2832,7 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			local fadeStepDuration = EXPLOSION_STEPS > 0 and (EXPLOSION_FADE_DURATION / EXPLOSION_STEPS) or 0
 			for step = 1, EXPLOSION_STEPS do
 				local fadeAlpha = step / EXPLOSION_STEPS
-				local transparencyTarget = originalTransparency + (1 - originalTransparency) * fadeAlpha
+				local transparencyTarget = startTransparency + (1 - startTransparency) * fadeAlpha
 				local scheduledDelay = EXPLOSION_EXPAND_DURATION + (step - 1) * fadeStepDuration
 				task.delay(scheduledDelay, function()
 					if vfxPart and vfxPart.Parent then
@@ -3984,6 +4024,22 @@ end)
 	Prof.gauge("ActiveOrbs", activeOrbs)
 	Prof.endTimer("ClientEntityRenderer.Render")
 end)
+
+local function applyClientSettingsFromAttributes()
+	local renderScale = readNumberAttribute(ATTR_RENDER_SCALE, 1.0, 0.25, 5.00)
+	applyRenderDistanceScale(renderScale)
+
+	reduceFlashEnabled = readBoolAttribute(ATTR_REDUCE_FLASH, false)
+	for _, flashData in pairs(hitFlashHighlights) do
+		if flashData.highlight then
+			applyHitFlashStyle(flashData.highlight, flashData.isCrit == true)
+		end
+	end
+end
+
+player:GetAttributeChangedSignal(ATTR_RENDER_SCALE):Connect(applyClientSettingsFromAttributes)
+player:GetAttributeChangedSignal(ATTR_REDUCE_FLASH):Connect(applyClientSettingsFromAttributes)
+applyClientSettingsFromAttributes()
 
 -- Listen for pause/unpause events
 local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
