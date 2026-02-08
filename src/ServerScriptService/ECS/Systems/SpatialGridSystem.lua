@@ -19,6 +19,8 @@ local EntityType: any
 
 -- Spatial grid parameters
 local GRID_SIZE = 50 -- Size of each grid cell
+local INDEX_BACKFILL_INTERVAL = 0.1 -- Seconds between scans for newly spawned/untracked entities.
+local backfillAccumulator = 0
 
 type GridCellRecord = {
 	entity: number,
@@ -192,31 +194,52 @@ function SpatialGridSystem.step(dt: number)
     
     -- Get only entities that moved (instead of scanning all)
     local movedEntities = DirtyService.consumePositionChanges()
-    
-    -- If no position changes recorded, fall back to checking grid cell changes (rare)
-    if not movedEntities or next(movedEntities) == nil then
+
+    -- Update moved entities (O(changed) instead of O(n)).
+    if movedEntities and next(movedEntities) ~= nil then
+        for entity in pairs(movedEntities) do
+            if world:contains(entity) then
+                local position = world:get(entity, Position)
+                local entityType = world:get(entity, EntityType)
+                
+                if position and entityType and (entityType.type == "Enemy" or entityType.type == "Projectile") then
+                    local newGridPos = worldToGrid(Vector3.new(position.x, position.y, position.z))
+                    local newCellKey = gridToKey(newGridPos)
+                    local lastCellKey = entityLastGridCell[entity]
+                    
+                    -- Only update if moved to different grid cell (or first time)
+                    if newCellKey ~= lastCellKey then
+                        if lastCellKey then
+                            removeFromGrid(entity)
+                        end
+                        addToGrid(entity, Vector3.new(position.x, position.y, position.z))
+                        entityLastGridCell[entity] = newCellKey
+                    end
+                end
+            end
+        end
+    end
+
+    -- Backfill scan: catches newly spawned stationary entities that never emitted
+    -- a Position change through DirtyService (common with pooled enemy setup).
+    backfillAccumulator += dt
+    if backfillAccumulator < INDEX_BACKFILL_INTERVAL then
         return
     end
-    
-    -- Update only moved entities (O(changed) instead of O(n))
-    for entity in pairs(movedEntities) do
-        if world:contains(entity) then
-            local position = world:get(entity, Position)
-            local entityType = world:get(entity, EntityType)
-            
-            if position and entityType and (entityType.type == "Enemy" or entityType.type == "Projectile") then
-                local newGridPos = worldToGrid(Vector3.new(position.x, position.y, position.z))
-                local newCellKey = gridToKey(newGridPos)
-                local lastCellKey = entityLastGridCell[entity]
-                
-                -- Only update if moved to different grid cell (or first time)
-                if newCellKey ~= lastCellKey then
-                    if lastCellKey then
-                        removeFromGrid(entity)
-                    end
-                    addToGrid(entity, Vector3.new(position.x, position.y, position.z))
-                    entityLastGridCell[entity] = newCellKey
+    backfillAccumulator = 0
+
+    for entity, position, entityType in positionQuery do
+        if entityType and (entityType.type == "Enemy" or entityType.type == "Projectile") then
+            local newGridPos = worldToGrid(Vector3.new(position.x, position.y, position.z))
+            local newCellKey = gridToKey(newGridPos)
+            local lastCellKey = entityLastGridCell[entity]
+
+            if newCellKey ~= lastCellKey then
+                if lastCellKey then
+                    removeFromGrid(entity)
                 end
+                addToGrid(entity, Vector3.new(position.x, position.y, position.z))
+                entityLastGridCell[entity] = newCellKey
             end
         end
     end

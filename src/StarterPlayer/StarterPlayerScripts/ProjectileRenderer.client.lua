@@ -9,9 +9,18 @@ local player = Players.LocalPlayer
 
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local projectileRemotesFolder = remotesFolder:WaitForChild("Projectiles")
-local ProjectilesSpawnBatch = projectileRemotesFolder:WaitForChild("ProjectilesSpawnBatch") :: RemoteEvent
-local ProjectilesDespawnBatch = projectileRemotesFolder:WaitForChild("ProjectilesDespawnBatch") :: RemoteEvent
-local ProjectilesImpactBatch = projectileRemotesFolder:WaitForChild("ProjectilesImpactBatch") :: RemoteEvent
+
+local function waitForProjectileRemote(name: string): RemoteEvent
+	local remote = projectileRemotesFolder:WaitForChild(name, 15)
+	if not remote or not remote:IsA("RemoteEvent") then
+		error(string.format("[ProjectileRenderer] Missing remote '%s' under RemoteEvents.Projectiles after timeout", name))
+	end
+	return remote
+end
+
+local ProjectilesSpawnBatch = waitForProjectileRemote("ProjectilesSpawnBatch")
+local ProjectilesDespawnBatch = waitForProjectileRemote("ProjectilesDespawnBatch")
+local ProjectilesImpactBatch = waitForProjectileRemote("ProjectilesImpactBatch")
 
 local ModelPaths = require(ReplicatedStorage.Shared.ModelPaths)
 
@@ -28,7 +37,6 @@ local EXPLOSION_STEPS = 10
 local EXPLOSION_EXPAND_DURATION = 0.25
 local EXPLOSION_FADE_DURATION = 0.25
 
-local ATTR_RENDER_SCALE = "Setting_graphics_renderScale"
 local ATTR_PROJECTILE_OPACITY_SELF = "Setting_graphics_projectileOpacitySelf"
 local ATTR_PROJECTILE_OPACITY_OTHERS = "Setting_graphics_projectileOpacityOthers"
 local ATTR_OTHER_PLAYER_VFX_OPACITY = "Setting_graphics_otherPlayerVfxOpacity"
@@ -139,6 +147,9 @@ local beamVisualsByModel: {[Instance]: {start: BasePart?, ending: BasePart?, hit
 local emitterTransparencyByInstance: {[ParticleEmitter]: NumberSequence} = setmetatable({}, { __mode = "k" }) :: any
 local trailTransparencyByInstance: {[Trail]: NumberSequence} = setmetatable({}, { __mode = "k" }) :: any
 local beamTransparencyByInstance: {[Beam]: NumberSequence} = setmetatable({}, { __mode = "k" }) :: any
+local emitterColorByInstance: {[ParticleEmitter]: ColorSequence} = setmetatable({}, { __mode = "k" }) :: any
+local trailColorByInstance: {[Trail]: ColorSequence} = setmetatable({}, { __mode = "k" }) :: any
+local beamColorByInstance: {[Beam]: ColorSequence} = setmetatable({}, { __mode = "k" }) :: any
 
 local function readNumberSetting(attributeName: string, fallback: number, minimum: number, maximum: number): number
 	local raw = player:GetAttribute(attributeName)
@@ -430,6 +441,62 @@ local function applyProjectileVfxOpacity(record: ProjectileRecord, opacityScale:
 	end
 end
 
+local function colorizeSequence(original: ColorSequence, visualColor: Color3): ColorSequence
+	local keypoints = table.create(#original.Keypoints)
+	for index, keypoint in ipairs(original.Keypoints) do
+		keypoints[index] = ColorSequenceKeypoint.new(keypoint.Time, visualColor)
+	end
+	return ColorSequence.new(keypoints)
+end
+
+local function applyProjectileVfxColor(record: ProjectileRecord)
+	local model = record.model
+	if not model or not record.visualColor then
+		return
+	end
+
+	local visualColor = record.visualColor
+	local petalEmitter: ParticleEmitter? = nil
+	if not record.beam and record.petal and record.petal.role then
+		local hitbox = model:FindFirstChild("Hitbox", true)
+		if hitbox then
+			local emitter = hitbox:FindFirstChild("Petals")
+			if emitter and emitter:IsA("ParticleEmitter") then
+				petalEmitter = emitter
+			end
+		end
+	end
+
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("ParticleEmitter") then
+			local original = emitterColorByInstance[descendant]
+			if not original then
+				original = descendant.Color
+				emitterColorByInstance[descendant] = original
+			end
+			if descendant ~= petalEmitter then
+				descendant.Color = colorizeSequence(original, visualColor)
+			end
+		elseif descendant:IsA("Trail") then
+			local original = trailColorByInstance[descendant]
+			if not original then
+				original = descendant.Color
+				trailColorByInstance[descendant] = original
+			end
+			descendant.Color = colorizeSequence(original, visualColor)
+		elseif descendant:IsA("Beam") then
+			local original = beamColorByInstance[descendant]
+			if not original then
+				original = descendant.Color
+				beamColorByInstance[descendant] = original
+			end
+			descendant.Color = colorizeSequence(original, visualColor)
+		elseif descendant:IsA("PointLight") or descendant:IsA("SpotLight") or descendant:IsA("SurfaceLight") then
+			descendant.Color = visualColor
+		end
+	end
+end
+
 local function applyProjectileOpacity(record: ProjectileRecord)
 	local opacityScale = getProjectileOpacity(record)
 	if record.parts then
@@ -455,6 +522,7 @@ local function applyVisual(record: ProjectileRecord)
 			part.Color = record.visualColor
 		end
 	end
+	applyProjectileVfxColor(record)
 	if not record.beam then
 		local scale = record.visualScale or 1
 		pcall(function()
@@ -977,9 +1045,6 @@ local function despawnProjectile(id: number)
 end
 
 local function applySettingsFromAttributes()
-	local renderScale = readNumberSetting(ATTR_RENDER_SCALE, 1.0, 0.25, 5.00)
-	renderDistance = BASE_RENDER_DISTANCE * renderScale
-	renderDisableDistance = BASE_RENDER_DISABLE_DISTANCE * renderScale
 	projectileOpacitySelf = readNumberSetting(ATTR_PROJECTILE_OPACITY_SELF, 1.0, 0.25, 1.00)
 	projectileOpacityOthers = readNumberSetting(ATTR_PROJECTILE_OPACITY_OTHERS, 1.0, 0.05, 1.00)
 	otherPlayerVfxOpacity = readNumberSetting(ATTR_OTHER_PLAYER_VFX_OPACITY, 1.0, 0.00, 1.00)
@@ -996,7 +1061,6 @@ local function applySettingsFromAttributes()
 	end
 end
 
-player:GetAttributeChangedSignal(ATTR_RENDER_SCALE):Connect(applySettingsFromAttributes)
 player:GetAttributeChangedSignal(ATTR_PROJECTILE_OPACITY_SELF):Connect(applySettingsFromAttributes)
 player:GetAttributeChangedSignal(ATTR_PROJECTILE_OPACITY_OTHERS):Connect(applySettingsFromAttributes)
 player:GetAttributeChangedSignal(ATTR_OTHER_PLAYER_VFX_OPACITY):Connect(applySettingsFromAttributes)

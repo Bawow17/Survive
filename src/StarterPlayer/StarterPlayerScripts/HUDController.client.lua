@@ -882,11 +882,11 @@ local function enterDeathState()
 	maxOverheal = 0
 	
 	-- Make health bar 100% full and red with smooth transition
+	-- Keep current size; do not force 100% to avoid stat desync oscillation.
 	deathBarTween = TweenService:Create(
 		hpFill,
 		TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 		{
-			Size = UDim2.new(1, 0, 1, 0),  -- Full bar
 			BackgroundColor3 = Color3.fromRGB(150, 0, 0),  -- Dark red
 			BackgroundTransparency = 0  -- Fully opaque
 		}

@@ -69,7 +69,7 @@ PlayerComponents.PendingLevelUps = world:component()
 -- BankedHands component - Queue of level-up hands (no pause)
 PlayerComponents.BankedHands = world:component()
 
--- PlayerPower component - Cached power score + pressure for adaptive enemy scaling
+-- PlayerPower component - Legacy adaptive-scaling data (currently unused runtime path)
 PlayerComponents.PlayerPower = world:component()
 
 return PlayerComponents

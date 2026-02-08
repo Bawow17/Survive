@@ -5,6 +5,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
+local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
@@ -26,6 +27,8 @@ local _ChargerState: any
 local _DesiredVelocity: any
 local _RepulsionVelocity: any
 local _Knockback: any
+local _Visual: any
+local _EnemyTier: any
 
 local CHARGER_DASH_STATE = 3
 local ENEMY_DISPLACEMENT_MULT = 2.5
@@ -68,6 +71,14 @@ local playerLastPositions: {[number]: Vector3} = {} -- key = projectileEntityId,
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 raycastParams.IgnoreWater = true
+
+local generatedChunkRaycastParams = RaycastParams.new()
+generatedChunkRaycastParams.FilterType = Enum.RaycastFilterType.Include
+generatedChunkRaycastParams.IgnoreWater = true
+
+local generatedChunksRootCache: Instance? = nil
+local lastGeneratedChunksRootRefresh = 0
+local GENERATED_CHUNKS_ROOT_REFRESH_INTERVAL = 1.0
 
 -- Cache for player parts to avoid recreating tables every frame
 local playerPartsCache = {}
@@ -198,6 +209,20 @@ local function updateRaycastParams()
 end
 
 local DEFAULT_HEIGHT_OFFSET = 0
+local SPAWN_GROUND_CLEARANCE = 0.15
+local enemyGroundOffsetCache: {[string]: number} = {}
+
+local function getGeneratedChunksRoot(): Instance?
+	local now = tick()
+	if generatedChunksRootCache and generatedChunksRootCache.Parent and (now - lastGeneratedChunksRootRefresh) < GENERATED_CHUNKS_ROOT_REFRESH_INTERVAL then
+		return generatedChunksRootCache
+	end
+
+	lastGeneratedChunksRootRefresh = now
+	local root = Workspace:FindFirstChild("GeneratedWorldChunks")
+	generatedChunksRootCache = root
+	return root
+end
 
 local function vectorToTable(vector: Vector3): {x: number, y: number, z: number}
 	return {
@@ -239,13 +264,29 @@ local function getGroundHeight(position: {x: number, y: number, z: number}): (nu
 		return cached.height, false
 	end
 	
-	-- Perform raycast
-	updateRaycastParams() -- Update to exclude players, enemies, projectiles
+	-- Perform raycast (prefer generated chunk terrain only to avoid self-hits/props)
 	local origin = Vector3.new(position.x, (position.y or 0) + 25, position.z)
-	Prof.incCounter("Movement.Raycasts", 1)
-	local raycastStart = os.clock()
-	local result = Workspace:Raycast(origin, Vector3.new(0, -250, 0), raycastParams)
-	groundRaycastTime += os.clock() - raycastStart
+	local direction = Vector3.new(0, -250, 0)
+	local result: RaycastResult? = nil
+	local didRaycast = false
+	local generatedChunksRoot = getGeneratedChunksRoot()
+	if generatedChunksRoot then
+		generatedChunkRaycastParams.FilterDescendantsInstances = { generatedChunksRoot }
+		Prof.incCounter("Movement.Raycasts", 1)
+		local raycastStart = os.clock()
+		result = Workspace:Raycast(origin, direction, generatedChunkRaycastParams)
+		groundRaycastTime += os.clock() - raycastStart
+		didRaycast = true
+	end
+	-- Fallback when chunk root is unavailable (startup/legacy maps).
+	if not result then
+		updateRaycastParams() -- Update to exclude players, enemies, projectiles
+		Prof.incCounter("Movement.Raycasts", 1)
+		local raycastStart = os.clock()
+		result = Workspace:Raycast(origin, direction, raycastParams)
+		groundRaycastTime += os.clock() - raycastStart
+		didRaycast = true
+	end
 	
 	local height = nil
 	if result and result.Instance then
@@ -275,13 +316,72 @@ local function getGroundHeight(position: {x: number, y: number, z: number}): (nu
 		}
 	end
 	
-	return height, true
+	return height, didRaycast
+end
+
+local function getEnemyGroundSnapOffset(entity: number, entityType: any): number
+	if not entityType or entityType.type ~= "Enemy" then
+		return DEFAULT_HEIGHT_OFFSET
+	end
+	local subtype = entityType.subtype
+	if typeof(subtype) ~= "string" or subtype == "" then
+		return SPAWN_GROUND_CLEARANCE
+	end
+
+	local scale = 1.0
+	if _Visual then
+		local visual = world:get(entity, _Visual)
+		local rawScale = visual and visual.scale
+		if typeof(rawScale) == "number" and rawScale == rawScale and rawScale > 0 then
+			scale = math.max(scale, math.clamp(rawScale, 0.1, 20.0))
+		end
+	end
+	if _EnemyTier then
+		local tierData = world:get(entity, _EnemyTier)
+		if typeof(tierData) == "table" then
+			local tierScale = tierData.scale
+			if typeof(tierScale) == "number" and tierScale == tierScale and tierScale > 0 then
+				scale = math.max(scale, math.clamp(tierScale, 0.1, 20.0))
+			else
+				local tierName = tierData.tier
+				if tierName == "Super" then
+					scale = math.max(scale, 4.0)
+				elseif tierName == "Elite" then
+					scale = math.max(scale, 7.5)
+				end
+			end
+		end
+	end
+	local scaleBucket = math.floor(scale * 100 + 0.5)
+	local cacheKey = string.format("%s@%d", subtype, scaleBucket)
+	local cached = enemyGroundOffsetCache[cacheKey]
+	if cached then
+		return cached
+	end
+
+	local hitbox = ModelReplicationService.getEnemyHitbox(subtype)
+	if not hitbox then
+		ModelReplicationService.replicateEnemy(subtype)
+		hitbox = ModelReplicationService.getEnemyHitbox(subtype)
+	end
+	if hitbox and hitbox.size then
+		local scaledOffsetY = (hitbox.offset and hitbox.offset.Y or 0) * scale
+		local scaledSizeY = hitbox.size.Y * scale
+		local offset = SPAWN_GROUND_CLEARANCE - scaledOffsetY + (scaledSizeY * 0.5)
+		offset = math.clamp(offset, 0, 12)
+		enemyGroundOffsetCache[cacheKey] = offset
+		return offset
+	end
+
+	enemyGroundOffsetCache[cacheKey] = SPAWN_GROUND_CLEARANCE
+	return SPAWN_GROUND_CLEARANCE
 end
 
 function MovementSystem.init(worldRef: any, components: any, dirtyService: any)
 	world = worldRef
 	Components = components
 	DirtyService = dirtyService
+	table.clear(enemyGroundOffsetCache)
 	Position = Components.Position
 	_Velocity = Components.Velocity
 	_EntityType = Components.EntityType
@@ -293,6 +393,8 @@ function MovementSystem.init(worldRef: any, components: any, dirtyService: any)
 	_DesiredVelocity = Components.DesiredVelocity
 	_RepulsionVelocity = Components.RepulsionVelocity
 	_Knockback = Components.Knockback
+	_Visual = Components.Visual
+	_EnemyTier = Components.EnemyTier
 	
 	-- Create cached query for performance
 	movingQuery = world:query(Components.Position, Components.Velocity, Components.EntityType):cached()
@@ -650,8 +752,8 @@ function MovementSystem.step(dt: number)
 							groundHeight = -50  -- Set floor limit
 						end
 						
-						-- Set target ground height for smooth lerping
-						entityTargetGroundHeight[entity] = groundHeight
+						-- Keep Position as pivot while keeping hitbox bottom on terrain.
+						entityTargetGroundHeight[entity] = groundHeight + getEnemyGroundSnapOffset(entity, entityType)
 					else
 						-- If no ground found, target current Y position
 						entityTargetGroundHeight[entity] = position.y

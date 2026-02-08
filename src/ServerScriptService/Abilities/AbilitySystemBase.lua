@@ -15,7 +15,7 @@ local PREDICTION_FACTOR = 0.6  -- Used only when targetingStats.enablePrediction
 local MOVING_SPEED_THRESHOLD = 5  -- studs/sec - below this, aim at center
 local MAX_PREDICTION_OFFSET = 10  -- studs - cap prediction lead distance
 local TARGETABLE_SPAWN_DELAY = 0.6 -- seconds after spawn before enemies are eligible to target (matches fade-in)
-local HORIZONTAL_AIM_Y_DIFF = 1.5 -- allow vertical aim if target is significantly above/below player
+local HORIZONTAL_AIM_Y_DIFF = 10.0 -- allow horizontal aim only when target is close in Y to player
 
 local AbilitySystemBase = {}
 
@@ -522,7 +522,15 @@ function AbilitySystemBase.getTargetDistance(
 	alwaysStayHorizontal: boolean?,
 	player: Player?
 ): number
-	if alwaysStayHorizontal or (stayHorizontal and isPlayerGrounded(player)) then
+	local _ = player
+	local useHorizontal = false
+	if alwaysStayHorizontal then
+		useHorizontal = true
+	elseif stayHorizontal then
+		local yDiff = math.abs(targetPosition.Y - playerPosition.Y)
+		useHorizontal = yDiff <= HORIZONTAL_AIM_Y_DIFF
+	end
+	if useHorizontal then
 		local dx = targetPosition.X - playerPosition.X
 		local dz = targetPosition.Z - playerPosition.Z
 		return math.sqrt(dx * dx + dz * dz)
@@ -613,8 +621,8 @@ function AbilitySystemBase.calculateTargetingDirection(
 		direction = flattenDirection(direction, playerPosition.Y)
 	end
 	
-	-- Apply horizontal flattening if requested and player is grounded
-	if stayHorizontal and isPlayerGrounded(player) then
+	-- Apply horizontal flattening when target Y is close enough to player Y
+	if stayHorizontal then
 		local shouldFlatten = true
 		if targetPosition then
 			local yDiff = math.abs(targetPosition.Y - playerPosition.Y)

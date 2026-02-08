@@ -50,6 +50,7 @@ if not mainMenuGui then
 end
 
 local mainMenuFrame = mainMenuGui:WaitForChild("MainMenuFrame")
+local menuButtonsFrame = mainMenuFrame:WaitForChild("MenuButtonsFrame")
 local playButtonsFrame = mainMenuFrame:WaitForChild("PlayButtonsFrame")
 local confirmationFrame = mainMenuFrame:WaitForChild("GameStartConfirmationFrame")
 local friendsListFrame = mainMenuFrame:WaitForChild("FriendslistFrame")
@@ -57,10 +58,10 @@ local friendsListFrame = mainMenuFrame:WaitForChild("FriendslistFrame")
 -- Buttons
 local playButton = playButtonsFrame:FindFirstChild("PlayButton")
 if not playButton then
-	warn("[MainMenu] PlayButton not found!")
+	warn("[MainMenu] PlayButton not found under MainMenuFrame.PlayButtonsFrame!")
 	return
 end
-local settingsButton = playButtonsFrame:FindFirstChild("SettingsButton")
+local settingsButton = menuButtonsFrame:FindFirstChild("SettingsButton")
 
 local openSettingsSignal = ReplicatedStorage:FindFirstChild("OpenSettingsPanel")
 if not openSettingsSignal then
@@ -245,7 +246,7 @@ if settingsButton and settingsButton:IsA("GuiButton") then
 	(settingsButton :: GuiButton).Activated:Connect(function()
 		local signal = openSettingsSignal
 		if signal and signal:IsA("BindableEvent") then
-			(signal :: BindableEvent):Fire()
+			(signal :: BindableEvent):Fire("toggle")
 		end
 	end)
 else

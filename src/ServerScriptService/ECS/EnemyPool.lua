@@ -6,8 +6,11 @@
 local EnemyPool = {}
 
 local MAX_POOL_SIZE = 100
+local REUSE_DELAY_SECONDS = 0.15 -- Allow despawn packets to flush before reusing pooled IDs.
 local pool: {number} = {}
 local poolCount = 0
+local recycleQueue: {{entity: number, readyAt: number}} = {}
+local recycleCount = 0
 local lastExhaustWarnTime = 0
 local EXHAUST_WARN_COOLDOWN = 5.0
 
@@ -16,7 +19,41 @@ local Components: any
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 
+local function flushRecycleQueue(now: number)
+	if recycleCount <= 0 then
+		return
+	end
+
+	local write = 1
+	for i = 1, recycleCount do
+		local item = recycleQueue[i]
+		if item and item.readyAt <= now and poolCount < MAX_POOL_SIZE then
+			poolCount += 1
+			pool[poolCount] = item.entity
+		else
+			recycleQueue[write] = item
+			write += 1
+		end
+	end
+
+	for i = write, recycleCount do
+		recycleQueue[i] = nil
+	end
+	recycleCount = write - 1
+end
+
 local function resetEnemyEntity(entity: number, enemyType: string, position: Vector3, owner: any)
+	-- Defensive scrub: pooled enemies should never carry player-only/status state.
+	if Components.StatusEffects and world:has(entity, Components.StatusEffects) then
+		world:remove(entity, Components.StatusEffects)
+	end
+	if Components.PlayerStats and world:has(entity, Components.PlayerStats) then
+		world:remove(entity, Components.PlayerStats)
+	end
+	if Components.PlayerPauseState and world:has(entity, Components.PlayerPauseState) then
+		world:remove(entity, Components.PlayerPauseState)
+	end
+
 	local posData = { x = position.X, y = position.Y, z = position.Z }
 	world:set(entity, Components.Position, posData)
 	world:set(entity, Components.Velocity, { x = 0, y = 0, z = 0 })
@@ -93,6 +130,8 @@ end
 
 -- Acquire an enemy entity from pool (resets all components)
 function EnemyPool.acquire(enemyType: string, position: Vector3, owner: any): number
+	flushRecycleQueue(tick())
+
 	if poolCount > 0 then
 		local entity = pool[poolCount]
 		poolCount -= 1
@@ -118,7 +157,9 @@ end
 
 -- Return an enemy entity to pool (clears components for reuse)
 function EnemyPool.release(entity: number)
-	if poolCount < MAX_POOL_SIZE then
+	flushRecycleQueue(tick())
+
+	if (poolCount + recycleCount) < MAX_POOL_SIZE then
 		-- Clear components to free references
 		-- CRITICAL: Clear ALL components to prevent state bleeding (invincible mobs bug)
 		if world:has(entity, Components.Position) then
@@ -156,6 +197,12 @@ function EnemyPool.release(entity: number)
 		end
 		if world:has(entity, Components.StatusEffects) then
 			world:remove(entity, Components.StatusEffects)
+		end
+		if world:has(entity, Components.PlayerStats) then
+			world:remove(entity, Components.PlayerStats)
+		end
+		if world:has(entity, Components.PlayerPauseState) then
+			world:remove(entity, Components.PlayerPauseState)
 		end
 		if world:has(entity, Components.DeathAnimation) then
 			world:remove(entity, Components.DeathAnimation)
@@ -198,9 +245,12 @@ function EnemyPool.release(entity: number)
 			world:remove(entity, Components.EnemyTier)
 		end
 		
-		-- Return to pool
-		poolCount += 1
-		pool[poolCount] = entity
+		-- Delay reuse slightly so clients process despawn before the same entity ID respawns.
+		recycleCount += 1
+		recycleQueue[recycleCount] = {
+			entity = entity,
+			readyAt = tick() + REUSE_DELAY_SECONDS,
+		}
 	else
 		-- Pool full - let entity be garbage collected
 		-- (Roblox will handle cleanup)
@@ -209,11 +259,15 @@ end
 
 -- Get pool statistics
 function EnemyPool.getStats()
+	flushRecycleQueue(tick())
+	local pooled = poolCount + recycleCount
+	local inUse = math.max(MAX_POOL_SIZE - pooled, 0)
 	return {
 		available = poolCount,
+		coolingDown = recycleCount,
 		total = MAX_POOL_SIZE,
-		inUse = MAX_POOL_SIZE - poolCount,
-		utilization = ((MAX_POOL_SIZE - poolCount) / MAX_POOL_SIZE) * 100,
+		inUse = inUse,
+		utilization = (inUse / MAX_POOL_SIZE) * 100,
 	}
 end
 

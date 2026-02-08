@@ -10,7 +10,9 @@ local playerGui = player:WaitForChild("PlayerGui")
 local PlayerSettingsSchema = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PlayerSettingsSchema"))
 type SettingsV1 = PlayerSettingsSchema.SettingsV1
 
-local ATTR_RENDER_SCALE = "Setting_graphics_renderScale"
+local ATTR_ENEMY_RENDER_SCALE = "Setting_graphics_enemyRenderScale"
+local ATTR_CHUNK_RENDER_SCALE = "Setting_graphics_chunkRenderScale"
+local ATTR_RENDER_SCALE_LEGACY = "Setting_graphics_renderScale"
 local ATTR_PROJECTILE_OPACITY_SELF = "Setting_graphics_projectileOpacitySelf"
 local ATTR_PROJECTILE_OPACITY_OTHERS = "Setting_graphics_projectileOpacityOthers"
 local ATTR_OTHER_PLAYER_VFX_OPACITY = "Setting_graphics_otherPlayerVfxOpacity"
@@ -54,6 +56,14 @@ if not rootInstance or not rootInstance:IsA("GuiObject") then
 end
 local root = rootInstance :: GuiObject
 root.Visible = false
+local controlsFrameInstance = mainMenuGui:FindFirstChild("ControlsImageFrame")
+local controlsFrame = if controlsFrameInstance and controlsFrameInstance:IsA("GuiObject")
+	then (controlsFrameInstance :: GuiObject)
+	else nil
+local mainMenuFrameInstance = mainMenuGui:FindFirstChild("MainMenuFrame")
+local mainMenuFrame = if mainMenuFrameInstance and mainMenuFrameInstance:IsA("GuiObject")
+	then (mainMenuFrameInstance :: GuiObject)
+	else nil
 
 local closeButtonInstance = root:FindFirstChild("CloseButton")
 local closeButton = if closeButtonInstance and closeButtonInstance:IsA("TextButton")
@@ -94,6 +104,9 @@ else
 end
 
 local function setOpen(open: boolean)
+	if open and controlsFrame and controlsFrame.Visible then
+		controlsFrame.Visible = false
+	end
 	isOpen = open
 	root.Visible = open
 end
@@ -121,7 +134,10 @@ local function toComponentBaseName(labelText: string): string
 end
 
 local function applyToAttributes(settings: SettingsV1)
-	player:SetAttribute(ATTR_RENDER_SCALE, settings.graphics.renderScale)
+	player:SetAttribute(ATTR_ENEMY_RENDER_SCALE, settings.graphics.enemyRenderScale)
+	player:SetAttribute(ATTR_CHUNK_RENDER_SCALE, settings.graphics.chunkRenderScale)
+	-- Backward compatibility for any still-reading legacy consumers.
+	player:SetAttribute(ATTR_RENDER_SCALE_LEGACY, settings.graphics.enemyRenderScale)
 	player:SetAttribute(ATTR_PROJECTILE_OPACITY_SELF, settings.graphics.projectileOpacitySelf)
 	player:SetAttribute(ATTR_PROJECTILE_OPACITY_OTHERS, settings.graphics.projectileOpacityOthers)
 	player:SetAttribute(ATTR_OTHER_PLAYER_VFX_OPACITY, settings.graphics.otherPlayerVfxOpacity)
@@ -253,10 +269,17 @@ local function addToggleRow(labelText: string, getter: () -> boolean, setter: (b
 	refresh()
 end
 
-addSliderRow("Render Distance", 0.25, 5.00, 0.25, function()
-	return currentSettings.graphics.renderScale
+addSliderRow("Render Distance Enemies", 0.50, 10.00, 0.50, function()
+	return currentSettings.graphics.enemyRenderScale
 end, function(value: number)
-	currentSettings.graphics.renderScale = value
+	currentSettings.graphics.enemyRenderScale = value
+	applyToAttributes(currentSettings)
+end)
+
+addSliderRow("Render Distance Chunks", 0.50, 10.00, 0.50, function()
+	return currentSettings.graphics.chunkRenderScale
+end, function(value: number)
+	currentSettings.graphics.chunkRenderScale = value
 	applyToAttributes(currentSettings)
 end)
 
@@ -309,8 +332,14 @@ else
 	warn("[SettingsController] Root.ResetButton not found")
 end
 
-openSignal.Event:Connect(function()
-	setOpen(true)
+openSignal.Event:Connect(function(action: any)
+	if action == "toggle" then
+		setOpen(not isOpen)
+	elseif action == false or action == "close" then
+		setOpen(false)
+	else
+		setOpen(true)
+	end
 end)
 
 SettingsChangedRemote.OnClientEvent:Connect(function(settings: any)
@@ -341,17 +370,18 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 	setOpen(not isOpen)
 end)
 
-task.spawn(function()
-	local mainMenuGui = playerGui:WaitForChild("MainMenuGui", 30)
-	if not mainMenuGui then
-		return
-	end
-	local mainMenuFrame = mainMenuGui:FindFirstChild("MainMenuFrame")
-	local playButtonsFrame = mainMenuFrame and mainMenuFrame:FindFirstChild("PlayButtonsFrame")
-	local settingsButton = playButtonsFrame and playButtonsFrame:FindFirstChild("SettingsButton")
-	if settingsButton and settingsButton:IsA("GuiButton") then
-		(settingsButton :: GuiButton).Activated:Connect(function()
-			setOpen(true)
-		end)
-	end
-end)
+if controlsFrame then
+	controlsFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+		if controlsFrame.Visible and isOpen then
+			setOpen(false)
+		end
+	end)
+end
+
+if mainMenuFrame then
+	mainMenuFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+		if not mainMenuFrame.Visible and isOpen then
+			setOpen(false)
+		end
+	end)
+end

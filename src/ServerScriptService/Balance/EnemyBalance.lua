@@ -6,7 +6,7 @@ local EnemyBalance = {}
 EnemyBalance.HealthMultiplier = 1
 EnemyBalance.DamageMultiplier = 1
 
--- Enemy spawning settings (adaptive, per-player)
+-- Enemy spawning settings (time/player-count coefficient only)
 EnemyBalance.MaxEnemies = 190 -- Global cap
 
 -- Global difficulty coefficient (RoR2-style, Normal)
@@ -21,6 +21,26 @@ EnemyBalance.DifficultyScaling = {
 	HealthExponent = 4.0,
 	DamageExponent = 0.65,
 	SpeedExponent = 0.65,
+}
+
+-- Dynamic scaling correction clamp (player stats vs expected power by time).
+-- Hard-limited to +/-12% in EnemySpawner even if these values are increased.
+EnemyBalance.ScalingCorrection = {
+	Enabled = true,
+	SpawnClamp = 0.12,
+	StatClamp = 0.12,
+	SmoothingAlpha = 0.35,
+	Weights = {
+		Spawn = 1.0,
+		Health = 1.0,
+		Damage = 1.0,
+		Speed = 1.0,
+	},
+	TimeExpectation = {
+		EarlyMinutes = 20,
+		EarlyPerMinute = 0.03,
+		LatePerMinute = 0.015,
+	},
 }
 
 -- Super/Elite tier settings (rarer, stronger)
@@ -44,43 +64,6 @@ EnemyBalance.SuperElite = {
 	SuperOrbWeights = { Purple = 70, Orange = 30 },
 	EliteOrbType = "Purple",
 }
-
--- Per-player pressure correction (small, clamped)
-EnemyBalance.PressureCorrection = {
-	SpawnClamp = 0.20, -- ±15%
-	StatClamp = 0.12, -- ±10% for HP/Dmg/Speed
-	ChangeThreshold = 0.02,
-	ChangeCooldown = 8.0, -- seconds
-}
-
-EnemyBalance.Pressure = {
-	Tau = 30, -- fallback if TauEarly/TauLate are not set
-	TauEarly = 75, -- seconds (slow catch-up early)
-	TauLate = 8, -- seconds (faster catch-up later)
-	TauRampMinutes = 60, -- minutes to ramp TauEarly -> TauLate
-	UpdateInterval = 0.5, -- seconds between pressure updates
-}
-
--- Raw stat-driven scaling (passives + ability stats, excluding temporary buffs)
-EnemyBalance.RawStatScaling = {
-	Enabled = true,
-	AbilityWeight = 0.85, -- abilities contribute at 45% of general stats
-	General = {
-		-- Player offense -> Enemy health/spawn
-		Health = { Damage = 1.5, Cooldown = 0.8, ProjectileCount = 0.8, Penetration = 0.8, Size = 0.5, Duration = 0.5 },
-		-- Player defense -> Enemy damage (low impact)
-		Damage = { Health = 0.25, Armor = 0.4, Regen = 0.1, Lifesteal = 0.15 },
-		-- Player mobility -> Enemy speed (low impact)
-		Speed = { MoveSpeed = 0.6, MobilityDistance = 0.4 },
-	},
-	Ability = {
-		Health = { Damage = 0.9, Cooldown = 0.4, ProjectileCount = 0.6, ShotAmount = 0.6, Penetration = 0.25, Size = 0.2, Duration = 0.2 },
-		Spawn = { Damage = 0.35, Cooldown = 0.5, ProjectileCount = 0.3, ShotAmount = 0.3, Penetration = 0.15, Size = 0.2, Duration = 0.2 },
-	},
-}
-
--- PlayerScaling removed: scaling is now driven only by raw stats + time.
-
 
 EnemyBalance.SpawnBudget = {
 	MaxSpawnsPerSecond = 14, -- Global spawn budget (all players)
@@ -110,7 +93,7 @@ EnemyBalance.SpawnWeights = {
 	Charger = 0.25
 }
 
--- Base spawn rate per player (adaptive system scales from this)
+-- Base spawn rate per player (scaled by global difficulty coefficient)
 EnemyBalance.BaseSpawnRatePerPlayer = 1.4
 
 EnemyBalance.InitialSpawnDelay = 3	 -- Seconds to wait before first enemy spawn
@@ -128,7 +111,7 @@ EnemyBalance.SpawnDensityCheck = {
 -- Sector-based spawning (distributes enemies evenly around player)
 EnemyBalance.SectorSpawning = {
 	Enabled = true,
-	SectorCount = 8,  -- Divide spawn ring into 8 sectors (45° each)
+	SectorCount = 8,  -- Divide spawn ring into 8 sectors (45 deg each)
 	AttemptsPerSector = 5,  -- Try 3 positions within chosen sector
 }
 
@@ -137,7 +120,7 @@ EnemyBalance.SectorSpawning = {
 -- Each enemy model must contain:
 --   "Hitbox" part = for receiving damage from projectiles (only this part can be hit)
 --   "Attackbox" part = for dealing damage to players (determines attack range)
--- Attack cooldown is hardcoded to 0.2 seconds between attacks
+-- Attack cooldown comes from each enemy type balance (for example Zombie attackCooldown = 0.7)
 
 -- Enemy repulsion settings (Minecraft-like separation)
 EnemyBalance.RepulsionRadius = 18 -- Default separation radius in studs

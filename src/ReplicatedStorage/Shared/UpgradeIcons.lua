@@ -47,11 +47,11 @@ local UpgradeIcons = {
 	expGain = "91526535217647",
 
 	-- Mobility upgrades
-	["mobility:Dash"] = "",
-	["mobility:ShieldBash"] = "",
-	["mobility:DoubleJump"] = "",
-	["mobility:Blink"] = "",
-	["mobility:ManaGrapple"] = "",
+	["mobility:Dash"] = "99817712946636",
+	["mobility:ShieldBash"] = "98379470571047",
+	["mobility:DoubleJump"] = "118165830384003",
+	["mobility:Blink"] = "103856385303705",
+	["mobility:ManaGrapple"] = "135518071156835",
 
 	-- Attributes
 	["attr:MagicBolt:ChainCasting"] = "",

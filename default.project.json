@@ -7,6 +7,11 @@
       "$ignoreUnknownInstances": true,
       "$path": "src/ReplicatedStorage"
     },
+    "MaterialService": {
+      "$className": "MaterialService",
+      "$ignoreUnknownInstances": true,
+      "$path": "src/MaterialService"
+    },
     "ServerScriptService": {
       "$className": "ServerScriptService",
       "$ignoreUnknownInstances": true,

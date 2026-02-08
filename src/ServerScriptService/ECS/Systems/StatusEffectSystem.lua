@@ -14,6 +14,7 @@ local PassiveEffectSystem: any
 
 local StatusEffects: any
 local PlayerStats: any
+local EntityType: any
 
 -- Remotes for notifying clients
 local StatusEffectUpdate: RemoteEvent
@@ -29,6 +30,7 @@ function StatusEffectSystem.init(worldRef: any, components: any, dirtyService: a
 	
 	StatusEffects = Components.StatusEffects
 	PlayerStats = Components.PlayerStats
+	EntityType = Components.EntityType
 	
 	-- Create cached query
 	statusEffectsQuery = world:query(Components.StatusEffects, Components.PlayerStats):cached()
@@ -43,6 +45,15 @@ function StatusEffectSystem.init(worldRef: any, components: any, dirtyService: a
 	end
 	
 	BuffDurationUpdate = remotes:WaitForChild("BuffDurationUpdate")
+end
+
+local function isPlayerEntity(entityId: number): boolean
+	local entityType = EntityType and world:get(entityId, EntityType)
+	if entityType then
+		return entityType.type == "Player"
+	end
+	local playerStats = world:get(entityId, PlayerStats)
+	return playerStats and playerStats.player ~= nil
 end
 
 -- Set PassiveEffectSystem reference for speed refresh callback
@@ -202,6 +213,9 @@ end
 
 -- Check if player entity has active invincibility
 function StatusEffectSystem.hasInvincibility(playerEntity: number): boolean
+	if not isPlayerEntity(playerEntity) then
+		return false
+	end
 	local statusEffects = world:get(playerEntity, StatusEffects)
 	if not statusEffects or not statusEffects.invincible then
 		return false
@@ -212,6 +226,9 @@ end
 
 -- Check if player entity has spawn protection (enemies don't target)
 function StatusEffectSystem.hasSpawnProtection(playerEntity: number): boolean
+	if not isPlayerEntity(playerEntity) then
+		return false
+	end
 	local statusEffects = world:get(playerEntity, StatusEffects)
 	if not statusEffects or not statusEffects.invincible then
 		return false
@@ -310,4 +327,3 @@ function StatusEffectSystem.step(dt: number)
 end
 
 return StatusEffectSystem
-

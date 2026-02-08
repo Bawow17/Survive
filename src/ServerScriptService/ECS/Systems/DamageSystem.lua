@@ -5,6 +5,8 @@
 local DamageSystem = {}
 
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
+local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 
 local world: any
 local Components: any
@@ -22,12 +24,28 @@ local Knockback: any
 local DeathAnimation: any
 local PassiveEffects: any
 local EnemyAggro: any
+local AttackCooldown: any
+local EnemyTier: any
 
 local RNG = Random.new()
 
 local damageAttemptCount = 0
 local damageAppliedCount = 0
 local DEBUG_DAMAGE_LOGS = false
+local INVINCIBLE_ENEMY_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.InvincibleEnemyDiagnostics or false
+local LAST_HIT_DAMAGE_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.LastHitDamageDiagnostics or false
+local ENEMY_DIAG_SAMPLE_LIMIT = 20
+local enemyDiagCounters = {
+	enemyDamageAttempts = 0,
+	enemyDamageApplied = 0,
+	enemyRejectedMissingHealth = 0,
+	enemyRejectedTargetMissing = 0,
+	enemyRejectedWorldMissing = 0,
+	enemyRejectedNonEnemyType = 0,
+	enemyHadDeathAnimationAtHit = 0,
+}
+local enemyDiagSamples: {any} = {}
+local lastPlayerHitByEntity: {[number]: any} = {}
 
 -- Configuration
 local HIT_FLASH_DURATION = 0.15  -- Increased from 0.2 to 0.15 for snappier response
@@ -39,6 +57,31 @@ local KNOCKBACK_DURATION = 0.2
 -- Buffer time between HitFlash end and death fade start
 local DEATH_ANIMATION_BUFFER = 0.12  -- Allow HitFlash to be visible before death fade
 
+local function recordEnemyDiagSample(reason: string, targetEntity: number?, entityType: any?, health: any?, hasDeathAnimation: boolean?)
+	if not INVINCIBLE_ENEMY_DIAGNOSTICS then
+		return
+	end
+	table.insert(enemyDiagSamples, {
+		t = tick(),
+		targetEntity = targetEntity,
+		reason = reason,
+		hasEntityType = entityType ~= nil,
+		hasHealth = health ~= nil,
+		hasDeathAnimation = hasDeathAnimation == true,
+		healthCurrent = health and health.current or nil,
+	})
+	if #enemyDiagSamples > ENEMY_DIAG_SAMPLE_LIMIT then
+		table.remove(enemyDiagSamples, 1)
+	end
+end
+
+local function resetEnemyDiagnostics()
+	for key in pairs(enemyDiagCounters) do
+		enemyDiagCounters[key] = 0
+	end
+	table.clear(enemyDiagSamples)
+end
+
 local function isPlayerSourceEntity(sourceEntity: number?): boolean
 	if not sourceEntity then
 		return false
@@ -49,6 +92,14 @@ local function isPlayerSourceEntity(sourceEntity: number?): boolean
 	end
 	local sourceStats = world:get(sourceEntity, Components.PlayerStats)
 	return sourceStats and sourceStats.player ~= nil
+end
+
+local function isEnemySourceEntity(sourceEntity: number?): boolean
+	if not sourceEntity then
+		return false
+	end
+	local sourceType = world:get(sourceEntity, EntityType)
+	return sourceType and sourceType.type == "Enemy"
 end
 
 local function normalizeCritChance(rawChance: number?): number
@@ -82,6 +133,8 @@ function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	DeathAnimation = Components.DeathAnimation
 	PassiveEffects = Components.PassiveEffects
 	EnemyAggro = Components.EnemyAggro
+	AttackCooldown = Components.AttackCooldown
+	EnemyTier = Components.EnemyTier
 end
 
 -- Set EnemyExpDropSystem reference (called after it's initialized)
@@ -120,6 +173,31 @@ local function findClosestPlayer(position: Vector3): Player?
 	end
 	
 	return closestPlayer
+end
+
+-- Direct heal path for instant effects (e.g. lifesteal).
+-- Intentionally independent from regen delay/recent damage state.
+local function applyDirectPlayerHeal(playerEntity: number, healAmount: number)
+	if healAmount <= 0 then
+		return
+	end
+
+	local sourceHealth = world:get(playerEntity, Health)
+	if sourceHealth then
+		local healed = math.min(sourceHealth.current + healAmount, sourceHealth.max)
+		DirtyService.setIfChanged(world, playerEntity, Health, {
+			current = healed,
+			max = sourceHealth.max,
+		}, "Health")
+	end
+
+	local sourceStats = world:get(playerEntity, Components.PlayerStats)
+	if sourceStats and sourceStats.player and sourceStats.player.Character then
+		local humanoid = sourceStats.player.Character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + healAmount)
+		end
+	end
 end
 
 local function updateEnemyAggro(enemyEntity: number, sourceEntity: number, appliedDamage: number, maxHealth: number)
@@ -226,20 +304,49 @@ end
 -- sourceEntity: optional player entity that dealt the damage (for ability tracking)
 -- abilityId: optional ability identifier (for damage stat tracking)
 function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, damageType: string, sourceEntity: number?, abilityId: string?): boolean
-	if not world or not targetEntity then
+	if not world then
+		if INVINCIBLE_ENEMY_DIAGNOSTICS then
+			enemyDiagCounters.enemyRejectedWorldMissing += 1
+			recordEnemyDiagSample("world_missing", targetEntity, nil, nil, false)
+		end
+		return false, false
+	end
+	if not targetEntity then
+		if INVINCIBLE_ENEMY_DIAGNOSTICS then
+			enemyDiagCounters.enemyRejectedTargetMissing += 1
+			recordEnemyDiagSample("target_missing", nil, nil, nil, false)
+		end
 		return false, false
 	end
 	damageAttemptCount += 1
-	
-	-- Check invincibility
-	if StatusEffectSystem and StatusEffectSystem.hasInvincibility(targetEntity) then
-		return false, false  -- Damage blocked by invincibility
-	end
-	
+	local requestedDamageAmount = damageAmount
+
 	-- Get entity type to determine if this is a player or enemy
 	local entityType = world:get(targetEntity, EntityType)
 	local isPlayer = entityType and entityType.type == "Player"
 	local isEnemy = entityType and entityType.type == "Enemy"
+	local playerStats = world:get(targetEntity, Components.PlayerStats)
+	if not isEnemy and not isPlayer and playerStats and playerStats.player then
+		isPlayer = true
+	end
+	if INVINCIBLE_ENEMY_DIAGNOSTICS then
+		if isEnemy then
+			enemyDiagCounters.enemyDamageAttempts += 1
+			local hasDeathAnimation = world:has(targetEntity, DeathAnimation)
+			if hasDeathAnimation then
+				enemyDiagCounters.enemyHadDeathAnimationAtHit += 1
+				recordEnemyDiagSample("enemy_has_death_animation", targetEntity, entityType, world:get(targetEntity, Health), true)
+			end
+		elseif not isPlayer then
+			enemyDiagCounters.enemyRejectedNonEnemyType += 1
+			recordEnemyDiagSample("non_enemy_type", targetEntity, entityType, world:get(targetEntity, Health), world:has(targetEntity, DeathAnimation))
+		end
+	end
+	
+	-- Check invincibility (players only)
+	if isPlayer and not isEnemy and StatusEffectSystem and StatusEffectSystem.hasInvincibility(targetEntity) then
+		return false, false  -- Damage blocked by invincibility
+	end
 
 	-- Apply player defensive modifiers (armor)
 	if isPlayer then
@@ -316,6 +423,12 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	-- Get health component
 	local health = world:get(targetEntity, Health)
 	if not health then
+		if INVINCIBLE_ENEMY_DIAGNOSTICS then
+			if isEnemy then
+				enemyDiagCounters.enemyRejectedMissingHealth += 1
+				recordEnemyDiagSample("missing_health", targetEntity, entityType, nil, world:has(targetEntity, DeathAnimation))
+			end
+		end
 		return false, false
 	end
 
@@ -341,6 +454,7 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	-- Apply remaining damage to ECS health
 	local newHealth = math.max(health.current - remainingDamage, 0)
 	local died = newHealth <= 0
+	local healthBefore = health.current
 	
 	-- CUSTOM DEATH: Check if player died (< 0.0001 HP)
 	if isPlayer and newHealth <= 0.0001 then
@@ -370,11 +484,98 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	local applied = newHealth ~= health.current
 	if applied then
 		damageAppliedCount += 1
+		if INVINCIBLE_ENEMY_DIAGNOSTICS and isEnemy then
+			enemyDiagCounters.enemyDamageApplied += 1
+		end
 	end
 	DirtyService.setIfChanged(world, targetEntity, Health, {
 		current = newHealth,
 		max = health.max
 	}, "Health")
+
+	if isPlayer and remainingDamage > 0 then
+		local sourceType = sourceEntity and world:get(sourceEntity, EntityType) or nil
+		local sourceDamage = sourceEntity and world:get(sourceEntity, Components.Damage) or nil
+		local sourceCooldown = sourceEntity and AttackCooldown and world:get(sourceEntity, AttackCooldown) or nil
+		local sourceTier = sourceEntity and EnemyTier and world:get(sourceEntity, EnemyTier) or nil
+		local playerStatsAtHit = world:get(targetEntity, Components.PlayerStats)
+		local humanoidHealthBefore: number? = nil
+		local humanoidMaxHealth: number? = nil
+		local playerName = if playerStatsAtHit and playerStatsAtHit.player then playerStatsAtHit.player.Name else tostring(targetEntity)
+		if playerStatsAtHit and playerStatsAtHit.player and playerStatsAtHit.player.Character then
+			local humanoid = playerStatsAtHit.player.Character:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				humanoidHealthBefore = humanoid.Health
+				humanoidMaxHealth = humanoid.MaxHealth
+			end
+		end
+		local appliedHealthDamage = math.max(healthBefore - newHealth, 0)
+		local lastHit = {
+			t = tick(),
+			targetEntity = targetEntity,
+			playerName = playerName,
+			requestedDamage = requestedDamageAmount,
+			postMitigationDamage = damageAmount,
+			damageToHealth = appliedHealthDamage,
+			damageToOverheal = math.max(remainingDamage - appliedHealthDamage, 0),
+			damageType = damageType,
+			abilityId = abilityId,
+			healthBefore = healthBefore,
+			healthAfter = newHealth,
+			maxHealth = health.max,
+			sourceEntity = sourceEntity,
+			sourceType = sourceType and sourceType.type or nil,
+			sourceSubtype = sourceType and sourceType.subtype or nil,
+			sourceTier = sourceTier and sourceTier.tier or nil,
+			sourceDamage = sourceDamage and sourceDamage.amount or nil,
+			sourceCooldownRemaining = sourceCooldown and sourceCooldown.remaining or nil,
+			sourceCooldownMax = sourceCooldown and sourceCooldown.max or nil,
+			humanoidHealthBefore = humanoidHealthBefore,
+			humanoidMaxHealth = humanoidMaxHealth,
+		}
+		lastPlayerHitByEntity[targetEntity] = lastHit
+
+		if playerStatsAtHit and playerStatsAtHit.player then
+			local player = playerStatsAtHit.player
+			player:SetAttribute("Debug_LastHitDamage", appliedHealthDamage)
+			player:SetAttribute("Debug_LastHitSource", string.format(
+				"%s/%s",
+				tostring(lastHit.sourceType or "Unknown"),
+				tostring(lastHit.sourceSubtype or "Unknown")
+			))
+			player:SetAttribute("Debug_LastHitTime", lastHit.t)
+		end
+
+		if LAST_HIT_DAMAGE_DIAGNOSTICS then
+			warn(string.format(
+				"[LastHitDebug] player=%s dmgReq=%.2f dmgPostMit=%.2f hpDmg=%.2f hp=%.2f->%.2f hum=%.2f/%.2f src=%s/%s tier=%s srcDmg=%.2f srcCD=%.2f/%.2f type=%s",
+				tostring(playerName),
+				tonumber(requestedDamageAmount) or 0,
+				tonumber(damageAmount) or 0,
+				tonumber(appliedHealthDamage) or 0,
+				tonumber(healthBefore) or 0,
+				tonumber(newHealth) or 0,
+				tonumber(lastHit.humanoidHealthBefore) or -1,
+				tonumber(lastHit.humanoidMaxHealth) or -1,
+				tostring(lastHit.sourceType or "Unknown"),
+				tostring(lastHit.sourceSubtype or "Unknown"),
+				tostring(lastHit.sourceTier or "Normal"),
+				tonumber(lastHit.sourceDamage) or 0,
+				tonumber(lastHit.sourceCooldownRemaining) or 0,
+				tonumber(lastHit.sourceCooldownMax) or 0,
+				tostring(damageType or "unknown")
+			))
+		end
+	end
+
+	-- Apply short post-hit invincibility for players when damaged by enemies.
+	-- Prevents rapid stacked hits from feeling like instant one-shots.
+	if applied and isPlayer and remainingDamage > 0 and StatusEffectSystem and isEnemySourceEntity(sourceEntity) then
+		local iFrames = PlayerBalance.BaseInvincibilityFrames or 0
+		if iFrames > 0 then
+			StatusEffectSystem.grantInvincibility(targetEntity, iFrames, false, false, false)
+		end
+	end
 	
 	-- CRITICAL: If target is a player, also damage the Roblox Humanoid
 	-- ONLY if actual health was damaged (not if overheal absorbed all damage)
@@ -486,25 +687,9 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 		local sourceEffects = world:get(sourceEntity, PassiveEffects)
 		local lifesteal = sourceEffects and sourceEffects.lifesteal or 0
 		if lifesteal > 0 then
-			local sourceHealth = world:get(sourceEntity, Health)
-			if sourceHealth then
-				local healAmount = appliedToTarget * lifesteal
-				if healAmount > 0 then
-					local healed = math.min(sourceHealth.current + healAmount, sourceHealth.max)
-					DirtyService.setIfChanged(world, sourceEntity, Health, {
-						current = healed,
-						max = sourceHealth.max,
-					}, "Health")
-
-					local sourceStats = world:get(sourceEntity, Components.PlayerStats)
-					if sourceStats and sourceStats.player and sourceStats.player.Character then
-						local humanoid = sourceStats.player.Character:FindFirstChildOfClass("Humanoid")
-						if humanoid then
-							humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + healAmount)
-						end
-					end
-				end
-			end
+			-- No cooldown or recent-damage lockout: lifesteal always applies on dealt damage.
+			local healAmount = appliedToTarget * lifesteal
+			applyDirectPlayerHeal(sourceEntity, healAmount)
 		end
 	end
 	
@@ -622,6 +807,41 @@ function DamageSystem.getStats()
 		damageAttempts = damageAttemptCount,
 		damageApplied = damageAppliedCount,
 	}
+end
+
+function DamageSystem.getInvincibleEnemyDebugSnapshot(reset: boolean?): {[string]: any}
+	local samples = table.create(#enemyDiagSamples)
+	for i, sample in ipairs(enemyDiagSamples) do
+		samples[i] = sample
+	end
+
+	local snapshot = {
+		enemyDamageAttempts = enemyDiagCounters.enemyDamageAttempts,
+		enemyDamageApplied = enemyDiagCounters.enemyDamageApplied,
+		enemyRejectedMissingHealth = enemyDiagCounters.enemyRejectedMissingHealth,
+		enemyRejectedTargetMissing = enemyDiagCounters.enemyRejectedTargetMissing,
+		enemyRejectedWorldMissing = enemyDiagCounters.enemyRejectedWorldMissing,
+		enemyRejectedNonEnemyType = enemyDiagCounters.enemyRejectedNonEnemyType,
+		enemyHadDeathAnimationAtHit = enemyDiagCounters.enemyHadDeathAnimationAtHit,
+		samples = samples,
+	}
+
+	if reset then
+		resetEnemyDiagnostics()
+	end
+
+	return snapshot
+end
+
+function DamageSystem.getLastPlayerHitDebugSnapshot(reset: boolean?): {[number]: any}
+	local snapshot: {[number]: any} = {}
+	for entityId, record in pairs(lastPlayerHitByEntity) do
+		snapshot[entityId] = record
+	end
+	if reset then
+		table.clear(lastPlayerHitByEntity)
+	end
+	return snapshot
 end
 
 function DamageSystem.applyKnockback(targetEntity: number, direction: Vector3, distance: number, duration: number, stunned: boolean?): boolean

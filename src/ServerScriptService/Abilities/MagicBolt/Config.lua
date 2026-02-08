@@ -31,7 +31,7 @@ return {
 	targetingMode = 2,
 	targetingRange = 10000, -- maximum range for targeting enemies
 	targetingAngle = math.rad(45), -- maximum angle deviation for targeting
-	StayHorizontal = true, -- Keep projectiles horizontal when player is grounded
+	StayHorizontal = true, -- Allow vertical aiming to match enemy elevation on uneven terrain
 	AlwaysStayHorizontal = false, -- Lock Y-axis to spawn height (works even when airborne, overrides StayHorizontal)
 	StickToPlayer = false, -- Projectile follows player movement in all axes X/Y/Z (overrides AlwaysStayHorizontal)
 

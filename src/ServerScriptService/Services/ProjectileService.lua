@@ -10,6 +10,7 @@ local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local TargetingService = require(game.ServerScriptService.Abilities.TargetingService)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -153,6 +154,10 @@ local EntityType: any
 local Collision: any
 local Health: any
 local PlayerStats: any
+local DeathAnimation: any
+local Visual: any
+local EnemyTier: any
+local FacingDirection: any
 
 local playerQuery: any
 
@@ -181,6 +186,40 @@ local MAX_SPAWNS_PER_SECOND = 400
 local RECIPIENT_REFRESH_INTERVAL = 0.5
 local MAX_RECIPIENT_SPAWNS_PER_TICK = 200
 local PETAL_MIN_SEPARATION = 30
+local ENEMY_COLLISION_GRACE_RADIUS = 1.0
+local STAY_HORIZONTAL_TARGET_Y_DIFF = 10.0
+local INVINCIBLE_ENEMY_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.InvincibleEnemyDiagnostics or false
+local ENEMY_VISUAL_HITBOX_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.EnemyVisualHitboxDiagnostics or false
+local INVINCIBLE_DIAG_SAMPLE_LIMIT = 20
+local invincibleDiagCounters = {
+	projectilesTotalSeen = 0,
+	projectilesSpawned = 0,
+	projectilesSimulated = 0,
+	projectilesCollisionEnabled = 0,
+	framesWithoutPlayers = 0,
+	lastPlayerCount = 0,
+	projectilesSkippedBySimBudget = 0,
+	projectilesCollisionDisabledByRelevance = 0,
+	projectilesCollisionDisabledNoPlayers = 0,
+	projectilesSkippedByCollisionBudget = 0,
+	projectilesSkippedByHitBudget = 0,
+	projectileRaycastBlocked = 0,
+	collisionChecks = 0,
+	geometricHits = 0,
+	nearMissUnder1Stud = 0,
+	nearMissUnder3Stud = 0,
+	damageCalls = 0,
+	damageApplied = 0,
+	damageRejectedAfterHit = 0,
+}
+local invincibleDiagSamples: {any} = {}
+local invincibleDiagClosestMissGap = math.huge
+local invincibleDiagClosestMissProjectileId = -1
+local invincibleDiagClosestMissEnemyId = -1
+local invincibleDiagClosestMissKind: string? = nil
+local invincibleDiagClosestMissVerticalDelta = 0
+local invincibleDiagClosestMissHorizontalDelta = 0
+local warnedSuspiciousOffsetBySubtype: {[string]: boolean} = {}
 
 local RAYCAST_PARAMS = RaycastParams.new()
 RAYCAST_PARAMS.FilterType = Enum.RaycastFilterType.Exclude
@@ -208,8 +247,102 @@ local activeExplosions: {{
 	knockbackStunned: boolean?,
 	retargetOwnerEntity: number?,
 	retargetTriggered: boolean?,
+	sourceProjectileId: number?,
 }} = {}
 local lastRecipientRefresh = 0
+
+local function resetInvincibleEnemyDiagnostics()
+	for key in pairs(invincibleDiagCounters) do
+		invincibleDiagCounters[key] = 0
+	end
+	table.clear(invincibleDiagSamples)
+	invincibleDiagClosestMissGap = math.huge
+	invincibleDiagClosestMissProjectileId = -1
+	invincibleDiagClosestMissEnemyId = -1
+	invincibleDiagClosestMissKind = nil
+	invincibleDiagClosestMissVerticalDelta = 0
+	invincibleDiagClosestMissHorizontalDelta = 0
+end
+
+local function getEnemyScaleForEntity(enemyId: number): number
+	local scale = 1.0
+	if not world then
+		return scale
+	end
+
+	local visual = Visual and world:get(enemyId, Visual)
+	local rawScale = visual and visual.scale
+	if typeof(rawScale) == "number" and rawScale == rawScale and rawScale > 0 then
+		scale = math.max(scale, math.clamp(rawScale, 0.1, 20.0))
+	end
+
+	local tierData = EnemyTier and world:get(enemyId, EnemyTier)
+	if typeof(tierData) == "table" then
+		local tierScale = tierData.scale
+		if typeof(tierScale) == "number" and tierScale == tierScale and tierScale > 0 then
+			scale = math.max(scale, math.clamp(tierScale, 0.1, 20.0))
+		else
+			local tierName = tierData.tier
+			if tierName == "Super" then
+				scale = math.max(scale, 4.0)
+			elseif tierName == "Elite" then
+				scale = math.max(scale, 7.5)
+			end
+		end
+	end
+
+	return scale
+end
+
+local function getEnemyDebugMeta(enemyId: number): (number, string?, string?)
+	local scale = getEnemyScaleForEntity(enemyId)
+	local subtype: string? = nil
+	local tier: string? = nil
+	if world then
+		local entityType = EntityType and world:get(enemyId, EntityType)
+		if entityType and typeof(entityType.subtype) == "string" then
+			subtype = entityType.subtype
+		end
+		local tierData = EnemyTier and world:get(enemyId, EnemyTier)
+		if tierData and typeof(tierData.tier) == "string" then
+			tier = tierData.tier
+		end
+	end
+	return scale, subtype, tier
+end
+
+local function recordProjectileRejectionSample(
+	projectileId: number?,
+	enemyId: number?,
+	kind: string?,
+	enemyHealth: number?,
+	hasDeathAnimation: boolean?,
+	enemyScale: number?,
+	enemySubtype: string?,
+	enemyTier: string?,
+	reason: string?,
+	blocker: string?
+)
+	if not INVINCIBLE_ENEMY_DIAGNOSTICS then
+		return
+	end
+	table.insert(invincibleDiagSamples, {
+		t = tick(),
+		projectileId = projectileId,
+		enemyId = enemyId,
+		kind = kind,
+		reason = reason or "didNotApply",
+		enemyHealth = enemyHealth,
+		hasDeathAnimation = hasDeathAnimation == true,
+		enemyScale = enemyScale,
+		enemySubtype = enemySubtype,
+		enemyTier = enemyTier,
+		blocker = blocker,
+	})
+	if #invincibleDiagSamples > INVINCIBLE_DIAG_SAMPLE_LIMIT then
+		table.remove(invincibleDiagSamples, 1)
+	end
+end
 
 local function registerProjectile(id: number)
 	projectileIndex[id] = #projectileList + 1
@@ -483,19 +616,47 @@ local assignments: {[number]: {closest: number?, toughest: number?}} = {}
 	return assignments
 end
 
-local enemyHitboxCache: {[string]: {offset: Vector3, radius: number}} = {}
+local enemyHitboxCache: {[string]: {
+	offset: Vector3,
+	halfExtents: Vector3,
+	rotation: CFrame?,
+	radius: number,
+}} = {}
 
-local function getEnemyCollisionCenter(enemyId: number): (Vector3?, number?)
+local function getEnemyFacingOrientation(enemyId: number): CFrame
+	if not world or not FacingDirection then
+		return CFrame.new()
+	end
+	local facing = world:get(enemyId, FacingDirection)
+	if typeof(facing) ~= "table" then
+		return CFrame.new()
+	end
+	local fx = facing.x or facing.X
+	local fz = facing.z or facing.Z
+	if typeof(fx) ~= "number" or typeof(fz) ~= "number" then
+		return CFrame.new()
+	end
+	local dir = Vector3.new(fx, 0, fz)
+	if dir.Magnitude <= 1e-4 then
+		return CFrame.new()
+	end
+	return CFrame.lookAt(Vector3.zero, dir.Unit)
+end
+
+local function getEnemyCollisionCenter(enemyId: number): (Vector3?, number?, Vector3?, CFrame?, Vector3?)
 	if not world then
-		return nil, nil
+		return nil, nil, nil, nil, nil
 	end
 	local pos = world:get(enemyId, Position)
 	if not pos then
-		return nil, nil
+		return nil, nil, nil, nil, nil
 	end
 	local basePos = Vector3.new(pos.x, pos.y, pos.z)
+	local scale = getEnemyScaleForEntity(enemyId)
 	local entityType = world:get(enemyId, EntityType)
 	local subtype = entityType and entityType.subtype
+	local collision = Collision and world:get(enemyId, Collision)
+	local collisionRadius = if collision and collision.radius then collision.radius else nil
 	if subtype then
 		local cached = enemyHitboxCache[subtype]
 		if not cached then
@@ -509,16 +670,52 @@ local function getEnemyCollisionCenter(enemyId: number): (Vector3?, number?)
 				local radius = math.max(size.X, size.Y, size.Z) * 0.5
 				cached = {
 					offset = hitbox.offset or Vector3.new(0, 0, 0),
+					halfExtents = size * 0.5,
+					rotation = hitbox.rotation,
 					radius = radius,
 				}
 				enemyHitboxCache[subtype] = cached
+				if ENEMY_VISUAL_HITBOX_DIAGNOSTICS then
+					local halfXZ = math.max(size.X, size.Z) * 0.5
+					local offsetXZ = Vector3.new(cached.offset.X, 0, cached.offset.Z).Magnitude
+					if halfXZ > 0 and offsetXZ > (halfXZ * 1.5) and not warnedSuspiciousOffsetBySubtype[subtype] then
+						warnedSuspiciousOffsetBySubtype[subtype] = true
+						warn(string.format(
+							"[ProjectileService] Suspicious hitbox offset subtype=%s offsetXZ=%.2f halfXZ=%.2f",
+							tostring(subtype),
+							offsetXZ,
+							halfXZ
+						))
+					end
+				end
 			end
 		end
 		if cached then
-			return basePos + cached.offset, cached.radius
+			local localRotation = cached.rotation or CFrame.new()
+			local scaledHalfExtents = cached.halfExtents * scale
+			local scaledOffset = Vector3.new(cached.offset.X * scale, cached.offset.Y * scale, cached.offset.Z * scale)
+			local scaledRadius = cached.radius * scale
+			if typeof(collisionRadius) == "number" and collisionRadius > 0 then
+				scaledRadius = math.max(scaledRadius, collisionRadius)
+			end
+			if typeof(collisionRadius) == "number" and collisionRadius > 0 then
+				scaledHalfExtents = Vector3.new(
+					math.max(scaledHalfExtents.X, collisionRadius),
+					math.max(scaledHalfExtents.Y, collisionRadius),
+					math.max(scaledHalfExtents.Z, collisionRadius)
+				)
+			end
+			local center = basePos + scaledOffset
+			local boxCFrame = CFrame.new(center) * localRotation
+			return center, scaledRadius, basePos, boxCFrame, scaledHalfExtents
 		end
 	end
-	return basePos, nil
+	local fallbackRadius = 2.5 * scale
+	if typeof(collisionRadius) == "number" and collisionRadius > 0 then
+		fallbackRadius = math.max(collisionRadius, fallbackRadius)
+	end
+	local fallbackHalf = Vector3.new(fallbackRadius, fallbackRadius, fallbackRadius)
+	return basePos, fallbackRadius, basePos, CFrame.new(basePos), fallbackHalf
 end
 
 local function closestPointOnSegment(a: Vector3, b: Vector3, p: Vector3): Vector3
@@ -530,6 +727,73 @@ local function closestPointOnSegment(a: Vector3, b: Vector3, p: Vector3): Vector
 		t = math.clamp(t, 0, 1)
 	end
 	return a + ab * t
+end
+
+local function inflateHalfExtents(halfExtents: Vector3, inflateAmount: number): Vector3
+	if inflateAmount <= 0 then
+		return halfExtents
+	end
+	return Vector3.new(
+		halfExtents.X + inflateAmount,
+		halfExtents.Y + inflateAmount,
+		halfExtents.Z + inflateAmount
+	)
+end
+
+local function pointToOrientedBoxDistance(point: Vector3, boxCFrame: CFrame, halfExtents: Vector3): (number, Vector3, Vector3)
+	local localPoint = boxCFrame:PointToObjectSpace(point)
+	local clamped = Vector3.new(
+		math.clamp(localPoint.X, -halfExtents.X, halfExtents.X),
+		math.clamp(localPoint.Y, -halfExtents.Y, halfExtents.Y),
+		math.clamp(localPoint.Z, -halfExtents.Z, halfExtents.Z)
+	)
+	local deltaLocal = localPoint - clamped
+	local deltaWorld = boxCFrame:VectorToWorldSpace(deltaLocal)
+	local closestPoint = boxCFrame:PointToWorldSpace(clamped)
+	return deltaWorld:Dot(deltaWorld), closestPoint, deltaWorld
+end
+
+local function segmentIntersectsOrientedBox(
+	segmentStart: Vector3,
+	segmentEnd: Vector3,
+	boxCFrame: CFrame,
+	halfExtents: Vector3,
+	inflateAmount: number
+): (boolean, Vector3?)
+	local expandedHalf = inflateHalfExtents(halfExtents, inflateAmount)
+	local p0 = boxCFrame:PointToObjectSpace(segmentStart)
+	local p1 = boxCFrame:PointToObjectSpace(segmentEnd)
+	local dir = p1 - p0
+	local tMin = 0
+	local tMax = 1
+
+	local function clipAxis(originValue: number, dirValue: number, minValue: number, maxValue: number): boolean
+		if math.abs(dirValue) < 1e-6 then
+			return originValue >= minValue and originValue <= maxValue
+		end
+		local invDir = 1 / dirValue
+		local t1 = (minValue - originValue) * invDir
+		local t2 = (maxValue - originValue) * invDir
+		if t1 > t2 then
+			t1, t2 = t2, t1
+		end
+		tMin = math.max(tMin, t1)
+		tMax = math.min(tMax, t2)
+		return tMin <= tMax
+	end
+
+	if not clipAxis(p0.X, dir.X, -expandedHalf.X, expandedHalf.X) then
+		return false, nil
+	end
+	if not clipAxis(p0.Y, dir.Y, -expandedHalf.Y, expandedHalf.Y) then
+		return false, nil
+	end
+	if not clipAxis(p0.Z, dir.Z, -expandedHalf.Z, expandedHalf.Z) then
+		return false, nil
+	end
+
+	local hitLocal = p0 + dir * math.clamp(tMin, 0, 1)
+	return true, boxCFrame:PointToWorldSpace(hitLocal)
 end
 
 local function cloneHomingConfig(homing: HomingConfig?): HomingConfig?
@@ -697,8 +961,13 @@ local function updateHoming(record: ProjectileRecord, now: number)
 	end
 
 	local desired = targetPos - record.lastPos
-	if homing.stayHorizontal or homing.alwaysStayHorizontal then
+	if homing.alwaysStayHorizontal then
 		desired = Vector3.new(desired.X, 0, desired.Z)
+	elseif homing.stayHorizontal then
+		local yDiff = math.abs(targetPos.Y - record.lastPos.Y)
+		if yDiff <= STAY_HORIZONTAL_TARGET_Y_DIFF then
+			desired = Vector3.new(desired.X, 0, desired.Z)
+		end
 	end
 	if desired.Magnitude == 0 then
 		return
@@ -742,10 +1011,14 @@ local function shouldSimulateCollision(record: ProjectileRecord, playerPositions
 	return nearestDistSq <= relevanceSq, nearestDistSq
 end
 
-local function passesRaycastCheck(startPos: Vector3, endPos: Vector3): boolean
+local function passesRaycastCheck(startPos: Vector3, endPos: Vector3): (boolean, string?)
 	local dir = endPos - startPos
 	local result = Workspace:Raycast(startPos, dir, RAYCAST_PARAMS)
-	return result == nil
+	if result == nil then
+		return true, nil
+	end
+	local blocker = result.Instance and result.Instance:GetFullName() or "unknown"
+	return false, blocker
 end
 
 function ProjectileService.init(worldRef: any, components: any, getPlayerFromEntityFn: (number) -> Player?)
@@ -758,6 +1031,10 @@ function ProjectileService.init(worldRef: any, components: any, getPlayerFromEnt
 	Collision = Components.Collision
 	Health = Components.Health
 	PlayerStats = Components.PlayerStats
+	DeathAnimation = Components.DeathAnimation
+	Visual = Components.Visual
+	EnemyTier = Components.EnemyTier
+	FacingDirection = Components.FacingDirection
 
 	playerQuery = world:query(Components.Position, Components.PlayerStats):cached()
 
@@ -945,6 +1222,9 @@ function ProjectileService.spawnProjectile(payload: {
 
 	projectiles[id] = record
 	registerProjectile(id)
+	if INVINCIBLE_ENEMY_DIAGNOSTICS then
+		invincibleDiagCounters.projectilesSpawned += 1
+	end
 
 	for playerEntity, pos, playerStats in playerQuery do
 		if playerStats and playerStats.player and playerStats.player.Parent then
@@ -985,6 +1265,7 @@ local function startExplosion(record: ProjectileRecord, center: Vector3, reason:
 		knockbackStunned = aoe.knockbackStunned,
 		retargetOwnerEntity = aoe.retargetPetalsOwner,
 		retargetTriggered = false,
+		sourceProjectileId = record.id,
 	}
 
 	sendImpact(record, center, reason, aoe, despawnOnImpact)
@@ -1007,20 +1288,65 @@ local function processExplosions(now: number, hitBudget: number): number
 			local candidates = OctreeSystem.getEnemiesInRadius(explosion.position, radius)
 			for _, enemyId in ipairs(candidates) do
 				if hitBudget <= 0 then
+					if INVINCIBLE_ENEMY_DIAGNOSTICS then
+						invincibleDiagCounters.projectilesSkippedByHitBudget += 1
+					end
 					break
+				end
+				if INVINCIBLE_ENEMY_DIAGNOSTICS then
+					invincibleDiagCounters.collisionChecks += 1
 				end
 				if not explosion.hitSet[enemyId] then
 					local health = world:get(enemyId, Health)
-					local enemyPos = getEnemyCollisionCenter(enemyId)
+					local enemyPos, enemyRadiusOverride, _, enemyBoxCFrame, enemyHalfExtents = getEnemyCollisionCenter(enemyId)
 					if enemyPos and health and health.current and health.current > 0 then
-						if (enemyPos - explosion.position).Magnitude <= radius then
+						local enemyRadius = enemyRadiusOverride or 2.5
+						local testPos = enemyPos
+						local hitThis = false
+						if enemyBoxCFrame and enemyHalfExtents then
+							local distSq, closestPoint = pointToOrientedBoxDistance(explosion.position, enemyBoxCFrame, enemyHalfExtents)
+							if distSq <= (radius + ENEMY_COLLISION_GRACE_RADIUS) * (radius + ENEMY_COLLISION_GRACE_RADIUS) then
+								hitThis = true
+								testPos = closestPoint
+							end
+						else
+							hitThis = (testPos - explosion.position).Magnitude <= (radius + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS)
+						end
+						if hitThis then
+							if INVINCIBLE_ENEMY_DIAGNOSTICS then
+								invincibleDiagCounters.geometricHits += 1
+							end
 							hitAny = true
 							explosion.hitSet[enemyId] = true
 							hitBudget -= 1
-							DamageSystem.applyDamage(enemyId, explosion.damage, "magic", explosion.ownerEntity, explosion.kind)
+							if INVINCIBLE_ENEMY_DIAGNOSTICS then
+								invincibleDiagCounters.damageCalls += 1
+							end
+							local enemyHealthAtHit = health.current
+							local _, didApply = DamageSystem.applyDamage(enemyId, explosion.damage, "magic", explosion.ownerEntity, explosion.kind)
+							if INVINCIBLE_ENEMY_DIAGNOSTICS then
+								if didApply then
+									invincibleDiagCounters.damageApplied += 1
+								else
+									invincibleDiagCounters.damageRejectedAfterHit += 1
+									local enemyScale, enemySubtype, enemyTier = getEnemyDebugMeta(enemyId)
+									recordProjectileRejectionSample(
+										explosion.sourceProjectileId,
+										enemyId,
+										explosion.kind,
+										enemyHealthAtHit,
+										world:has(enemyId, DeathAnimation),
+										enemyScale,
+										enemySubtype,
+										enemyTier,
+										"didNotApply",
+										nil
+									)
+								end
+							end
 
 							if explosion.knockbackDistance and explosion.knockbackDistance > 0 then
-								local dir = enemyPos - explosion.position
+								local dir = testPos - explosion.position
 								dir = Vector3.new(dir.X, 0, dir.Z)
 								if dir.Magnitude > 0.01 then
 									DamageSystem.applyKnockback(
@@ -1113,6 +1439,9 @@ end
 
 function ProjectileService.step(dt: number)
 	local now = getSimTime()
+	if INVINCIBLE_ENEMY_DIAGNOSTICS then
+		invincibleDiagCounters.projectilesTotalSeen += #projectileList
+	end
 	if #projectileList == 0 and #activeExplosions == 0 then
 		if next(pendingSpawns) or next(pendingDespawns) or next(pendingImpacts) then
 			for player, payloads in pairs(pendingSpawns) do
@@ -1138,6 +1467,12 @@ function ProjectileService.step(dt: number)
 	end
 
 	local playerPositions = OctreeSystem.getPlayerPositions()
+	if INVINCIBLE_ENEMY_DIAGNOSTICS then
+		invincibleDiagCounters.lastPlayerCount = #playerPositions
+		if #playerPositions == 0 then
+			invincibleDiagCounters.framesWithoutPlayers += 1
+		end
+	end
 	local simCount = 0
 	local collisionChecks = 0
 	local hitBudget = MAX_HITS_PER_TICK
@@ -1173,6 +1508,9 @@ function ProjectileService.step(dt: number)
 	local processed = 0
 	while processed < #projectileList do
 		if simCount >= MAX_PROJECTILES_SIMULATED_PER_TICK then
+			if INVINCIBLE_ENEMY_DIAGNOSTICS then
+				invincibleDiagCounters.projectilesSkippedBySimBudget += math.max(#projectileList - processed, 1)
+			end
 			break
 		end
 		local id = projectileList[nextSimIndex]
@@ -1211,6 +1549,15 @@ function ProjectileService.step(dt: number)
 			simInterval = PETAL_SIM_INTERVAL
 		elseif not allowCollision then
 			simInterval = FAR_SIM_INTERVAL
+		end
+		if INVINCIBLE_ENEMY_DIAGNOSTICS and allowCollision then
+			invincibleDiagCounters.projectilesCollisionEnabled += 1
+		end
+		if INVINCIBLE_ENEMY_DIAGNOSTICS and not allowCollision then
+			invincibleDiagCounters.projectilesCollisionDisabledByRelevance += 1
+			if #playerPositions == 0 and not record.beam and not record.petal then
+				invincibleDiagCounters.projectilesCollisionDisabledNoPlayers += 1
+			end
 		end
 
 		local dtSim = now - record.lastSimTime
@@ -1263,14 +1610,19 @@ function ProjectileService.step(dt: number)
 			end
 			petal.targetEntity = target
 
-			if target and ownerPos then
-				local targetPos = getPetalTargetPosition(target)
-				if targetPos and distanceSq(ownerPos, targetPos) <= (petal.maxRange * petal.maxRange) then
-					local desired = targetPos - record.lastPos
-					if petal.stayHorizontal or petal.alwaysStayHorizontal then
-						desired = Vector3.new(desired.X, 0, desired.Z)
-					end
-					if desired.Magnitude > 0 then
+				if target and ownerPos then
+					local targetPos = getPetalTargetPosition(target)
+					if targetPos and distanceSq(ownerPos, targetPos) <= (petal.maxRange * petal.maxRange) then
+						local desired = targetPos - record.lastPos
+						if petal.alwaysStayHorizontal then
+							desired = Vector3.new(desired.X, 0, desired.Z)
+						elseif petal.stayHorizontal then
+							local yDiff = math.abs(targetPos.Y - record.lastPos.Y)
+							if yDiff <= STAY_HORIZONTAL_TARGET_Y_DIFF then
+								desired = Vector3.new(desired.X, 0, desired.Z)
+							end
+						end
+						if desired.Magnitude > 0 then
 						desired = desired.Unit
 						local current = record.direction
 						local dot = math.clamp(current:Dot(desired), -1, 1)
@@ -1419,9 +1771,20 @@ function ProjectileService.step(dt: number)
 
 			for _, enemyId in ipairs(candidates) do
 				if collisionChecks >= MAX_COLLISION_CHECKS_PER_TICK or hitBudget <= 0 then
+					if INVINCIBLE_ENEMY_DIAGNOSTICS then
+						if collisionChecks >= MAX_COLLISION_CHECKS_PER_TICK then
+							invincibleDiagCounters.projectilesSkippedByCollisionBudget += 1
+						end
+						if hitBudget <= 0 then
+							invincibleDiagCounters.projectilesSkippedByHitBudget += 1
+						end
+					end
 					break
 				end
 				collisionChecks += 1
+				if INVINCIBLE_ENEMY_DIAGNOSTICS then
+					invincibleDiagCounters.collisionChecks += 1
+				end
 
 				local hitCooldown = record.hitCooldowns[enemyId]
 				if hitCooldown and hitCooldown > now then
@@ -1434,7 +1797,8 @@ function ProjectileService.step(dt: number)
 				if not entityType or entityType.type ~= "Enemy" then
 					continue
 				end
-				local enemyPos, enemyRadiusOverride = getEnemyCollisionCenter(enemyId)
+				local enemyHealth = world:get(enemyId, Health)
+				local enemyPos, enemyRadiusOverride, enemyBasePos, enemyBoxCFrame, enemyHalfExtents = getEnemyCollisionCenter(enemyId)
 				if not enemyPos then
 					continue
 				end
@@ -1447,6 +1811,7 @@ function ProjectileService.step(dt: number)
 				end
 				local hitThis = false
 				local hitPosCandidate = enemyPos
+				local raycastTarget = enemyPos
 				if record.beam then
 					local beamLength = (segmentEnd - segmentStart).Magnitude
 					local halfX = record.radius
@@ -1485,28 +1850,129 @@ function ProjectileService.step(dt: number)
 						coordA = localPos.X
 						coordB = localPos.Z
 					end
-					if math.abs(coordLen) <= (lengthHalf + enemyRadius)
-						and math.abs(coordA) <= (axisHalfA + enemyRadius)
-						and math.abs(coordB) <= (axisHalfB + enemyRadius) then
+					if math.abs(coordLen) <= (lengthHalf + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS)
+						and math.abs(coordA) <= (axisHalfA + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS)
+						and math.abs(coordB) <= (axisHalfB + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS) then
 						hitThis = true
 					end
+					if not hitThis and enemyBasePos then
+						local localBasePos = cf:PointToObjectSpace(enemyBasePos) - offset
+						local baseCoordLen = localBasePos.Z
+						local baseCoordA = localBasePos.X
+						local baseCoordB = localBasePos.Y
+						if beamLengthAxis == "X" then
+							baseCoordLen = localBasePos.X
+							baseCoordA = localBasePos.Y
+							baseCoordB = localBasePos.Z
+						elseif beamLengthAxis == "Y" then
+							baseCoordLen = localBasePos.Y
+							baseCoordA = localBasePos.X
+							baseCoordB = localBasePos.Z
+						end
+						if math.abs(baseCoordLen) <= (lengthHalf + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS)
+							and math.abs(baseCoordA) <= (axisHalfA + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS)
+							and math.abs(baseCoordB) <= (axisHalfB + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS) then
+							hitThis = true
+							hitPosCandidate = enemyBasePos
+							raycastTarget = enemyBasePos
+						end
+					end
 				else
-					local closest = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
-					local distSq = distanceSq(closest, enemyPos)
-					local hitRadius = record.radius + enemyRadius
-					if distSq <= hitRadius * hitRadius then
-						hitThis = true
-						hitPosCandidate = closest
+					local inflatedBy = record.radius + ENEMY_COLLISION_GRACE_RADIUS
+					if enemyBoxCFrame and enemyHalfExtents then
+						local intersects, hitPoint = segmentIntersectsOrientedBox(
+							segmentStart,
+							segmentEnd,
+							enemyBoxCFrame,
+							enemyHalfExtents,
+							inflatedBy
+						)
+						if intersects and hitPoint then
+							hitThis = true
+							hitPosCandidate = hitPoint
+							raycastTarget = enemyPos
+						elseif INVINCIBLE_ENEMY_DIAGNOSTICS then
+							local segClosestToCenter = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
+							local expandedHalf = inflateHalfExtents(enemyHalfExtents, inflatedBy)
+							local missDistSq, _, delta = pointToOrientedBoxDistance(segClosestToCenter, enemyBoxCFrame, expandedHalf)
+							local missGap = math.sqrt(missDistSq)
+							if missGap <= 1 then
+								invincibleDiagCounters.nearMissUnder1Stud += 1
+							elseif missGap <= 3 then
+								invincibleDiagCounters.nearMissUnder3Stud += 1
+							end
+							if missGap >= 0 and missGap < invincibleDiagClosestMissGap then
+								invincibleDiagClosestMissGap = missGap
+								invincibleDiagClosestMissProjectileId = record.id
+								invincibleDiagClosestMissEnemyId = enemyId
+								invincibleDiagClosestMissKind = record.kind
+								invincibleDiagClosestMissVerticalDelta = math.abs(delta.Y)
+								invincibleDiagClosestMissHorizontalDelta = Vector3.new(delta.X, 0, delta.Z).Magnitude
+							end
+						end
+					else
+						local centerClosest = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
+						local centerDistSq = distanceSq(centerClosest, enemyPos)
+						local hitRadius = record.radius + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS
+						if centerDistSq <= hitRadius * hitRadius then
+							hitThis = true
+							hitPosCandidate = centerClosest
+							raycastTarget = enemyPos
+						end
 					end
 				end
 
 				if hitThis then
+					if INVINCIBLE_ENEMY_DIAGNOSTICS then
+						invincibleDiagCounters.geometricHits += 1
+					end
 					if record.collision and record.collision.useRaycast then
-						if not passesRaycastCheck(record.lastPos, enemyPos) then
+						local passesRaycast, blocker = passesRaycastCheck(record.lastPos, raycastTarget)
+						if not passesRaycast then
+							if INVINCIBLE_ENEMY_DIAGNOSTICS then
+								invincibleDiagCounters.projectileRaycastBlocked += 1
+								local enemyScale, enemySubtype, enemyTier = getEnemyDebugMeta(enemyId)
+								recordProjectileRejectionSample(
+									record.id,
+									enemyId,
+									record.kind,
+									enemyHealth and enemyHealth.current or nil,
+									world:has(enemyId, DeathAnimation),
+									enemyScale,
+									enemySubtype,
+									enemyTier,
+									"raycastBlocked",
+									blocker
+								)
+							end
 							continue
 						end
 					end
-					DamageSystem.applyDamage(enemyId, record.damage, "magic", record.ownerEntity, record.kind)
+					if INVINCIBLE_ENEMY_DIAGNOSTICS then
+						invincibleDiagCounters.damageCalls += 1
+					end
+					local enemyHealthAtHit = enemyHealth and enemyHealth.current or nil
+					local _, didApply = DamageSystem.applyDamage(enemyId, record.damage, "magic", record.ownerEntity, record.kind)
+					if INVINCIBLE_ENEMY_DIAGNOSTICS then
+						if didApply then
+							invincibleDiagCounters.damageApplied += 1
+						else
+							invincibleDiagCounters.damageRejectedAfterHit += 1
+							local enemyScale, enemySubtype, enemyTier = getEnemyDebugMeta(enemyId)
+							recordProjectileRejectionSample(
+								record.id,
+								enemyId,
+								record.kind,
+								enemyHealthAtHit,
+								world:has(enemyId, DeathAnimation),
+								enemyScale,
+								enemySubtype,
+								enemyTier,
+								"didNotApply",
+								nil
+							)
+						end
+					end
 					if record.slowOnHit then
 						EnemySlowSystem.applySlow(
 							enemyId,
@@ -1555,12 +2021,22 @@ function ProjectileService.step(dt: number)
 					end
 				end
 			end
+		elseif allowCollision and INVINCIBLE_ENEMY_DIAGNOSTICS then
+			if collisionChecks >= MAX_COLLISION_CHECKS_PER_TICK then
+				invincibleDiagCounters.projectilesSkippedByCollisionBudget += 1
+			end
+			if hitBudget <= 0 then
+				invincibleDiagCounters.projectilesSkippedByHitBudget += 1
+			end
 		end
 
 		record.lastPos = newPos
 		record.lastSimTime = now
 		record.nextSimTime = now + simInterval
 		simCount += 1
+		if INVINCIBLE_ENEMY_DIAGNOSTICS then
+			invincibleDiagCounters.projectilesSimulated += 1
+		end
 
 		if hit then
 			local impactPos = hitReason == "exploded" and nil or hitPos
@@ -1611,6 +2087,81 @@ end
 
 function ProjectileService.isProjectileActive(projectileId: number): boolean
 	return projectiles[projectileId] ~= nil
+end
+
+function ProjectileService.getEnemyVisualHitboxDebugSamples(maxSamples: number?): {any}
+	local samples = {}
+	if not world then
+		return samples
+	end
+
+	local limit = math.max(1, math.floor(maxSamples or 3))
+	local count = 0
+	for enemyId, entityType, pos in world:query(EntityType, Position) do
+		if entityType and entityType.type == "Enemy" then
+			local basePos = Vector3.new(pos.x, pos.y, pos.z)
+			local center, _, _, _, halfExtents = getEnemyCollisionCenter(enemyId)
+			local scale, subtype, tier = getEnemyDebugMeta(enemyId)
+			samples[#samples + 1] = {
+				enemyId = enemyId,
+				subtype = subtype,
+				tier = tier,
+				scale = scale,
+				basePos = basePos,
+				center = center or basePos,
+				halfExtents = halfExtents,
+				baseToCenterY = (center and (center.Y - basePos.Y)) or 0,
+				bottomY = (center and halfExtents and (center.Y - halfExtents.Y)) or nil,
+			}
+			count += 1
+			if count >= limit then
+				break
+			end
+		end
+	end
+	return samples
+end
+
+function ProjectileService.getInvincibleEnemyDebugSnapshot(reset: boolean?): {[string]: any}
+	local samples = table.create(#invincibleDiagSamples)
+	for i, sample in ipairs(invincibleDiagSamples) do
+		samples[i] = sample
+	end
+
+	local snapshot = {
+		projectilesTotalSeen = invincibleDiagCounters.projectilesTotalSeen,
+		projectilesSpawned = invincibleDiagCounters.projectilesSpawned,
+		projectilesSimulated = invincibleDiagCounters.projectilesSimulated,
+		projectilesCollisionEnabled = invincibleDiagCounters.projectilesCollisionEnabled,
+		framesWithoutPlayers = invincibleDiagCounters.framesWithoutPlayers,
+		lastPlayerCount = invincibleDiagCounters.lastPlayerCount,
+		projectilesSkippedBySimBudget = invincibleDiagCounters.projectilesSkippedBySimBudget,
+		projectilesCollisionDisabledByRelevance = invincibleDiagCounters.projectilesCollisionDisabledByRelevance,
+		projectilesCollisionDisabledNoPlayers = invincibleDiagCounters.projectilesCollisionDisabledNoPlayers,
+		projectilesSkippedByCollisionBudget = invincibleDiagCounters.projectilesSkippedByCollisionBudget,
+		projectilesSkippedByHitBudget = invincibleDiagCounters.projectilesSkippedByHitBudget,
+		projectileRaycastBlocked = invincibleDiagCounters.projectileRaycastBlocked,
+		collisionChecks = invincibleDiagCounters.collisionChecks,
+		geometricHits = invincibleDiagCounters.geometricHits,
+		nearMissUnder1Stud = invincibleDiagCounters.nearMissUnder1Stud,
+		nearMissUnder3Stud = invincibleDiagCounters.nearMissUnder3Stud,
+		closestMissGap = if invincibleDiagClosestMissGap < math.huge then invincibleDiagClosestMissGap else nil,
+		closestMissProjectileId = if invincibleDiagClosestMissProjectileId > 0 then invincibleDiagClosestMissProjectileId else nil,
+		closestMissEnemyId = if invincibleDiagClosestMissEnemyId > 0 then invincibleDiagClosestMissEnemyId else nil,
+		closestMissKind = invincibleDiagClosestMissKind,
+		closestMissVerticalDelta = invincibleDiagClosestMissVerticalDelta,
+		closestMissHorizontalDelta = invincibleDiagClosestMissHorizontalDelta,
+		damageCalls = invincibleDiagCounters.damageCalls,
+		damageApplied = invincibleDiagCounters.damageApplied,
+		damageRejectedAfterHit = invincibleDiagCounters.damageRejectedAfterHit,
+		samples = samples,
+	}
+
+	if reset then
+		resetInvincibleEnemyDiagnostics()
+	end
+
+	return snapshot
 end
 
 return ProjectileService

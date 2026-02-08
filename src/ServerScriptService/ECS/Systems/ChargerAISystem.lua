@@ -37,6 +37,8 @@ local FacingDirection
 local _EntityTypeComponent
 local _Target
 local _PlayerStats
+local _Visual
+local _EnemyTier
 
 -- State constants
 local S_APPROACH = 1
@@ -117,9 +119,28 @@ local function getAttackRangeFromAttackbox(enemyEntity: number): number
 
 	local attackboxSize = attackboxData.size
 	local maxDimension = math.max(attackboxSize.X, attackboxSize.Z)
+
+	-- Scale attack range with enemy size (Super/Elite) so melee reach matches visuals.
+	local scale = 1.0
+	local visual = _Visual and world:get(enemyEntity, _Visual)
+	local rawScale = visual and visual.scale
+	if typeof(rawScale) == "number" and rawScale == rawScale and rawScale > 0 then
+		scale = math.max(scale, math.clamp(rawScale, 0.1, 20.0))
+	end
+	local tierData = _EnemyTier and world:get(enemyEntity, _EnemyTier)
+	if typeof(tierData) == "table" then
+		local tierScale = tierData.scale
+		if typeof(tierScale) == "number" and tierScale == tierScale and tierScale > 0 then
+			scale = math.max(scale, math.clamp(tierScale, 0.1, 20.0))
+		elseif tierData.tier == "Super" then
+			scale = math.max(scale, 4.0)
+		elseif tierData.tier == "Elite" then
+			scale = math.max(scale, 7.5)
+		end
+	end
 	
 	-- Add a small buffer (0.5 studs) to ensure reliable contact detection
-	return maxDimension + 0.5
+	return (maxDimension * scale) + 0.5
 end
 
 -- Helper function to find nearest non-paused player
@@ -265,6 +286,8 @@ function ChargerAISystem.init(worldRef: any, components: any, dirtyService: any)
 	_EntityTypeComponent = Components.EntityType
 	_Target = Components.Target
 	_PlayerStats = Components.PlayerStats
+	_Visual = Components.Visual
+	_EnemyTier = Components.EnemyTier
 	
 	-- Create cached queries for performance (JECS best practice)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing

@@ -11,25 +11,18 @@ local ModelReplicationService = {}
 local replicatedModels: {[string]: boolean} = {}
 
 -- Cache of enemy hitbox data by type: { [enemyType]: { size: Vector3, offset: Vector3 } }
-local enemyHitboxData: {[string]: {size: Vector3, offset: Vector3}} = {}
+local enemyHitboxData: {[string]: {size: Vector3, offset: Vector3, rotation: CFrame?}} = {}
 local enemyAttackboxData: {[string]: {size: Vector3, offset: Vector3}} = {}
 
-local function getHitboxPart(model: Model): BasePart?
-	-- Prefer explicitly named Hitbox
-	local hitbox = model:FindFirstChild("Hitbox")
-	if hitbox and hitbox:IsA("BasePart") then
-		return hitbox
+local function findNamedPart(model: Model, name: string): BasePart?
+	local exact = model:FindFirstChild(name, true)
+	if exact and exact:IsA("BasePart") then
+		return exact
 	end
 
-	-- Next prefer PrimaryPart if it isn't the Attackbox
-	local primary = model.PrimaryPart
-	if primary and primary:IsA("BasePart") and primary.Name ~= "Attackbox" then
-		return primary
-	end
-
-	-- Fallback: first BasePart that is not the Attackbox
+	local lowered = string.lower(name)
 	for _, descendant in ipairs(model:GetDescendants()) do
-		if descendant:IsA("BasePart") and descendant.Name ~= "Attackbox" then
+		if descendant:IsA("BasePart") and string.lower(descendant.Name) == lowered then
 			return descendant
 		end
 	end
@@ -37,22 +30,71 @@ local function getHitboxPart(model: Model): BasePart?
 	return nil
 end
 
-local function computeHitboxData(model: Model): {size: Vector3, offset: Vector3}?
-	local part = getHitboxPart(model)
-	if not part then
-		return nil
+local function normalizeEnemyHitboxOffset(size: Vector3, offset: Vector3): Vector3
+	-- Some authored hitboxes are placed near feet while still representing full body size.
+	-- Treat hitbox part as size source, but clamp center Y to at least half-height so
+	-- collision/targeting stay centered on body and scale correctly for Super/Elite.
+	local minCenterY = size.Y * 0.5
+	if offset.Y < minCenterY then
+		return Vector3.new(offset.X, minCenterY, offset.Z)
+	end
+	return offset
+end
+
+local function computeHitboxData(model: Model): {size: Vector3, offset: Vector3, rotation: CFrame?}?
+	-- Always prefer explicit author-defined hurtbox from the model hierarchy.
+	local explicitHitbox = findNamedPart(model, "Hitbox")
+	if explicitHitbox then
+		local pivot = model:GetPivot()
+		local localCf = pivot:ToObjectSpace(explicitHitbox.CFrame)
+		local rotation = CFrame.fromMatrix(Vector3.new(0, 0, 0), localCf.RightVector, localCf.UpVector, localCf.LookVector)
+		local normalizedOffset = normalizeEnemyHitboxOffset(explicitHitbox.Size, localCf.Position)
+		return {
+			size = explicitHitbox.Size,
+			offset = normalizedOffset,
+			rotation = rotation,
+		}
 	end
 
-	local pivot = model:GetPivot()
+	-- Fallback to model bounds so large meshes still get a large hurtbox.
+	local ok, bboxCFrame, bboxSize = pcall(function()
+		return model:GetBoundingBox()
+	end)
+	if ok and typeof(bboxCFrame) == "CFrame" and typeof(bboxSize) == "Vector3" then
+		local pivot = model:GetPivot()
+		local localCf = pivot:ToObjectSpace(bboxCFrame)
+		local rotation = CFrame.fromMatrix(Vector3.new(0, 0, 0), localCf.RightVector, localCf.UpVector, localCf.LookVector)
+		local normalizedOffset = normalizeEnemyHitboxOffset(bboxSize, localCf.Position)
+		return {
+			size = bboxSize,
+			offset = normalizedOffset,
+			rotation = rotation,
+		}
+	end
+
+	local primary = model.PrimaryPart
+	if primary and primary:IsA("BasePart") then
+		local pivot = model:GetPivot()
+		local localCf = pivot:ToObjectSpace(primary.CFrame)
+		local rotation = CFrame.fromMatrix(Vector3.new(0, 0, 0), localCf.RightVector, localCf.UpVector, localCf.LookVector)
+		local normalizedOffset = normalizeEnemyHitboxOffset(primary.Size, localCf.Position)
+		return {
+			size = primary.Size,
+			offset = normalizedOffset,
+			rotation = rotation,
+		}
+	end
+
 	return {
-		size = part.Size,
-		offset = part.Position - pivot.Position,
+		size = Vector3.new(5, 5, 5),
+		offset = Vector3.new(0, 0, 0),
+		rotation = CFrame.new(),
 	}
 end
 
 local function computeAttackboxData(model: Model): {size: Vector3, offset: Vector3}?
-	local attackbox = model:FindFirstChild("Attackbox")
-	if not attackbox or not attackbox:IsA("BasePart") then
+	local attackbox = findNamedPart(model, "Attackbox")
+	if not attackbox then
 		return nil
 	end
 
@@ -230,7 +272,7 @@ function ModelReplicationService.init()
 end
 
 -- Expose cached enemy hitbox data
-function ModelReplicationService.getEnemyHitbox(enemyType: string): {size: Vector3, offset: Vector3}?
+function ModelReplicationService.getEnemyHitbox(enemyType: string): {size: Vector3, offset: Vector3, rotation: CFrame?}?
 	return enemyHitboxData[enemyType]
 end
 

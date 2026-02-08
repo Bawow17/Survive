@@ -290,7 +290,6 @@ UpgradeDefs.PassiveStats = {
 		max = 0.15,
 		weight = 1.0,
 		effect = "increase",
-		softCap = UpgradeDefs.SoftCaps.dangerousCap,
 	},
 	mobilityCooldown = {
 		id = "mobilityCooldown",

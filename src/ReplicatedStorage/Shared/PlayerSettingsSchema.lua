@@ -5,7 +5,8 @@ local PlayerSettingsSchema = {}
 export type SettingsV1 = {
 	version: number,
 	graphics: {
-		renderScale: number,
+		enemyRenderScale: number,
+		chunkRenderScale: number,
 		projectileOpacitySelf: number,
 		projectileOpacityOthers: number,
 		otherPlayerVfxOpacity: number,
@@ -24,7 +25,8 @@ local VERSION = 1
 local DEFAULTS: SettingsV1 = {
 	version = VERSION,
 	graphics = {
-		renderScale = 1.0,
+		enemyRenderScale = 1.0,
+		chunkRenderScale = 1.0,
 		projectileOpacitySelf = 1.0,
 		projectileOpacityOthers = 1.0,
 		otherPlayerVfxOpacity = 1.0,
@@ -80,11 +82,13 @@ local function sanitizeInternal(raw: any): SettingsV1
 	local graphics = if typeof(source.graphics) == "table" then source.graphics else {}
 	local accessibility = if typeof(source.accessibility) == "table" then source.accessibility else {}
 	local controls = if typeof(source.controls) == "table" then source.controls else {}
+	local legacyRenderScale = if typeof(graphics.renderScale) == "number" then graphics.renderScale else nil
 
 	return {
 		version = VERSION,
 		graphics = {
-			renderScale = clampToStep(graphics.renderScale, 0.25, 5.00, 0.25, DEFAULTS.graphics.renderScale),
+			enemyRenderScale = clampToStep(graphics.enemyRenderScale or legacyRenderScale, 0.50, 10.00, 0.50, DEFAULTS.graphics.enemyRenderScale),
+			chunkRenderScale = clampToStep(graphics.chunkRenderScale, 0.50, 10.00, 0.50, DEFAULTS.graphics.chunkRenderScale),
 			projectileOpacitySelf = clamp(graphics.projectileOpacitySelf, 0.25, 1.00, DEFAULTS.graphics.projectileOpacitySelf),
 			projectileOpacityOthers = clamp(graphics.projectileOpacityOthers, 0.05, 1.00, DEFAULTS.graphics.projectileOpacityOthers),
 			otherPlayerVfxOpacity = clamp(graphics.otherPlayerVfxOpacity, 0.00, 1.00, DEFAULTS.graphics.otherPlayerVfxOpacity),
@@ -107,8 +111,14 @@ local function mergeKnown(base: SettingsV1, patch: any): SettingsV1
 
 	if typeof(patch.graphics) == "table" then
 		local incoming = patch.graphics
+		if incoming.enemyRenderScale ~= nil then
+			merged.graphics.enemyRenderScale = incoming.enemyRenderScale
+		end
+		if incoming.chunkRenderScale ~= nil then
+			merged.graphics.chunkRenderScale = incoming.chunkRenderScale
+		end
 		if incoming.renderScale ~= nil then
-			merged.graphics.renderScale = incoming.renderScale
+			merged.graphics.enemyRenderScale = incoming.renderScale
 		end
 		if incoming.projectileOpacitySelf ~= nil then
 			merged.graphics.projectileOpacitySelf = incoming.projectileOpacitySelf

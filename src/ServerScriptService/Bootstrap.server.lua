@@ -35,7 +35,6 @@ local ZombieAISystem = require(game.ServerScriptService.ECS.Systems.ZombieAISyst
 local ChargerAISystem = require(game.ServerScriptService.ECS.Systems.ChargerAISystem)
 local EnemyRepulsionSystem = require(game.ServerScriptService.ECS.Systems.EnemyRepulsionSystem)
 local EnemySpawner = require(game.ServerScriptService.ECS.Systems.EnemySpawner)
-local PlayerPressureSystem = require(game.ServerScriptService.ECS.Systems.PlayerPressureSystem)
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
@@ -51,6 +50,8 @@ local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
+local INVINCIBLE_ENEMY_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.InvincibleEnemyDiagnostics or false
+local ENEMY_VISUAL_HITBOX_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.EnemyVisualHitboxDiagnostics or false
 
 -- Ability Registry - Auto-discovers and loads all abilities
 local AbilityRegistry = require(game.ServerScriptService.Abilities.AbilityRegistry)
@@ -76,6 +77,7 @@ local DebugModMenuService = require(game.ServerScriptService.Services.DebugModMe
 local PlayerSettingsService = require(game.ServerScriptService.Services.PlayerSettingsService)
 local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff)
 local GameSessionTimer = require(game.ServerScriptService.ECS.Systems.GameSessionTimer)
+local ChunkGenerationService = require(game.ServerScriptService.WorldGen.ChunkGenerationService)
 
 -- Upgrade Systems
 local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
@@ -159,6 +161,20 @@ local projectileEntityQuery = world:query(Components.Projectile):cached()
 local playerEntities: {[Player]: number} = {}
 local entityToPlayer: {[number]: Player} = {}
 
+local function ensureRemoteEvent(parent: Instance, name: string): RemoteEvent
+	local existing = parent:FindFirstChild(name)
+	if existing and existing:IsA("RemoteEvent") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = name
+	remote.Parent = parent
+	return remote
+end
+
 local function setComponent(entity: number, component: any, value: any, componentName: string)
 
 	local current = world:get(entity, component)
@@ -175,10 +191,63 @@ local function markNewEntity(entity: number)
 end
 
 function ECSWorldService.Initialize()
+	-- Create commonly-used remotes before heavy startup work so clients do not
+	-- stall waiting for events during initial join.
+	local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
+	ensureRemoteEvent(remotesFolder, "PlayerDied")
+	ensureRemoteEvent(remotesFolder, "PlayerRespawned")
+	ensureRemoteEvent(remotesFolder, "PlayerBodyFade")
+	ensureRemoteEvent(remotesFolder, "SessionTimerUpdate")
+	ensureRemoteEvent(remotesFolder, "PlayerBodyRestore")
+
+	local debugFlags = ReplicatedStorage:FindFirstChild("DebugFlags")
+	if not debugFlags then
+		debugFlags = Instance.new("Folder")
+		debugFlags.Name = "DebugFlags"
+		debugFlags.Parent = ReplicatedStorage
+	end
+	local invisibleEnemyDiagFlag = debugFlags:FindFirstChild("InvisibleEnemyDiagnostics")
+	if not invisibleEnemyDiagFlag or not invisibleEnemyDiagFlag:IsA("BoolValue") then
+		if invisibleEnemyDiagFlag then
+			invisibleEnemyDiagFlag:Destroy()
+		end
+		invisibleEnemyDiagFlag = Instance.new("BoolValue")
+		invisibleEnemyDiagFlag.Name = "InvisibleEnemyDiagnostics"
+		invisibleEnemyDiagFlag.Parent = debugFlags
+	end
+	invisibleEnemyDiagFlag.Value = INVINCIBLE_ENEMY_DIAGNOSTICS
+
+	local enemyVisualHitboxDiagFlag = debugFlags:FindFirstChild("EnemyVisualHitboxDiagnostics")
+	if not enemyVisualHitboxDiagFlag or not enemyVisualHitboxDiagFlag:IsA("BoolValue") then
+		if enemyVisualHitboxDiagFlag then
+			enemyVisualHitboxDiagFlag:Destroy()
+		end
+		enemyVisualHitboxDiagFlag = Instance.new("BoolValue")
+		enemyVisualHitboxDiagFlag.Name = "EnemyVisualHitboxDiagnostics"
+		enemyVisualHitboxDiagFlag.Parent = debugFlags
+	end
+	enemyVisualHitboxDiagFlag.Value = ENEMY_VISUAL_HITBOX_DIAGNOSTICS
+
+	local projectileRemotesFolder = remotesFolder:FindFirstChild("Projectiles")
+	if projectileRemotesFolder and not projectileRemotesFolder:IsA("Folder") then
+		projectileRemotesFolder:Destroy()
+		projectileRemotesFolder = nil
+	end
+	if not projectileRemotesFolder then
+		projectileRemotesFolder = Instance.new("Folder")
+		projectileRemotesFolder.Name = "Projectiles"
+		projectileRemotesFolder.Parent = remotesFolder
+	end
+	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesSpawnBatch")
+	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesDespawnBatch")
+	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesImpactBatch")
 	
 	-- Initialize model replication first (clones models from ServerStorage to ReplicatedStorage)
 	ModelReplicationService.init()
 	ModelReplicationService.replicateExpOrb()
+	
+	-- Initialize seeded chunk world generation before gameplay systems depend on spawn/terrain.
+	ChunkGenerationService.init()
 	
 	-- Initialize object pools (PERFORMANCE OPTIMIZATION: pre-allocate reusable entities)
 	ProjectilePool.init(world, Components)
@@ -216,35 +285,7 @@ function ECSWorldService.Initialize()
 	
 	-- Note: GameStateManager reference will be set after GameStateManager.init()
 	
-	-- Create death system remotes early so clients don't yield
-	local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
-	if not remotesFolder:FindFirstChild("PlayerDied") then
-		local playerDied = Instance.new("RemoteEvent")
-		playerDied.Name = "PlayerDied"
-		playerDied.Parent = remotesFolder
-	end
-	if not remotesFolder:FindFirstChild("PlayerRespawned") then
-		local playerRespawned = Instance.new("RemoteEvent")
-		playerRespawned.Name = "PlayerRespawned"
-		playerRespawned.Parent = remotesFolder
-	end
-	if not remotesFolder:FindFirstChild("PlayerBodyFade") then
-		local playerBodyFade = Instance.new("RemoteEvent")
-		playerBodyFade.Name = "PlayerBodyFade"
-		playerBodyFade.Parent = remotesFolder
-	end
-	
-	-- Create session timer sync remote
-	if not remotesFolder:FindFirstChild("SessionTimerUpdate") then
-		local SessionTimerUpdate = Instance.new("RemoteEvent")
-		SessionTimerUpdate.Name = "SessionTimerUpdate"
-		SessionTimerUpdate.Parent = remotesFolder
-	end
-	if not remotesFolder:FindFirstChild("PlayerBodyRestore") then
-		local playerBodyRestore = Instance.new("RemoteEvent")
-		playerBodyRestore.Name = "PlayerBodyRestore"
-		playerBodyRestore.Parent = remotesFolder
-	end
+	-- Remotes are created at the start of Initialize.
 	
 	-- Initialize Game Time system (after PauseSystem, before systems that use scaling)
 	GameTimeSystem.init()
@@ -252,7 +293,6 @@ function ECSWorldService.Initialize()
 	-- Initialize Upgrade systems (before ExpSystem, as it depends on them)
 	UpgradeSystem.init(world, Components, DirtyService)
 	PassiveEffectSystem.init(world, Components, DirtyService)
-	PlayerPressureSystem.init(world, Components, DirtyService)
 	
 	-- Initialize Status Effect system (before ExpSystem, as it depends on it)
 	StatusEffectSystem.init(world, Components, DirtyService)
@@ -338,7 +378,7 @@ function ECSWorldService.Initialize()
 	ProjectileService.init(world, Components, function(entityId)
 		return entityToPlayer[entityId]
 	end)
-	LoopGameService.init()
+		LoopGameService.init(world, Components, ExpSystem)
 	DebugModMenuService.init(world, Components, UpgradeSystem, GameTimeSystem, DifficultyCoeff, GameSessionTimer)
 	PlayerSettingsService.init()
 	HitFlashSystem.init(world, Components)
@@ -492,7 +532,19 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 	setComponent(entity, AttackCooldown, { remaining = 0, max = enemyConfig.attackCooldown }, "AttackCooldown")
 	setComponent(entity, Visual, { modelPath = visualPath, visible = true, scale = visualScale }, "Visual")
 	setComponent(entity, Target, { id = owner }, "Target")
-	setComponent(entity, Components.EnemyTier, { tier = enemyTier }, "EnemyTier")
+	setComponent(entity, Components.EnemyTier, { tier = enemyTier, scale = visualScale }, "EnemyTier")
+	local collisionRadius = 2.5
+	local enemyHitbox = ModelReplicationService.getEnemyHitbox(enemyType or "Zombie")
+	if not enemyHitbox then
+		ModelReplicationService.replicateEnemy(enemyType or "Zombie")
+		enemyHitbox = ModelReplicationService.getEnemyHitbox(enemyType or "Zombie")
+	end
+	if enemyHitbox and enemyHitbox.size then
+		collisionRadius = math.max(enemyHitbox.size.X, enemyHitbox.size.Y, enemyHitbox.size.Z) * 0.5
+	end
+	-- Keep physical hurtbox radius in sync with visual tier scale (Super/Elite).
+	collisionRadius = collisionRadius * math.max(visualScale, 1.0)
+	setComponent(entity, Collision, { radius = collisionRadius, solid = true }, "Collision")
 
 	-- Owner/aggro metadata for adaptive targeting/exp
 	setComponent(entity, Components.EnemyOwner, { id = owner }, "EnemyOwner")
@@ -985,7 +1037,7 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		pickupRangeMultiplier = 1.0,
 		penetrationMultiplier = 1.0,
 		mobilityCooldownMultiplier = 1.0,
-		mobilityDistanceMultiplier = 1.0,  -- Calculated from moveSpeed + active buffs
+		mobilityDistanceMultiplier = 1.0,  -- Calculated from mobility power + 20% move-speed bonus
 		mobilityDistanceBase = 1.0,
 		mobilityVerticalMultiplier = 1.0,
 		grappleDistanceMultiplier = 1.0,
@@ -1119,10 +1171,151 @@ _G.ECSWorldService = ECSWorldService
 -- Session timer sync throttle
 local lastTimerSync = 0
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
+local lastInvincibleDiagReport = 0
+local lastEnemyVisualHitboxDiagReport = 0
 
 -- StepWorld debug throttle
 local lastStepWorldDebug = 0
 local STEP_WORLD_DEBUG_INTERVAL = 5.0  -- Log every 5 seconds
+
+local function printInvincibleProjectileSamples(samples: {any})
+	local printed = 0
+	for i = #samples, 1, -1 do
+		local sample = samples[i]
+		if typeof(sample) == "table" then
+			print(string.format(
+				"[INVDBG][projSample] t=%.2f proj=%s enemy=%s kind=%s reason=%s hp=%s deathAnim=%s scale=%s subtype=%s tier=%s blocker=%s",
+				tonumber(sample.t) or 0,
+				tostring(sample.projectileId),
+				tostring(sample.enemyId),
+				tostring(sample.kind),
+				tostring(sample.reason),
+				tostring(sample.enemyHealth),
+				tostring(sample.hasDeathAnimation),
+				tostring(sample.enemyScale),
+				tostring(sample.enemySubtype),
+				tostring(sample.enemyTier),
+				tostring(sample.blocker)
+			))
+			printed += 1
+			if printed >= 3 then
+				break
+			end
+		end
+	end
+end
+
+local function printInvincibleDamageSamples(samples: {any})
+	local printed = 0
+	for i = #samples, 1, -1 do
+		local sample = samples[i]
+		if typeof(sample) == "table" then
+			print(string.format(
+				"[INVDBG][dmgSample] t=%.2f target=%s reason=%s hasType=%s hasHealth=%s deathAnim=%s hp=%s",
+				tonumber(sample.t) or 0,
+				tostring(sample.targetEntity),
+				tostring(sample.reason),
+				tostring(sample.hasEntityType),
+				tostring(sample.hasHealth),
+				tostring(sample.hasDeathAnimation),
+				tostring(sample.healthCurrent)
+			))
+			printed += 1
+			if printed >= 3 then
+				break
+			end
+		end
+	end
+end
+
+local function emitInvincibleEnemyDiagnostics(now: number)
+	if not INVINCIBLE_ENEMY_DIAGNOSTICS then
+		return
+	end
+	if (now - lastInvincibleDiagReport) < 1.0 then
+		return
+	end
+	lastInvincibleDiagReport = now
+
+	local projectileDiag = ProjectileService.getInvincibleEnemyDebugSnapshot(true)
+	local damageDiag = DamageSystem.getInvincibleEnemyDebugSnapshot(true)
+	local targetingDiag = TargetingService.getInvincibleEnemyDebugSnapshot(true)
+
+	print(string.format(
+		"[INVDBG] proj(spawn=%d sim=%d/%d players=%d noPlayers=%d collOn=%d collOff=%d collOffNoPlayers=%d rayBlock=%d near1=%d near3=%d closestMiss=%.2f missY=%.2f missXZ=%.2f hitGeom=%d dmgOk=%d dmgReject=%d skipSim=%d skipCol=%d skipHit=%d) dmg(enemyAttempts=%d applied=%d missHealth=%d deathAnim=%d) target(acq=%d gridScan=%d fbScan=%d fbPick=%d rejDead=%d rejAge=%d rejRange=%d)",
+		projectileDiag.projectilesSpawned or 0,
+		projectileDiag.projectilesSimulated or 0,
+		projectileDiag.projectilesTotalSeen or 0,
+		projectileDiag.lastPlayerCount or 0,
+		projectileDiag.framesWithoutPlayers or 0,
+		projectileDiag.projectilesCollisionEnabled or 0,
+		projectileDiag.projectilesCollisionDisabledByRelevance or 0,
+		projectileDiag.projectilesCollisionDisabledNoPlayers or 0,
+		projectileDiag.projectileRaycastBlocked or 0,
+		projectileDiag.nearMissUnder1Stud or 0,
+		projectileDiag.nearMissUnder3Stud or 0,
+		tonumber(projectileDiag.closestMissGap) or -1,
+		tonumber(projectileDiag.closestMissVerticalDelta) or -1,
+		tonumber(projectileDiag.closestMissHorizontalDelta) or -1,
+		projectileDiag.geometricHits or 0,
+		projectileDiag.damageApplied or 0,
+		projectileDiag.damageRejectedAfterHit or 0,
+		projectileDiag.projectilesSkippedBySimBudget or 0,
+		projectileDiag.projectilesSkippedByCollisionBudget or 0,
+		projectileDiag.projectilesSkippedByHitBudget or 0,
+		damageDiag.enemyDamageAttempts or 0,
+		damageDiag.enemyDamageApplied or 0,
+		damageDiag.enemyRejectedMissingHealth or 0,
+		damageDiag.enemyHadDeathAnimationAtHit or 0,
+		targetingDiag.acquireCalls or 0,
+		targetingDiag.candidatesFromGridScanned or targetingDiag.candidatesFromGrid or 0,
+		targetingDiag.candidatesFromFallbackScanned or targetingDiag.candidatesFromFallback or 0,
+		targetingDiag.targetsChosenFromFallback or 0,
+		targetingDiag.rejectDeadOrNoHealth or 0,
+		targetingDiag.rejectSpawnAge or 0,
+		targetingDiag.rejectOutOfRange or 0
+	))
+
+	if (projectileDiag.damageRejectedAfterHit or 0) > 0
+		or (damageDiag.enemyRejectedMissingHealth or 0) > 0
+		or (projectileDiag.projectileRaycastBlocked or 0) > 0
+		or (projectileDiag.framesWithoutPlayers or 0) > 0
+		or (projectileDiag.nearMissUnder1Stud or 0) > 0 then
+		printInvincibleProjectileSamples(projectileDiag.samples or {})
+		printInvincibleDamageSamples(damageDiag.samples or {})
+	end
+end
+
+local function emitEnemyVisualHitboxDiagnostics(now: number)
+	if not ENEMY_VISUAL_HITBOX_DIAGNOSTICS then
+		return
+	end
+	if (now - lastEnemyVisualHitboxDiagReport) < 1.0 then
+		return
+	end
+	lastEnemyVisualHitboxDiagReport = now
+
+	local samples = ProjectileService.getEnemyVisualHitboxDebugSamples(3)
+	for _, sample in ipairs(samples) do
+		local basePos = sample.basePos
+		local center = sample.center
+		local halfExtents = sample.halfExtents
+		if typeof(basePos) == "Vector3" and typeof(center) == "Vector3" and typeof(halfExtents) == "Vector3" then
+			print(string.format(
+				"[EVHDBG][srv] enemy=%s subtype=%s tier=%s scale=%.2f pos=(%.2f,%.2f,%.2f) center=(%.2f,%.2f,%.2f) half=(%.2f,%.2f,%.2f) dY=%.2f bottomY=%s",
+				tostring(sample.enemyId),
+				tostring(sample.subtype),
+				tostring(sample.tier),
+				tonumber(sample.scale) or 1,
+				basePos.X, basePos.Y, basePos.Z,
+				center.X, center.Y, center.Z,
+				halfExtents.X, halfExtents.Y, halfExtents.Z,
+				tonumber(sample.baseToCenterY) or 0,
+				tostring(sample.bottomY)
+			))
+		end
+	end
+end
 
 local function stepWorld(dt: number)
 	-- Debug: Log that stepWorld is running
@@ -1135,6 +1328,8 @@ local function stepWorld(dt: number)
 		debug.profilebegin("ProjectileService")
 		ProjectileService.step(dt)
 		debug.profileend()
+		emitInvincibleEnemyDiagnostics(now)
+		emitEnemyVisualHitboxDiagnostics(now)
 		return
 	end
 	
@@ -1163,10 +1358,6 @@ local function stepWorld(dt: number)
 	EnemySlowSystem.step(dt)
 	debug.profileend()
 
-	debug.profilebegin("PlayerPressure")
-	PlayerPressureSystem.step(dt)
-	debug.profileend()
-	
 	debug.profilebegin("ZombieAI")
 	zombieAIAccumulator += dt
 	if zombieAIAccumulator >= ZOMBIE_AI_INTERVAL then
@@ -1394,6 +1585,9 @@ local function stepWorld(dt: number)
 	debug.profilebegin("SyncSystem")
 	SyncSystem.step(dt)
 	debug.profileend()
+
+	emitInvincibleEnemyDiagnostics(tick())
+	emitEnemyVisualHitboxDiagnostics(tick())
 end
 
 RunService.Heartbeat:Connect(stepWorld)

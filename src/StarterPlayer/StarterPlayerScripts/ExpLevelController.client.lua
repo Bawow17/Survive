@@ -58,6 +58,10 @@ local PAUSE_PURPLE_COLOR = Color3.fromRGB(180, 100, 255)
 
 -- Track current exp state for unpause restoration
 local currentExpRatio = 0
+local currentLevel = 1
+local currentXp = 0
+local currentXpForNext = 100
+local expTween: Tween? = nil
 
 -- Listen for player stats updates from dedicated remote
 PlayerStatsUpdate.OnClientEvent:Connect(function(stats)
@@ -65,34 +69,53 @@ PlayerStatsUpdate.OnClientEvent:Connect(function(stats)
 		warn("[ExpLevelController] Received nil stats")
 		return
 	end
-	
-	-- Update from simple stats table
-	local level = stats.level or 1
-	local xp = stats.xp or 0
-	local xpForNext = stats.xpForNext or 100
+
+	-- Update from simple stats table; keep last-known values when a field is omitted.
+	if typeof(stats.level) == "number" then
+		currentLevel = math.max(1, math.floor(stats.level))
+	end
+	if typeof(stats.xp) == "number" then
+		currentXp = math.max(0, stats.xp)
+	end
+	if typeof(stats.xpForNext) == "number" then
+		currentXpForNext = math.max(1, stats.xpForNext)
+	end
 	
 	-- Update level label
-	levelLabel.Text = "Level " .. level
+	levelLabel.Text = "Level " .. currentLevel
 	
 	-- Animate exp bar fill (left to right based on exp percentage)
-	local fillRatio = math.clamp(xp / xpForNext, 0, 1)
+	local fillRatio = math.clamp(currentXp / currentXpForNext, 0, 1)
 	currentExpRatio = fillRatio  -- Store for unpause restoration
-	
+
+	if expTween then
+		expTween:Cancel()
+		expTween = nil
+	end
+
 	local tween = TweenService:Create(expFill, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 		Size = UDim2.new(fillRatio, 0, 1, 0)  -- Fill left to right, full height
 	})
+	expTween = tween
 	tween:Play()
 end)
 
--- Handle pause: turn exp bar purple and fill to 100%
+-- Handle pause: only recolor; do not force-fill to 100%.
 GamePaused.OnClientEvent:Connect(function(data)
-	-- Set to purple and fill completely (instant, no tween)
+	if expTween then
+		expTween:Cancel()
+		expTween = nil
+	end
+	-- Set to purple only (instant, no tween)
 	expFill.BackgroundColor3 = PAUSE_PURPLE_COLOR
-	expFill.Size = UDim2.new(1, 0, 1, 0)  -- 100% width
 end)
 
 -- Handle unpause: restore color and update to current exp
 GameUnpaused.OnClientEvent:Connect(function()
+	if expTween then
+		expTween:Cancel()
+		expTween = nil
+	end
 	-- Restore original color (instant)
 	expFill.BackgroundColor3 = ORIGINAL_EXP_COLOR
 	

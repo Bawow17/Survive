@@ -31,9 +31,13 @@ loopGui.DisplayOrder = 1000
 local frame = loopGui:WaitForChild("LoopGameFrame")
 local frameContainer = frame:WaitForChild("Frame") :: Frame
 local gridContainer = frameContainer:WaitForChild("Frame") :: Frame
+local completionCounterLabel = frameContainer:FindFirstChild("CompletionCounterLabel") :: TextLabel?
 local gridLayout = gridContainer:FindFirstChildOfClass("UIGridLayout")
 if not gridLayout then
 	warn("[LoopGame] UIGridLayout missing in LoopGameGui")
+end
+if not completionCounterLabel then
+	warn("[LoopGame] CompletionCounterLabel missing in LoopGameGui")
 end
 
 local function setNonBlocking(gui: GuiObject)
@@ -407,6 +411,7 @@ local function generateSolvedGrid(size: number, rng: Random): {{number}}
 			end
 		end
 	end
+	ensureNonEmpty()
 
 	return grid
 end
@@ -493,6 +498,11 @@ local function updateTileMaskAndVisual(tile: any)
 		-- 3-way uses preset templates; no extra rotation
 	elseif tile.kind == 4 then
 		tile.currentMask = bit32.bor(bitFor(1), bitFor(2), bitFor(3), bitFor(4))
+	elseif tile.kind == 0 then
+		tile.currentMask = 0
+		if tile.button then
+			tile.button.Rotation = tile.rotation * 90
+		end
 	end
 end
 
@@ -500,6 +510,8 @@ local activeObjectiveId: number? = nil
 local objectivePosition: Vector3? = nil
 local objectiveSeed: number? = nil
 local objectiveGridSize: number? = nil
+local requiredCompletions = 1
+local completedCompletions = 0
 local distanceConn: RBXScriptConnection? = nil
 local promptConn: RBXScriptConnection? = nil
 local puzzleSolved = false
@@ -510,6 +522,14 @@ local solvedCloseToken = 0
 
 local tiles: {{any}} = {}
 local gridSize = 0
+local warnedInvalidDegree = false
+
+local function updateCompletionCounter()
+	if completionCounterLabel then
+		completionCounterLabel.Text = string.format("%d/%d", completedCompletions, requiredCompletions)
+	end
+end
+updateCompletionCounter()
 
 local function closeUI(sendClose: boolean)
 	solvedCloseToken += 1
@@ -521,6 +541,9 @@ local function closeUI(sendClose: boolean)
 		objectivePosition = nil
 		objectiveSeed = nil
 		objectiveGridSize = nil
+		requiredCompletions = 1
+		completedCompletions = 0
+		updateCompletionCounter()
 	end
 	if distanceConn then
 		distanceConn:Disconnect()
@@ -659,7 +682,6 @@ local function spawnObjectiveModel(position: Vector3, objectiveId: number)
 		if p ~= prompt then
 			return
 		end
-		openPuzzleForObjective(objectiveId)
 		requestOpenRemote:FireServer(objectiveId)
 	end)
 end
@@ -742,9 +764,11 @@ openPuzzleForObjective = function(objectiveId: number)
 		size = 4
 	end
 
-	-- Randomize each time UI opens (ignore static objective seed)
-	local randomizedSeed = Random.new():NextInteger(1, 2^31 - 1)
-	buildPuzzle(randomizedSeed, math.clamp(size, 3, 5))
+	local seed = objectiveSeed
+	if typeof(seed) ~= "number" then
+		seed = Random.new():NextInteger(1, 2^31 - 1)
+	end
+	buildPuzzle(seed, math.clamp(size, 3, 5))
 	startDistanceCheck()
 	task.defer(tryCompletePuzzle)
 end
@@ -801,11 +825,16 @@ buildPuzzle = function(seed: number, size: number)
 	local rng = Random.new(seed)
 	local solution = generateSolvedGrid(size, rng)
 	local attempts = 0
-	while attempts < 5 do
+	local maxAttempts = size == 3 and 12 or 5
+	while attempts < maxAttempts do
 		local hasInvalid = false
 		for r = 1, size do
 			for c = 1, size do
 				local mask = solution[r][c]
+				if edgeCount(mask) == 0 then
+					hasInvalid = true
+					break
+				end
 				if edgeCount(mask) == 2 and not isStraight(mask) then
 					hasInvalid = true
 					break
@@ -943,6 +972,18 @@ buildPuzzle = function(seed: number, size: number)
 					tileButton = button
 				end
 				updateTileMaskAndVisual(tile)
+			else
+				if not warnedInvalidDegree then
+					warnedInvalidDegree = true
+					warn(string.format("[LoopGame] Invalid tile degree %d at %dx%d; using fallback tile", degree, r, c))
+				end
+				tile.kind = 0
+				tile.rotation = rng:NextInteger(0, 3)
+				local button = createPlaceholderButton(layoutOrder)
+				configureTileButton(button, layoutOrder)
+				button.BackgroundColor3 = Color3.fromRGB(110, 110, 110)
+				tileButton = button
+				updateTileMaskAndVisual(tile)
 			end
 
 			tile.button = tileButton
@@ -972,11 +1013,11 @@ buildPuzzle = function(seed: number, size: number)
 					return
 				end
 				button.MouseButton1Click:Connect(function()
-					handleRotate(1)
+					handleRotate(-1)
 				end)
 
 				button.MouseButton2Click:Connect(function()
-					handleRotate(-1)
+					handleRotate(1)
 				end)
 			end
 
@@ -1016,20 +1057,38 @@ openRemote.OnClientEvent:Connect(function(payload: any)
 	objectivePosition = payload.position
 	objectiveSeed = payload.seed
 	objectiveGridSize = payload.gridSize
+	completedCompletions = 0
+	requiredCompletions = 1
+	if typeof(payload.completedCompletions) == "number" then
+		completedCompletions = math.max(0, math.floor(payload.completedCompletions))
+	end
+	if typeof(payload.requiredCompletions) == "number" then
+		requiredCompletions = math.max(1, math.floor(payload.requiredCompletions))
+	end
+	completedCompletions = math.min(completedCompletions, requiredCompletions)
+	updateCompletionCounter()
 	openPuzzleForObjective(objectiveId)
 end)
 
 closeAllRemote.OnClientEvent:Connect(function(payload: any)
+	local fullComplete = false
+	local delaySeconds = 0
 	if payload and typeof(payload) == "table" then
 		local objectiveId = payload.objectiveId
 		if activeObjectiveId and typeof(objectiveId) == "number" and objectiveId ~= activeObjectiveId then
 			return
 		end
+		if payload.fullComplete == true then
+			fullComplete = true
+		end
+		if typeof(payload.delaySeconds) == "number" then
+			delaySeconds = math.max(0, payload.delaySeconds)
+		end
 	end
-	if puzzleSolved then
+	if fullComplete and delaySeconds > 0 then
 		solvedCloseToken += 1
 		local token = solvedCloseToken
-		task.delay(1, function()
+		task.delay(delaySeconds, function()
 			if token ~= solvedCloseToken then
 				return
 			end

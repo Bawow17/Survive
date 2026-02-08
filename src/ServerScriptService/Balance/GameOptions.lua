@@ -16,6 +16,9 @@ return {
 	-- Debug toggles (extra logs/asserts should be gated here)
 	Debug = {
 		Enabled = false,
+		InvincibleEnemyDiagnostics = true,
+		EnemyVisualHitboxDiagnostics = false,
+		LastHitDamageDiagnostics = false,
 		ModMenu = {
 			AllowedUserIds = {},
 			AllowedUserNames = { "bawan22thehacker" },

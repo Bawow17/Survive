@@ -128,6 +128,13 @@ return {
 	ChunkCount = 10,  -- Split large gains into 10 chunks
 	ChunkInterval = 0.08,  -- 0.15s between chunks
 	ChunkThreshold = 50,  -- Only chunk if gaining >=50 exp at once
+
+	-- Loop puzzle objective rewards
+	LoopPuzzleRewards = {
+		BaseExp = 60,
+		PerRequiredCompletion = 20,
+		PerGridSizeStep = 10, -- +10 for 4x4, +20 for 5x5
+	},
 	
 	-- Spawn EXP Settings (orbs spawned around player on initial spawn)
 	SpawnExps = {

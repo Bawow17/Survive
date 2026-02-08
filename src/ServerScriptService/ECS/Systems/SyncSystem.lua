@@ -656,6 +656,10 @@ end
 
 local function updateAoiGridFromDirty(dirty: {[number]: {[string]: boolean}})
 	for entity, flags in pairs(dirty) do
+		if pendingDespawn[entity] then
+			removeFromAoiGrid(entity)
+			continue
+		end
 		if flags.Position or flags.EntityType then
 			local entityType = world:get(entity, componentLookup.EntityType)
 			if isAoiTrackedType(entityType) then
@@ -706,6 +710,10 @@ local function buildExpOrbSpawn(entityId: number): {[string]: any}?
 end
 
 local function addSpawnForPlayer(player: Player, entry: {entities: {[number]: any}?, projectileSpawns: {any}?, orbSpawns: {any}?}, entityId: number): boolean
+	if pendingDespawn[entityId] then
+		return false
+	end
+
 	local entityTypeValue = world:get(entityId, componentLookup.EntityType)
 	local entityType = entityTypeValue and entityTypeValue.type
 	if entityType == "Projectile" then
@@ -1329,7 +1337,7 @@ function SyncSystem.step(dt: number)
 				state.spawnQueueSet[entityId] = nil
 				queueList[i] = queueList[#queueList]
 				queueList[#queueList] = nil
-			elseif known[entityId] or state.spawnScheduled[entityId] then
+			elseif pendingDespawn[entityId] or known[entityId] or state.spawnScheduled[entityId] then
 				state.spawnQueueSet[entityId] = nil
 				queueList[i] = queueList[#queueList]
 				queueList[#queueList] = nil
@@ -1366,7 +1374,7 @@ function SyncSystem.step(dt: number)
 		end
 
 		for entityId in pairs(nearSet) do
-			if not known[entityId] and not state.spawnScheduled[entityId] and not state.spawnQueueSet[entityId] then
+			if not pendingDespawn[entityId] and not known[entityId] and not state.spawnScheduled[entityId] and not state.spawnQueueSet[entityId] then
 				if spawnCount < spawnBudget then
 					local spawnEntry = ensurePlayerPayload(perPlayerPayload, player)
 					if addSpawnForPlayer(player, spawnEntry, entityId) then
@@ -1395,7 +1403,7 @@ function SyncSystem.step(dt: number)
 		end
 
 		for entityId in pairs(midSet) do
-			if not nearSet[entityId] and not known[entityId] and not state.spawnScheduled[entityId] and not state.spawnQueueSet[entityId] then
+			if not pendingDespawn[entityId] and not nearSet[entityId] and not known[entityId] and not state.spawnScheduled[entityId] and not state.spawnQueueSet[entityId] then
 				if spawnCount < spawnBudget then
 					local spawnEntry = ensurePlayerPayload(perPlayerPayload, player)
 					if addSpawnForPlayer(player, spawnEntry, entityId) then
@@ -1430,6 +1438,10 @@ function SyncSystem.step(dt: number)
 			local known = ensurePlayerKnownEntities(player)
 			local updatesUsed = playerUpdateCounts[player] or 0
 			for entityId, flags in pairs(state.updateQueue) do
+				if pendingDespawn[entityId] then
+					state.updateQueue[entityId] = nil
+					continue
+				end
 				if updatesUsed >= MAX_UPDATES_PER_TICK_PER_PLAYER then
 					if not updateBudgetHitPlayers[player] then
 						updateBudgetHitPlayers[player] = true
@@ -1506,6 +1518,9 @@ function SyncSystem.step(dt: number)
 	end
 
 	for entity, flags in pairs(dirty) do
+		if pendingDespawn[entity] then
+			continue
+		end
 		local entityTypeValue = world:get(entity, componentLookup.EntityType)
 		local entityType = entityTypeValue and entityTypeValue.type
 		local filteredFlags, allowed = filterFlagsForEntity(entityType, flags)

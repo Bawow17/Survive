@@ -19,6 +19,7 @@ local Health: any
 local DEFAULT_MAX_HEALTH = PlayerBalance.BaseMaxHealth
 local DEFAULT_WALK_SPEED = PlayerBalance.BaseWalkSpeed
 local DEFAULT_PICKUP_RANGE = PlayerBalance.BasePickupRange
+local MOVEMENT_SPEED_TO_MOBILITY_WEIGHT = 0.2
 
 -- Cached query for players
 local playerQuery: any
@@ -48,18 +49,24 @@ end
 -- Calculate total speed multiplier (Haste passive + all active buffs)
 local function calculateTotalSpeedMultiplier(effects: any): number
 	local baseMult = effects.moveSpeedMultiplier or 1.0  -- Haste passive
-	local buffsMult = 1.0
+	local totalBonus = baseMult - 1.0
 	
-	-- Multiply all active speed buffs (levelUp, cloak, etc.)
+	-- Speed bonuses stack additively: (1 + a) + (1 + b) => 1 + a + b
 	if effects.activeSpeedBuffs then
-		for buffId, buffData in pairs(effects.activeSpeedBuffs) do
-			buffsMult = buffsMult * (buffData.multiplier or 1.0)
+		for _, buffData in pairs(effects.activeSpeedBuffs) do
+			totalBonus += (buffData.multiplier or 1.0) - 1.0
 		end
 	end
 	
-	local totalMult = baseMult * buffsMult
-	
-	return totalMult
+	return math.max(0, 1.0 + totalBonus)
+end
+
+-- Mobility abilities scale fully with mobility power, plus 20% of movement-speed bonus.
+local function calculateMobilityDistanceMultiplier(effects: any, totalSpeedMult: number): number
+	local mobilityBase = effects.mobilityDistanceBase or 1.0
+	local speedBonus = totalSpeedMult - 1.0
+	local speedContribution = 1.0 + (speedBonus * MOVEMENT_SPEED_TO_MOBILITY_WEIGHT)
+	return mobilityBase * math.max(0, speedContribution)
 end
 
 -- Apply passive effects to a player
@@ -91,15 +98,52 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 	end
 	
 	local newMaxHealth = baseMaxHealth * healthMult + healthFlat
-	if math.abs(humanoid.MaxHealth - newMaxHealth) > 0.1 then
-		-- Store current health percentage
-		local healthPercent = humanoid.Health / humanoid.MaxHealth
-		humanoid.MaxHealth = newMaxHealth
-		-- Restore same percentage of health (minimum current health)
-		humanoid.Health = math.max(humanoid.Health, newMaxHealth * healthPercent)
+
+	-- Keep ECS Health and Humanoid health in sync.
+	-- Damage/regen/death systems use ECS Health as authoritative state.
+	local ecsHealth = world:get(playerEntity, Health)
+	local targetCurrentHealth = humanoid.Health
+	local targetMaxHealth = newMaxHealth
+
+	if ecsHealth then
+		local oldMax = math.max(ecsHealth.max or targetMaxHealth, 0.01)
+		local oldCurrent = math.clamp(ecsHealth.current or oldMax, 0, oldMax)
+		targetCurrentHealth = oldCurrent
+
+		-- Preserve current health percentage when max health changes, without reducing
+		-- absolute health on upgrades.
+		if math.abs(oldMax - targetMaxHealth) > 0.1 then
+			local healthPercent = oldCurrent / oldMax
+			targetCurrentHealth = math.max(oldCurrent, targetMaxHealth * healthPercent)
+		end
+
+		targetCurrentHealth = math.clamp(targetCurrentHealth, 0, targetMaxHealth)
+
+		if math.abs((ecsHealth.max or 0) - targetMaxHealth) > 0.1
+			or math.abs((ecsHealth.current or 0) - targetCurrentHealth) > 0.1 then
+			DirtyService.setIfChanged(world, playerEntity, Health, {
+				current = targetCurrentHealth,
+				max = targetMaxHealth,
+			}, "Health")
+		end
+	else
+		-- Defensive path: create ECS health if missing.
+		targetCurrentHealth = math.clamp(humanoid.Health, 0, targetMaxHealth)
+		DirtyService.setIfChanged(world, playerEntity, Health, {
+			current = targetCurrentHealth,
+			max = targetMaxHealth,
+		}, "Health")
+	end
+
+	-- Apply the same target values to Humanoid to avoid visual/gameplay desync.
+	if math.abs(humanoid.MaxHealth - targetMaxHealth) > 0.1 then
+		humanoid.MaxHealth = targetMaxHealth
+	end
+	if math.abs(humanoid.Health - targetCurrentHealth) > 0.1 then
+		humanoid.Health = math.clamp(targetCurrentHealth, 0.01, targetMaxHealth)
 	end
 	
-	-- Calculate total speed multiplier (Haste + all active buffs stacking multiplicatively)
+	-- Calculate total speed multiplier (Haste + all active buffs stacking additively)
 	local totalSpeedMult = calculateTotalSpeedMultiplier(effects)
 	
 	local baseWalkSpeed = player:GetAttribute("BaseWalkSpeed")
@@ -115,9 +159,8 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 		humanoid.WalkSpeed = newWalkSpeed
 	end
 	
-	-- Apply same multiplier to mobility distances (Dash, Double Jump, Shield Bash)
-	local mobilityBase = effects.mobilityDistanceBase or 1.0
-	effects.mobilityDistanceMultiplier = mobilityBase * totalSpeedMult
+	-- Mobility abilities: full Mobility Power + 20% Movement Speed bonus.
+	effects.mobilityDistanceMultiplier = calculateMobilityDistanceMultiplier(effects, totalSpeedMult)
 	DirtyService.setIfChanged(world, playerEntity, PassiveEffects, effects, "PassiveEffects")
 	
 	-- Store pickup range multiplier for ExpCollectionSystem
@@ -236,16 +279,15 @@ function PassiveEffectSystem.refreshPlayerSpeed(playerEntity: number)
 		return
 	end
 	
-	-- Calculate total speed multiplier (Haste + all active buffs stacking multiplicatively)
+	-- Calculate total speed multiplier (Haste + all active buffs stacking additively)
 	local totalSpeedMult = calculateTotalSpeedMultiplier(effects)
 	local baseWalkSpeed = player:GetAttribute("BaseWalkSpeed") or DEFAULT_WALK_SPEED
 	
 	-- Apply walkspeed
 	humanoid.WalkSpeed = baseWalkSpeed * totalSpeedMult
 	
-	-- Apply same multiplier to mobility distances
-	local mobilityBase = effects.mobilityDistanceBase or 1.0
-	effects.mobilityDistanceMultiplier = mobilityBase * totalSpeedMult
+	-- Mobility abilities: full Mobility Power + 20% Movement Speed bonus.
+	effects.mobilityDistanceMultiplier = calculateMobilityDistanceMultiplier(effects, totalSpeedMult)
 	DirtyService.setIfChanged(world, playerEntity, PassiveEffects, effects, "PassiveEffects")
 end
 

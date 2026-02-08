@@ -37,6 +37,8 @@ local PlayerStats: any
 local Health: any
 local EntityTypeComponent: any
 local FacingDirection: any
+local Visual: any
+local EnemyTier: any
 
 local enemyLogAccumulator = 0
 
@@ -123,9 +125,28 @@ local function getAttackRangeFromAttackbox(enemyEntity: number): number
 
 	local attackboxSize = attackboxData.size
 	local maxDimension = math.max(attackboxSize.X, attackboxSize.Z)
+
+	-- Scale attack range with enemy size (Super/Elite) so melee reach matches visuals.
+	local scale = 1.0
+	local visual = Visual and world:get(enemyEntity, Visual)
+	local rawScale = visual and visual.scale
+	if typeof(rawScale) == "number" and rawScale == rawScale and rawScale > 0 then
+		scale = math.max(scale, math.clamp(rawScale, 0.1, 20.0))
+	end
+	local tierData = EnemyTier and world:get(enemyEntity, EnemyTier)
+	if typeof(tierData) == "table" then
+		local tierScale = tierData.scale
+		if typeof(tierScale) == "number" and tierScale == tierScale and tierScale > 0 then
+			scale = math.max(scale, math.clamp(tierScale, 0.1, 20.0))
+		elseif tierData.tier == "Super" then
+			scale = math.max(scale, 4.0)
+		elseif tierData.tier == "Elite" then
+			scale = math.max(scale, 7.5)
+		end
+	end
 	
 	-- Add a small buffer (0.5 studs) to ensure reliable contact detection
-	return maxDimension + 0.5
+	return (maxDimension * scale) + 0.5
 end
 
 
@@ -507,6 +528,8 @@ function ZombieAISystem.init(worldRef: any, components: any, dirtyService: any, 
 	Health = Components.Health
 	EntityTypeComponent = Components.EntityType
 	FacingDirection = Components.FacingDirection
+	Visual = Components.Visual
+	EnemyTier = Components.EnemyTier
 	
 	-- Create cached queries for performance (CRITICAL FIX - was creating new queries every frame!)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing
@@ -799,14 +822,17 @@ function ZombieAISystem.step(dt: number)
 
 		-- EntityType check is no longer needed - pre-filtered in QueryPool.getEnemiesWithCore()
 
-		-- Always update cooldown (lightweight operation)
-		do
-			local cooldownMax = cooldown.max or 1
-			local originalRemaining = cooldown.remaining or 0
-			local cooldownRemaining = math.max(originalRemaining - dt, 0)
-			if cooldownRemaining ~= originalRemaining then
-				setAttackCooldown(enemyEntity, cooldownRemaining, cooldownMax)
-			end
+		-- Always update cooldown and normalize max to the enemy's configured value.
+		local configuredCooldownMax = (ai and ai.balance and ai.balance.attackCooldown) or 0.7
+		if typeof(configuredCooldownMax) ~= "number" or configuredCooldownMax <= 0 then
+			configuredCooldownMax = 0.7
+		end
+		configuredCooldownMax = math.max(configuredCooldownMax, 0.05)
+		local originalRemaining = cooldown.remaining or 0
+		local originalMax = cooldown.max or configuredCooldownMax
+		local cooldownRemaining = math.clamp(originalRemaining - dt, 0, configuredCooldownMax)
+		if cooldownRemaining ~= originalRemaining or originalMax ~= configuredCooldownMax then
+			setAttackCooldown(enemyEntity, cooldownRemaining, configuredCooldownMax)
 		end
 
 		if not hasPlayers then
@@ -906,7 +932,7 @@ function ZombieAISystem.step(dt: number)
 		local newVelocity = { x = 0, y = 0, z = 0 }
 		if not isStunned then
 		if distSq > 0 and distance > 0 then
-			-- Use AI speed set at spawn (already scaled for owner pressure)
+			-- Use AI speed set at spawn (difficulty-scaled in spawner)
 			local baseSpeed = (ai and ai.speed) or (ai and ai.balance and ai.balance.baseSpeed) or 8
 			local finalSpeed = baseSpeed
 			local slowMultiplier = EnemySlowSystem.getSlowMultiplier(enemyEntity)
@@ -1067,10 +1093,14 @@ function ZombieAISystem.step(dt: number)
 
 		-- Attack logic (attack when in range and cooldown is ready)
 		local damageAmount = damage.amount or 5
+		if typeof(damageAmount) ~= "number" or damageAmount ~= damageAmount or damageAmount == math.huge or damageAmount == -math.huge then
+			damageAmount = (ai and ai.balance and ai.balance.baseDamage) or 5
+		end
+		damageAmount = math.max(damageAmount, 0)
 		local attackRange = getAttackRangeFromAttackbox(enemyEntity)
 
 		-- Attack only when within attack range (based on attackbox size)
-		if distance <= attackRange and (cooldown.remaining or 0) <= 0 then
+		if distance <= attackRange and cooldownRemaining <= 0 then
 				-- Check vertical distance - player must be close to ground to be hit
 				local canHitPlayer = true
 				local playerStats = world:get(nearestPlayerId, Components.PlayerStats)
@@ -1093,8 +1123,9 @@ function ZombieAISystem.step(dt: number)
 				end
 				
 				if canHitPlayer then
-					applyDamageToPlayer(nearestPlayerId, damageAmount)
-					setAttackCooldown(enemyEntity, 0.2, 0.2) -- 0.2 second cooldown between attacks
+					applyDamageToPlayer(nearestPlayerId, damageAmount, enemyEntity)
+					cooldownRemaining = configuredCooldownMax
+					setAttackCooldown(enemyEntity, cooldownRemaining, configuredCooldownMax)
 				end
 		end
 

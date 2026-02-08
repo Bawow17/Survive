@@ -96,7 +96,6 @@ local serverKnockbackDistance: number? = nil
 -- Blink config values from server
 local serverGroundDistance: number? = nil
 local serverAirDistance: number? = nil
-local serverAirAngleDeg: number? = nil
 local serverAirWindup: number? = nil
 local serverGroundCooldown: number? = nil
 local serverAirCooldown: number? = nil
@@ -1235,9 +1234,6 @@ local function initRemotes()
 				if typeof(data.airDistance) == "number" then
 					serverAirDistance = data.airDistance
 				end
-				if typeof(data.airAngleDeg) == "number" then
-					serverAirAngleDeg = data.airAngleDeg
-				end
 				if typeof(data.airWindup) == "number" then
 					serverAirWindup = data.airWindup
 				end
@@ -1434,7 +1430,7 @@ local function executeDash()
 		return false
 	end
 	
-	-- Apply distance multiplier from Haste
+	-- Apply passive mobility distance scaling from server.
 	local effectiveDistance = effectiveConfig.distance * mobilityDistanceMultiplier
 	
 	-- Get dash direction from player movement input (like double jump)
@@ -1874,7 +1870,7 @@ local function executeDoubleJump()
 		return false
 	end
 	
-	-- Apply distance multiplier from Haste
+	-- Apply passive mobility distance scaling from server.
 	local effectiveHorizontalDistance = effectiveConfig.horizontalDistance * mobilityDistanceMultiplier
 	
 	-- Get movement direction from player input
@@ -1916,7 +1912,7 @@ local function executeDoubleJump()
 	return true
 end
 
-local function getBlinkDirection(isAir: boolean, airAngleDeg: number): Vector3
+local function getBlinkHorizontalDirection(): Vector3
 	local moveDirection = humanoid.MoveDirection
 	if moveDirection.Magnitude < 0.1 then
 		local look = rootPart.CFrame.LookVector
@@ -1928,17 +1924,7 @@ local function getBlinkDirection(isAir: boolean, airAngleDeg: number): Vector3
 		moveDirection = moveDirection.Unit
 	end
 
-	if not isAir then
-		return Vector3.new(moveDirection.X, 0, moveDirection.Z).Unit
-	end
-
-	local angleRad = math.rad(airAngleDeg)
-	local horizontal = Vector3.new(moveDirection.X, 0, moveDirection.Z).Unit
-	local dir = (horizontal * math.cos(angleRad)) + Vector3.new(0, math.sin(angleRad), 0)
-	if dir.Magnitude < 0.1 then
-		return Vector3.new(0, 0, 1)
-	end
-	return dir.Unit
+	return Vector3.new(moveDirection.X, 0, moveDirection.Z).Unit
 end
 
 local function getBlinkTarget(direction: Vector3, distance: number, origin: Vector3?): Vector3
@@ -1955,6 +1941,31 @@ local function getBlinkTarget(direction: Vector3, distance: number, origin: Vect
 		return result.Position - direction * padding
 	end
 	return originPos + direction * distance
+end
+
+local function getAirBlinkTarget(horizontalDirection: Vector3, horizontalDistance: number, origin: Vector3?): Vector3
+	if not rootPart or not rootPart.Parent then
+		return Vector3.zero
+	end
+
+	local verticalOffset = horizontalDistance * 0.3
+	local travelOffset = (horizontalDirection * horizontalDistance) + Vector3.new(0, verticalOffset, 0)
+	local originPos = origin or rootPart.Position
+	if travelOffset.Magnitude < 1e-4 then
+		return originPos
+	end
+
+	if character then
+		blinkRaycastParams.FilterDescendantsInstances = {character}
+	end
+
+	local result = workspace:Raycast(originPos, travelOffset, blinkRaycastParams)
+	if result then
+		local padding = 1.0
+		return result.Position - travelOffset.Unit * padding
+	end
+
+	return originPos + travelOffset
 end
 
 local function cleanupBlink()
@@ -1981,7 +1992,6 @@ local function executeBlink()
 	local isAir = humanoid.FloorMaterial == Enum.Material.Air
 	local groundDistance = (serverGroundDistance or BLINK_CONFIG.groundDistance) * mobilityDistanceMultiplier
 	local airDistance = (serverAirDistance or BLINK_CONFIG.airDistance) * mobilityDistanceMultiplier
-	local airAngleDeg = serverAirAngleDeg or BLINK_CONFIG.airAngleDeg
 	local airWindup = serverAirWindup or BLINK_CONFIG.airWindup
 	local groundCooldown = serverGroundCooldown or BLINK_CONFIG.groundCooldown
 	local airCooldown = serverAirCooldown or BLINK_CONFIG.airCooldown
@@ -2005,11 +2015,11 @@ local function executeBlink()
 	-- Notify server for validation/cooldown UI
 	MobilityActivateRemote:FireServer("Blink", variant)
 
-	local direction = getBlinkDirection(isAir, airAngleDeg)
+	local horizontalDirection = getBlinkHorizontalDirection()
 
 	if not isAir then
 		local startPos = rootPart.Position
-		local targetPos = getBlinkTarget(direction, groundDistance, startPos)
+		local targetPos = getBlinkTarget(horizontalDirection, groundDistance, startPos)
 		if rootPart and rootPart.Parent then
 			rootPart.CFrame = CFrame.new(targetPos, targetPos + rootPart.CFrame.LookVector)
 		end
@@ -2054,7 +2064,7 @@ local function executeBlink()
 		end
 
 		if elapsed >= airWindup then
-			local targetPos = getBlinkTarget(direction, airDistance)
+			local targetPos = getAirBlinkTarget(horizontalDirection, airDistance)
 			if rootPart and rootPart.Parent then
 				rootPart.CFrame = CFrame.new(targetPos, targetPos + rootPart.CFrame.LookVector)
 				local currentVel = rootPart.AssemblyLinearVelocity

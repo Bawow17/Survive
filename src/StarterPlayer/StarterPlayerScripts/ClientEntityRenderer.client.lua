@@ -23,6 +23,7 @@ local player = Players.LocalPlayer
 -- Debug flags for diagnostics
 local debugFlags = ReplicatedStorage:FindFirstChild("DebugFlags")
 local enableInvisibleEnemyDiagnostics = debugFlags and debugFlags:FindFirstChild("InvisibleEnemyDiagnostics")
+local enableEnemyVisualHitboxDiagnostics = debugFlags and debugFlags:FindFirstChild("EnemyVisualHitboxDiagnostics")
 
 -- Track pause state to freeze all rendering
 local isPaused = false
@@ -136,6 +137,9 @@ type RenderRecord = {
 	impaleFollowPart: BasePart?,
 	impaleFollowOffset: CFrame?,
 	smoothedCFrame: CFrame?,
+	expectedScale: number?,
+	enemyTier: string?,
+	nextVisualInvariantCheck: number?,
 }
 
 local renderedEntities: {[string]: RenderRecord} = {}
@@ -158,6 +162,7 @@ local lastProjectileCleanup = 0
 local lastExpOrbCleanup = 0
 local lastDeathCleanupCheck = 0
 local lastInvisibleEnemyCheck = 0
+local lastEnemyVisualHitboxDiagReport = 0
 local DEATH_CLEANUP_INTERVAL = 1.0  -- Check every second
 local impaleTokenCounter = 0
 
@@ -422,10 +427,17 @@ end
 
 local function resetModelForPool(record: RenderRecord, model: Model)
 	restoreModelTransparency(record)
-	local highlight = model:FindFirstChild("HitFlash")
-	if highlight and highlight:IsA("Highlight") then
-		highlight:Destroy()
+	local hitFlash = model:FindFirstChild("HitFlash")
+	if hitFlash and hitFlash:IsA("Highlight") then
+		hitFlash:Destroy()
 	end
+	local tierOutline = model:FindFirstChild("TierOutline")
+	if tierOutline and tierOutline:IsA("Highlight") then
+		tierOutline:Destroy()
+	end
+	pcall(function()
+		model:ScaleTo(1)
+	end)
 	for _, child in ipairs(model:GetChildren()) do
 		if child:IsA("Model") and (child.Name == "ImpaledShard" or child:GetAttribute("__ImpaleToken") ~= nil) then
 			child:Destroy()
@@ -435,6 +447,8 @@ local function resetModelForPool(record: RenderRecord, model: Model)
 	model:SetAttribute("ECS_LastUpdate", nil)
 	model:SetAttribute("HitFlashLogged", nil)
 	model:SetAttribute("DeathAnimLogged", nil)
+	model:SetAttribute("EnemyTier", nil)
+	model:SetAttribute("EnemyExpectedScale", nil)
 end
 
 local function releasePooledModel(record: RenderRecord?, model: Model?)
@@ -671,7 +685,8 @@ local deathAnimations: {[Model]: {
 }} = {}
 local STATUS_EFFECT_OFFSETS: {[string]: {offset: Vector3, rotation: Vector3}} = {}
 
-local ATTR_RENDER_SCALE = "Setting_graphics_renderScale"
+local ATTR_ENEMY_RENDER_SCALE = "Setting_graphics_enemyRenderScale"
+local ATTR_RENDER_SCALE_LEGACY = "Setting_graphics_renderScale"
 local ATTR_REDUCE_FLASH = "Setting_accessibility_reduceFlash"
 
 -- Maximum render distance for projectiles
@@ -708,14 +723,25 @@ local function readBoolAttribute(attributeName: string, fallback: boolean): bool
 end
 
 local function applyRenderDistanceScale(scale: number)
-	local clampedScale = math.clamp(scale, 0.25, 5.00)
-	MAX_RENDER_DISTANCE = BASE_MAX_RENDER_DISTANCE * clampedScale
+	local clampedScale = math.clamp(scale, 0.50, 10.00)
 	ENEMY_CULL_OUT_DIST = BASE_ENEMY_CULL_OUT_DIST * clampedScale
 	ENEMY_CULL_IN_DIST = BASE_ENEMY_CULL_IN_DIST * clampedScale
 	CULL_OUT_DIST = ENEMY_CULL_OUT_DIST
 	CULL_IN_DIST = ENEMY_CULL_IN_DIST
 	CULL_OUT_DIST_SQ = CULL_OUT_DIST * CULL_OUT_DIST
 	CULL_IN_DIST_SQ = CULL_IN_DIST * CULL_IN_DIST
+end
+
+local function readEnemyRenderScaleAttribute(): number
+	local explicit = player:GetAttribute(ATTR_ENEMY_RENDER_SCALE)
+	if typeof(explicit) == "number" then
+		return math.clamp(explicit, 0.50, 10.00)
+	end
+	local legacy = player:GetAttribute(ATTR_RENDER_SCALE_LEGACY)
+	if typeof(legacy) == "number" then
+		return math.clamp(legacy, 0.50, 10.00)
+	end
+	return 1.0
 end
 
 -- Status effect offsets per enemy subtype (forward = -Z in model space)
@@ -760,7 +786,7 @@ local EXP_ORB_STALE_THRESHOLD = 5.0  -- Exp orbs without updates for 5s are stal
 local INVISIBLE_ENEMY_DIAGNOSTIC_INTERVAL = 5.0  -- Check for invisible enemies every 5s
 local ORPHAN_MODEL_TTL = 1.5 -- Seconds before we clean up an enemy model with no entity record
 local NO_ID_MODEL_TTL = 1.5 -- Seconds before we clean up an enemy model missing ECS_EntityId
-local DEBUG_ENEMY_ENTITY_MODEL_COUNTS = true
+local DEBUG_ENEMY_ENTITY_MODEL_COUNTS = false
 local SPAWN_BUDGET_PER_FRAME = 15
 local ENEMY_INSTANT_SPAWN_BUDGET = 8
 local FADE_OP_BUDGET_PER_FRAME = 750
@@ -1416,6 +1442,34 @@ local function applyTierOutline(model: Model, tier: string?)
 	end
 end
 
+local function sanitizeEnemyScale(rawScale: any): number
+	if typeof(rawScale) ~= "number" or rawScale ~= rawScale or rawScale <= 0 then
+		return 1
+	end
+	return math.clamp(rawScale, 0.1, 20)
+end
+
+local function ensureEnemyVisualInvariants(record: RenderRecord, now: number)
+	if not record or record.entityType ~= "Enemy" or not record.model or not record.model.Parent then
+		return
+	end
+	local nextCheck = record.nextVisualInvariantCheck or 0
+	if now < nextCheck then
+		return
+	end
+	record.nextVisualInvariantCheck = now + 0.5
+
+	local expectedScale = sanitizeEnemyScale(record.expectedScale)
+	pcall(function()
+		local currentScale = record.model:GetScale()
+		if math.abs(currentScale - expectedScale) > 0.01 then
+			record.model:ScaleTo(expectedScale)
+		end
+	end)
+
+	applyTierOutline(record.model, record.enemyTier)
+end
+
 local function handleEnemySlow(record: RenderRecord, slowData: any)
     if not record or not record.model or typeof(slowData) ~= "table" then
         return
@@ -1811,6 +1865,45 @@ local function checkForInvisibleEnemies(now: number)
 			otherParentCount,
 			fadedOutCount
 		))
+	end
+end
+
+local function emitEnemyVisualHitboxDiagnostics(now: number)
+	if not (enableEnemyVisualHitboxDiagnostics and enableEnemyVisualHitboxDiagnostics.Value) then
+		return
+	end
+	if (now - lastEnemyVisualHitboxDiagReport) < 1.0 then
+		return
+	end
+	lastEnemyVisualHitboxDiagReport = now
+
+	local printed = 0
+	for key, record in pairs(renderedEntities) do
+		if record.entityType == "Enemy" and record.model and record.model.Parent then
+			local model = record.model
+			local pivot = model:GetPivot().Position
+			local actualScale = 1
+			pcall(function()
+				actualScale = model:GetScale()
+			end)
+			local expectedScale = sanitizeEnemyScale(record.expectedScale)
+			local tier = record.enemyTier
+			local hasOutline = model:FindFirstChild("TierOutline") ~= nil
+			print(string.format(
+				"[EVHDBG][cli] enemy=%s subtype=%s tier=%s expectedScale=%.2f actualScale=%.2f pivot=(%.2f,%.2f,%.2f) outline=%s",
+				tostring(key),
+				tostring(record.entitySubtype),
+				tostring(tier),
+				expectedScale,
+				actualScale,
+				pivot.X, pivot.Y, pivot.Z,
+				tostring(hasOutline)
+			))
+			printed += 1
+			if printed >= 3 then
+				break
+			end
+		end
 	end
 end
 
@@ -2246,8 +2339,8 @@ local function createVisualModel(entityType: string, entitySubtype: string?, vis
 	end
 
 	-- Configure existing Hitbox and Attackbox parts from the model
-	local hitbox = model:FindFirstChild("Hitbox")
-	local attackbox = model:FindFirstChild("Attackbox")
+	local hitbox = model:FindFirstChild("Hitbox", true) or model:FindFirstChild("hitbox", true)
+	local attackbox = model:FindFirstChild("Attackbox", true) or model:FindFirstChild("attackbox", true)
 	local existingPrimary = model.PrimaryPart
 	local allowPrimaryFallback = entityType ~= "Enemy"
 	
@@ -2574,6 +2667,14 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	
 	-- Extract visual color for projectiles from Visual component (for attribute colors)
 	local visualData = entityData.Visual
+	local spawnScale = sanitizeEnemyScale((visualData and type(visualData) == "table") and visualData.scale or nil)
+	local spawnTier: string? = nil
+	if entityTypeName == "Enemy" then
+		local tierData = entityData.EnemyTier
+		if typeof(tierData) == "table" and typeof(tierData.tier) == "string" then
+			spawnTier = tierData.tier
+		end
+	end
 	if entityTypeName == "Projectile" and visualData and type(visualData) == "table" and visualData.color then
 		visualColor = visualData.color
 	end
@@ -2614,11 +2715,10 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		return
 	end
 	
-	-- Apply scale from Visual component if present (for projectile size upgrades)
-	if visualData and type(visualData) == "table" and visualData.scale and visualData.scale ~= 1 then
-		local scale = visualData.scale
-		model:ScaleTo(scale)
-	end
+	-- Always apply spawn scale, including scale=1, so pooled models cannot leak stale size.
+	pcall(function()
+		model:ScaleTo(spawnScale)
+	end)
 	
 	-- CRITICAL FIX PHASE 2: Parent FIRST, then set CFrame to avoid position desync
 	local parentSuccess, parentErr = pcall(function()
@@ -2644,12 +2744,12 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	
 	-- Validate model structure after parenting
 	if entityTypeName == "Enemy" then
-		local tierData = entityData.EnemyTier
-		local tier = tierData and tierData.tier
-		applyTierOutline(model, tier)
+		applyTierOutline(model, spawnTier)
+		model:SetAttribute("EnemyTier", spawnTier)
+		model:SetAttribute("EnemyExpectedScale", spawnScale)
 
 		local primaryPart = model.PrimaryPart
-		local hasHitbox = model:FindFirstChild("Hitbox") ~= nil
+		local hasHitbox = model:FindFirstChild("Hitbox", true) ~= nil or model:FindFirstChild("hitbox", true) ~= nil
 		if not primaryPart and not hasHitbox then
 			warn(string.format("[ClientRenderer] WARNING: Enemy model %d has no PrimaryPart! Checking for parts...", entityId))
 			local parts = {}
@@ -2715,8 +2815,8 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		positionVector = originVector + velocityVector * age
 	end
 
-		local poolKey = getPoolKey(entityTypeName, entitySubtype)
-	    local record: RenderRecord = {
+	local poolKey = getPoolKey(entityTypeName, entitySubtype)
+	local record: RenderRecord = {
 			model = model,
 			spawnTime = tick(),  -- NEW: Track when model was created
 			entityType = entityTypeName,
@@ -2746,24 +2846,27 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			simSpawnTime = spawnTimeValue,
 			simLifetime = lifetimeSeconds,
 			simSeed = entityData.seed,
+			expectedScale = spawnScale,
+			enemyTier = spawnTier,
+			nextVisualInvariantCheck = 0,
 		}
-		renderedEntities[key] = record
-		recordByModel[model] = record
-		if entityTypeName == "Projectile" then
-			if record.simOrigin and record.simVelocity then
-				record.simType = "Projectile"
-				record.simSpawnTime = record.simSpawnTime or tick()
-			end
-		elseif entityTypeName == "ExpOrb" then
-			if record.simOrigin then
-				record.simType = "ExpOrb"
-				record.simSpawnTime = record.simSpawnTime or tick()
-				record.simSeed = record.simSeed or tonumber(key) or 0
-			end
+	renderedEntities[key] = record
+	recordByModel[model] = record
+	if entityTypeName == "Projectile" then
+		if record.simOrigin and record.simVelocity then
+			record.simType = "Projectile"
+			record.simSpawnTime = record.simSpawnTime or tick()
 		end
-		profInc("visualsCreated", 1)
-		model:SetAttribute("ECS_EntityId", key)
-		model:SetAttribute("ECS_LastUpdate", record.lastUpdate)
+	elseif entityTypeName == "ExpOrb" then
+		if record.simOrigin then
+			record.simType = "ExpOrb"
+			record.simSpawnTime = record.simSpawnTime or tick()
+			record.simSeed = record.simSeed or tonumber(key) or 0
+		end
+	end
+	profInc("visualsCreated", 1)
+	model:SetAttribute("ECS_EntityId", key)
+	model:SetAttribute("ECS_LastUpdate", record.lastUpdate)
 	
 	-- OPTIMIZED: Fade in new enemies from transparent
 	if entityTypeName == "Enemy" then
@@ -3030,6 +3133,21 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 
 	if entityData.EntityType then
 		updateEntityType(record, entityData.EntityType)
+	end
+	if record.entityType == "Enemy" and entityData.EnemyTier then
+		local tierData = entityData.EnemyTier
+		local tier = if typeof(tierData) == "table" then tierData.tier else nil
+		record.enemyTier = tier
+		record.model:SetAttribute("EnemyTier", tier)
+		applyTierOutline(record.model, tier)
+	end
+	if record.entityType == "Enemy" and entityData.Visual and type(entityData.Visual) == "table" then
+		local visualScale = sanitizeEnemyScale(entityData.Visual.scale)
+		record.expectedScale = visualScale
+		record.model:SetAttribute("EnemyExpectedScale", visualScale)
+		pcall(function()
+			record.model:ScaleTo(visualScale)
+		end)
 	end
 
 	-- Handle hit flash VFX
@@ -3626,6 +3744,7 @@ end)
 		if DEBUG_ENEMY_ENTITY_MODEL_COUNTS or (enableInvisibleEnemyDiagnostics and enableInvisibleEnemyDiagnostics.Value) then
 			checkForInvisibleEnemies(now)
 		end
+		emitEnemyVisualHitboxDiagnostics(now)
 	
 	-- Clean up expired hit flashes
 	for model, flashData in pairs(hitFlashHighlights) do
@@ -3840,6 +3959,7 @@ end)
 		
 		-- OPTIMIZED: Handle distance-based fade out/in for enemies (not projectiles)
 		if record.entityType == "Enemy" then
+			ensureEnemyVisualInvariants(record, now)
 			if record.impaleModel and record.impaleFollowPart and record.impaleModel.Parent then
 				pcall(function()
 					local offsetCFrame = record.impaleFollowOffset or CFrame.new()
@@ -4026,7 +4146,7 @@ end)
 end)
 
 local function applyClientSettingsFromAttributes()
-	local renderScale = readNumberAttribute(ATTR_RENDER_SCALE, 1.0, 0.25, 5.00)
+	local renderScale = readEnemyRenderScaleAttribute()
 	applyRenderDistanceScale(renderScale)
 
 	reduceFlashEnabled = readBoolAttribute(ATTR_REDUCE_FLASH, false)
@@ -4037,7 +4157,8 @@ local function applyClientSettingsFromAttributes()
 	end
 end
 
-player:GetAttributeChangedSignal(ATTR_RENDER_SCALE):Connect(applyClientSettingsFromAttributes)
+player:GetAttributeChangedSignal(ATTR_ENEMY_RENDER_SCALE):Connect(applyClientSettingsFromAttributes)
+player:GetAttributeChangedSignal(ATTR_RENDER_SCALE_LEGACY):Connect(applyClientSettingsFromAttributes)
 player:GetAttributeChangedSignal(ATTR_REDUCE_FLASH):Connect(applyClientSettingsFromAttributes)
 applyClientSettingsFromAttributes()
 

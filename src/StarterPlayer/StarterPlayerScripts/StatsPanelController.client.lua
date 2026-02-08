@@ -155,9 +155,8 @@ local function processSnapshot(snapshot: any)
 			handlePlayerEntityData(playerEntityId, resolveEntityData(direct))
 			return
 		end
-		playerEntityId = nil
-		table.clear(playerComponentState)
-		lastCooldownBaseMult = nil
+		-- Keep last known state if this snapshot chunk does not include our entity.
+		-- Some packets are partial and omitting the player should not reset UI stats.
 	end
 
 	for entityId, data in pairs(entities) do
@@ -186,9 +185,8 @@ local function processUpdates(message: any)
 				handlePlayerEntityData(playerEntityId, resolveEntityData(direct))
 				entities = nil
 			else
-				playerEntityId = nil
-				table.clear(playerComponentState)
-				lastCooldownBaseMult = nil
+				-- Partial entity update packet without our entity; keep cached values.
+				-- If our entity id changed (respawn), fallback scanning below will rebind.
 			end
 		else
 			for entityId, data in pairs(entities) do
@@ -460,15 +458,15 @@ end
 
 local function computeTotalSpeedMultiplier(effects: any): number
 	local baseMult = (effects and effects.moveSpeedMultiplier) or 1.0
-	local buffsMult = 1.0
+	local totalBonus = baseMult - 1.0
 	if effects and typeof(effects.activeSpeedBuffs) == "table" then
 		for _, buffData in pairs(effects.activeSpeedBuffs) do
 			if typeof(buffData) == "table" then
-				buffsMult = buffsMult * (buffData.multiplier or 1.0)
+				totalBonus += (buffData.multiplier or 1.0) - 1.0
 			end
 		end
 	end
-	return baseMult * buffsMult
+	return math.max(0, 1.0 + totalBonus)
 end
 
 local function computeAbilityStats(abilityRecord: any, passiveEffects: any, buffState: any): {[string]: any}

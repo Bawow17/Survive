@@ -139,18 +139,15 @@ local function performMagicBoltBurstFromPosition(playerEntity: number, player: P
 		duration = stats.duration,
 		lockDuration = stats.targetLockDuration,
 		reacquireDelay = stats.reacquireDelay,
-		minTargetableAge = stats.minTargetableAge,
+		minTargetableAge = 0,
 		fovAngle = stats.targetingFov,
 		damage = stats.damage,
 		abilityId = MAGIC_BOLT_ID,
+		preferCurrentTarget = false,
+		usePredictedDamage = false,
 	})
 	local created = 0
 	for shotIndex = 1, shots do
-		local targetEntity = targetingResult.targetEntity
-		if targetEntity then
-			TargetingService.recordPredictedDamage(playerEntity, MAGIC_BOLT_ID, targetEntity, stats.damage)
-		end
-
 		local baseDirection = targetingResult.direction
 		if baseDirection.Magnitude == 0 then
 			baseDirection = Vector3.new(0, 0, 1)
@@ -313,8 +310,11 @@ local function handleAfterimageCloneShooting(playerEntity: number, player: Playe
 							enablePrediction = false,
 							projectileSpeed = stats.projectileSpeed,
 							duration = stats.duration,
+							minTargetableAge = 0,
 							damage = stats.damage,
 							abilityId = MAGIC_BOLT_ID,
+							preferCurrentTarget = false,
+							usePredictedDamage = false,
 						})
 
 						if facingResult and facingResult.direction then
