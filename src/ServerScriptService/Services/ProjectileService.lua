@@ -7,7 +7,7 @@ local Workspace = game:GetService("Workspace")
 
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
-local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
 local TargetingService = require(game.ServerScriptService.Abilities.TargetingService)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
@@ -155,9 +155,6 @@ local Collision: any
 local Health: any
 local PlayerStats: any
 local DeathAnimation: any
-local Visual: any
-local EnemyTier: any
-local FacingDirection: any
 
 local playerQuery: any
 
@@ -187,9 +184,11 @@ local RECIPIENT_REFRESH_INTERVAL = 0.5
 local MAX_RECIPIENT_SPAWNS_PER_TICK = 200
 local PETAL_MIN_SEPARATION = 30
 local ENEMY_COLLISION_GRACE_RADIUS = 1.0
+local ENEMY_CANDIDATE_BASE_BUFFER = 30.0
+local ENEMY_CANDIDATE_HORIZONTAL_BUFFER = 18.0
+local DIAGONAL_VERTICAL_DELTA_THRESHOLD = 0.25
 local STAY_HORIZONTAL_TARGET_Y_DIFF = 10.0
 local INVINCIBLE_ENEMY_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.InvincibleEnemyDiagnostics or false
-local ENEMY_VISUAL_HITBOX_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.EnemyVisualHitboxDiagnostics or false
 local INVINCIBLE_DIAG_SAMPLE_LIMIT = 20
 local invincibleDiagCounters = {
 	projectilesTotalSeen = 0,
@@ -219,7 +218,6 @@ local invincibleDiagClosestMissEnemyId = -1
 local invincibleDiagClosestMissKind: string? = nil
 local invincibleDiagClosestMissVerticalDelta = 0
 local invincibleDiagClosestMissHorizontalDelta = 0
-local warnedSuspiciousOffsetBySubtype: {[string]: boolean} = {}
 
 local RAYCAST_PARAMS = RaycastParams.new()
 RAYCAST_PARAMS.FilterType = Enum.RaycastFilterType.Exclude
@@ -265,49 +263,13 @@ local function resetInvincibleEnemyDiagnostics()
 end
 
 local function getEnemyScaleForEntity(enemyId: number): number
-	local scale = 1.0
-	if not world then
-		return scale
-	end
-
-	local visual = Visual and world:get(enemyId, Visual)
-	local rawScale = visual and visual.scale
-	if typeof(rawScale) == "number" and rawScale == rawScale and rawScale > 0 then
-		scale = math.max(scale, math.clamp(rawScale, 0.1, 20.0))
-	end
-
-	local tierData = EnemyTier and world:get(enemyId, EnemyTier)
-	if typeof(tierData) == "table" then
-		local tierScale = tierData.scale
-		if typeof(tierScale) == "number" and tierScale == tierScale and tierScale > 0 then
-			scale = math.max(scale, math.clamp(tierScale, 0.1, 20.0))
-		else
-			local tierName = tierData.tier
-			if tierName == "Super" then
-				scale = math.max(scale, 4.0)
-			elseif tierName == "Elite" then
-				scale = math.max(scale, 7.5)
-			end
-		end
-	end
-
-	return scale
+	return EnemyColliderService.getEffectiveScale(enemyId)
 end
 
 local function getEnemyDebugMeta(enemyId: number): (number, string?, string?)
 	local scale = getEnemyScaleForEntity(enemyId)
-	local subtype: string? = nil
-	local tier: string? = nil
-	if world then
-		local entityType = EntityType and world:get(enemyId, EntityType)
-		if entityType and typeof(entityType.subtype) == "string" then
-			subtype = entityType.subtype
-		end
-		local tierData = EnemyTier and world:get(enemyId, EnemyTier)
-		if tierData and typeof(tierData.tier) == "string" then
-			tier = tierData.tier
-		end
-	end
+	local subtype = EnemyColliderService.getEnemySubtype(enemyId)
+	local tier = EnemyColliderService.getEnemyTier(enemyId)
 	return scale, subtype, tier
 end
 
@@ -616,106 +578,12 @@ local assignments: {[number]: {closest: number?, toughest: number?}} = {}
 	return assignments
 end
 
-local enemyHitboxCache: {[string]: {
-	offset: Vector3,
-	halfExtents: Vector3,
-	rotation: CFrame?,
-	radius: number,
-}} = {}
-
-local function getEnemyFacingOrientation(enemyId: number): CFrame
-	if not world or not FacingDirection then
-		return CFrame.new()
-	end
-	local facing = world:get(enemyId, FacingDirection)
-	if typeof(facing) ~= "table" then
-		return CFrame.new()
-	end
-	local fx = facing.x or facing.X
-	local fz = facing.z or facing.Z
-	if typeof(fx) ~= "number" or typeof(fz) ~= "number" then
-		return CFrame.new()
-	end
-	local dir = Vector3.new(fx, 0, fz)
-	if dir.Magnitude <= 1e-4 then
-		return CFrame.new()
-	end
-	return CFrame.lookAt(Vector3.zero, dir.Unit)
-end
-
 local function getEnemyCollisionCenter(enemyId: number): (Vector3?, number?, Vector3?, CFrame?, Vector3?)
-	if not world then
+	local hitbox = EnemyColliderService.getWorldHitbox(enemyId)
+	if not hitbox then
 		return nil, nil, nil, nil, nil
 	end
-	local pos = world:get(enemyId, Position)
-	if not pos then
-		return nil, nil, nil, nil, nil
-	end
-	local basePos = Vector3.new(pos.x, pos.y, pos.z)
-	local scale = getEnemyScaleForEntity(enemyId)
-	local entityType = world:get(enemyId, EntityType)
-	local subtype = entityType and entityType.subtype
-	local collision = Collision and world:get(enemyId, Collision)
-	local collisionRadius = if collision and collision.radius then collision.radius else nil
-	if subtype then
-		local cached = enemyHitboxCache[subtype]
-		if not cached then
-			local hitbox = ModelReplicationService.getEnemyHitbox(subtype)
-			if not hitbox then
-				ModelReplicationService.replicateEnemy(subtype)
-				hitbox = ModelReplicationService.getEnemyHitbox(subtype)
-			end
-			if hitbox and hitbox.size then
-				local size = hitbox.size
-				local radius = math.max(size.X, size.Y, size.Z) * 0.5
-				cached = {
-					offset = hitbox.offset or Vector3.new(0, 0, 0),
-					halfExtents = size * 0.5,
-					rotation = hitbox.rotation,
-					radius = radius,
-				}
-				enemyHitboxCache[subtype] = cached
-				if ENEMY_VISUAL_HITBOX_DIAGNOSTICS then
-					local halfXZ = math.max(size.X, size.Z) * 0.5
-					local offsetXZ = Vector3.new(cached.offset.X, 0, cached.offset.Z).Magnitude
-					if halfXZ > 0 and offsetXZ > (halfXZ * 1.5) and not warnedSuspiciousOffsetBySubtype[subtype] then
-						warnedSuspiciousOffsetBySubtype[subtype] = true
-						warn(string.format(
-							"[ProjectileService] Suspicious hitbox offset subtype=%s offsetXZ=%.2f halfXZ=%.2f",
-							tostring(subtype),
-							offsetXZ,
-							halfXZ
-						))
-					end
-				end
-			end
-		end
-		if cached then
-			local localRotation = cached.rotation or CFrame.new()
-			local scaledHalfExtents = cached.halfExtents * scale
-			local scaledOffset = Vector3.new(cached.offset.X * scale, cached.offset.Y * scale, cached.offset.Z * scale)
-			local scaledRadius = cached.radius * scale
-			if typeof(collisionRadius) == "number" and collisionRadius > 0 then
-				scaledRadius = math.max(scaledRadius, collisionRadius)
-			end
-			if typeof(collisionRadius) == "number" and collisionRadius > 0 then
-				scaledHalfExtents = Vector3.new(
-					math.max(scaledHalfExtents.X, collisionRadius),
-					math.max(scaledHalfExtents.Y, collisionRadius),
-					math.max(scaledHalfExtents.Z, collisionRadius)
-				)
-			end
-			local center = basePos + scaledOffset
-			local boxCFrame = CFrame.new(center) * localRotation
-			return center, scaledRadius, basePos, boxCFrame, scaledHalfExtents
-		end
-	end
-	local fallbackRadius = 2.5 * scale
-	if typeof(collisionRadius) == "number" and collisionRadius > 0 then
-		fallbackRadius = math.max(collisionRadius, fallbackRadius)
-	end
-	local fallbackHalf = Vector3.new(fallbackRadius, fallbackRadius, fallbackRadius)
-	return basePos, fallbackRadius, basePos, CFrame.new(basePos), fallbackHalf
+	return hitbox.center, hitbox.radius, hitbox.basePos, hitbox.boxCFrame, hitbox.halfExtents
 end
 
 local function closestPointOnSegment(a: Vector3, b: Vector3, p: Vector3): Vector3
@@ -1021,6 +889,57 @@ local function passesRaycastCheck(startPos: Vector3, endPos: Vector3): (boolean,
 	return false, blocker
 end
 
+local function gatherEnemyCollisionCandidates(center: Vector3, radius: number, includeHorizontalFallback: boolean?): {number}
+	local searchRadius = radius + ENEMY_CANDIDATE_BASE_BUFFER
+	local candidates = OctreeSystem.getEnemiesInRadius(center, searchRadius)
+	local dedup: {[number]: boolean} = {}
+	local merged = table.create(#candidates)
+	for _, enemyId in ipairs(candidates) do
+		if not dedup[enemyId] then
+			dedup[enemyId] = true
+			merged[#merged + 1] = enemyId
+		end
+	end
+
+	-- For diagonal travel, supplement octree with a horizontal-distance pass so
+	-- tall enemies are still considered when their base position is far below
+	-- the projectile segment.
+	if includeHorizontalFallback then
+		local horizontalRadius = radius + ENEMY_CANDIDATE_HORIZONTAL_BUFFER
+		local horizontalRadiusSq = horizontalRadius * horizontalRadius
+		for enemyId, entityType, pos in world:query(EntityType, Position) do
+			if entityType and entityType.type == "Enemy" and not dedup[enemyId] then
+				local dx = pos.x - center.X
+				local dz = pos.z - center.Z
+				if (dx * dx + dz * dz) <= horizontalRadiusSq then
+					dedup[enemyId] = true
+					merged[#merged + 1] = enemyId
+				end
+			end
+		end
+	end
+
+	if #merged > 0 then
+		return merged
+	end
+
+	-- Last-resort fallback scan when octree misses due update delay/base-vs-hitbox offset.
+	if not world or not EntityType or not Position then
+		return merged
+	end
+	local fallback = {}
+	local searchSq = searchRadius * searchRadius
+	for enemyId, entityType, pos in world:query(EntityType, Position) do
+		if entityType and entityType.type == "Enemy" then
+			local enemyPos = Vector3.new(pos.x, pos.y, pos.z)
+			if distanceSq(center, enemyPos) <= searchSq then
+				fallback[#fallback + 1] = enemyId
+			end
+		end
+	end
+	return fallback
+end
+
 function ProjectileService.init(worldRef: any, components: any, getPlayerFromEntityFn: (number) -> Player?)
 	world = worldRef
 	Components = components
@@ -1032,9 +951,6 @@ function ProjectileService.init(worldRef: any, components: any, getPlayerFromEnt
 	Health = Components.Health
 	PlayerStats = Components.PlayerStats
 	DeathAnimation = Components.DeathAnimation
-	Visual = Components.Visual
-	EnemyTier = Components.EnemyTier
-	FacingDirection = Components.FacingDirection
 
 	playerQuery = world:query(Components.Position, Components.PlayerStats):cached()
 
@@ -1285,7 +1201,7 @@ local function processExplosions(now: number, hitBudget: number): number
 		elseif now >= explosion.nextTick then
 			local hitAny = false
 			local radius = explosion.radius
-			local candidates = OctreeSystem.getEnemiesInRadius(explosion.position, radius)
+			local candidates = gatherEnemyCollisionCandidates(explosion.position, radius)
 			for _, enemyId in ipairs(candidates) do
 				if hitBudget <= 0 then
 					if INVINCIBLE_ENEMY_DIAGNOSTICS then
@@ -1767,7 +1683,9 @@ function ProjectileService.step(dt: number)
 				end
 			end
 			local segRadius = (segmentStart - segmentEnd).Magnitude * 0.5 + thickness + 6
-			local candidates = OctreeSystem.getEnemiesInRadius(segMid, segRadius)
+			local segmentVerticalDelta = math.abs(segmentEnd.Y - segmentStart.Y)
+			local includeHorizontalFallback = segmentVerticalDelta >= DIAGONAL_VERTICAL_DELTA_THRESHOLD
+			local candidates = gatherEnemyCollisionCandidates(segMid, segRadius, includeHorizontalFallback)
 
 			for _, enemyId in ipairs(candidates) do
 				if collisionChecks >= MAX_COLLISION_CHECKS_PER_TICK or hitBudget <= 0 then
@@ -1798,7 +1716,7 @@ function ProjectileService.step(dt: number)
 					continue
 				end
 				local enemyHealth = world:get(enemyId, Health)
-				local enemyPos, enemyRadiusOverride, enemyBasePos, enemyBoxCFrame, enemyHalfExtents = getEnemyCollisionCenter(enemyId)
+				local enemyPos, enemyRadiusOverride, _, enemyBoxCFrame, enemyHalfExtents = getEnemyCollisionCenter(enemyId)
 				if not enemyPos then
 					continue
 				end
@@ -1812,113 +1730,46 @@ function ProjectileService.step(dt: number)
 				local hitThis = false
 				local hitPosCandidate = enemyPos
 				local raycastTarget = enemyPos
-				if record.beam then
-					local beamLength = (segmentEnd - segmentStart).Magnitude
-					local halfX = record.radius
-					local halfY = record.radius
-					local offset = beamOffset or Vector3.new(0, 0, 0)
-					local halfZ = beamLength * 0.5
-					if beamSize then
-						halfX = beamSize.X * 0.5
-						halfY = beamSize.Y * 0.5
-						halfZ = beamSize.Z * 0.5
-					end
-					local pivot = record.lastPos
-					local cf = CFrame.lookAt(pivot, pivot + record.direction)
-					if beamRotation then
-						cf = cf * beamRotation
-					end
-					local localPos = cf:PointToObjectSpace(enemyPos) - offset
-					local lengthHalf = halfZ
-					local axisHalfA = halfX
-					local axisHalfB = halfY
-					local coordLen = localPos.Z
-					local coordA = localPos.X
-					local coordB = localPos.Y
-					if beamLengthAxis == "X" then
-						lengthHalf = halfX
-						axisHalfA = halfY
-						axisHalfB = halfZ
-						coordLen = localPos.X
-						coordA = localPos.Y
-						coordB = localPos.Z
-					elseif beamLengthAxis == "Y" then
-						lengthHalf = halfY
-						axisHalfA = halfX
-						axisHalfB = halfZ
-						coordLen = localPos.Y
-						coordA = localPos.X
-						coordB = localPos.Z
-					end
-					if math.abs(coordLen) <= (lengthHalf + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS)
-						and math.abs(coordA) <= (axisHalfA + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS)
-						and math.abs(coordB) <= (axisHalfB + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS) then
+				local inflatedBy = thickness + ENEMY_COLLISION_GRACE_RADIUS
+				if enemyBoxCFrame and enemyHalfExtents then
+					local intersects, hitPoint = segmentIntersectsOrientedBox(
+						segmentStart,
+						segmentEnd,
+						enemyBoxCFrame,
+						enemyHalfExtents,
+						inflatedBy
+					)
+					if intersects and hitPoint then
 						hitThis = true
-					end
-					if not hitThis and enemyBasePos then
-						local localBasePos = cf:PointToObjectSpace(enemyBasePos) - offset
-						local baseCoordLen = localBasePos.Z
-						local baseCoordA = localBasePos.X
-						local baseCoordB = localBasePos.Y
-						if beamLengthAxis == "X" then
-							baseCoordLen = localBasePos.X
-							baseCoordA = localBasePos.Y
-							baseCoordB = localBasePos.Z
-						elseif beamLengthAxis == "Y" then
-							baseCoordLen = localBasePos.Y
-							baseCoordA = localBasePos.X
-							baseCoordB = localBasePos.Z
+						hitPosCandidate = hitPoint
+						raycastTarget = enemyPos
+					elseif INVINCIBLE_ENEMY_DIAGNOSTICS then
+						local segClosestToCenter = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
+						local expandedHalf = inflateHalfExtents(enemyHalfExtents, inflatedBy)
+						local missDistSq, _, delta = pointToOrientedBoxDistance(segClosestToCenter, enemyBoxCFrame, expandedHalf)
+						local missGap = math.sqrt(missDistSq)
+						if missGap <= 1 then
+							invincibleDiagCounters.nearMissUnder1Stud += 1
+						elseif missGap <= 3 then
+							invincibleDiagCounters.nearMissUnder3Stud += 1
 						end
-						if math.abs(baseCoordLen) <= (lengthHalf + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS)
-							and math.abs(baseCoordA) <= (axisHalfA + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS)
-							and math.abs(baseCoordB) <= (axisHalfB + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS) then
-							hitThis = true
-							hitPosCandidate = enemyBasePos
-							raycastTarget = enemyBasePos
+						if missGap >= 0 and missGap < invincibleDiagClosestMissGap then
+							invincibleDiagClosestMissGap = missGap
+							invincibleDiagClosestMissProjectileId = record.id
+							invincibleDiagClosestMissEnemyId = enemyId
+							invincibleDiagClosestMissKind = record.kind
+							invincibleDiagClosestMissVerticalDelta = math.abs(delta.Y)
+							invincibleDiagClosestMissHorizontalDelta = Vector3.new(delta.X, 0, delta.Z).Magnitude
 						end
 					end
 				else
-					local inflatedBy = record.radius + ENEMY_COLLISION_GRACE_RADIUS
-					if enemyBoxCFrame and enemyHalfExtents then
-						local intersects, hitPoint = segmentIntersectsOrientedBox(
-							segmentStart,
-							segmentEnd,
-							enemyBoxCFrame,
-							enemyHalfExtents,
-							inflatedBy
-						)
-						if intersects and hitPoint then
-							hitThis = true
-							hitPosCandidate = hitPoint
-							raycastTarget = enemyPos
-						elseif INVINCIBLE_ENEMY_DIAGNOSTICS then
-							local segClosestToCenter = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
-							local expandedHalf = inflateHalfExtents(enemyHalfExtents, inflatedBy)
-							local missDistSq, _, delta = pointToOrientedBoxDistance(segClosestToCenter, enemyBoxCFrame, expandedHalf)
-							local missGap = math.sqrt(missDistSq)
-							if missGap <= 1 then
-								invincibleDiagCounters.nearMissUnder1Stud += 1
-							elseif missGap <= 3 then
-								invincibleDiagCounters.nearMissUnder3Stud += 1
-							end
-							if missGap >= 0 and missGap < invincibleDiagClosestMissGap then
-								invincibleDiagClosestMissGap = missGap
-								invincibleDiagClosestMissProjectileId = record.id
-								invincibleDiagClosestMissEnemyId = enemyId
-								invincibleDiagClosestMissKind = record.kind
-								invincibleDiagClosestMissVerticalDelta = math.abs(delta.Y)
-								invincibleDiagClosestMissHorizontalDelta = Vector3.new(delta.X, 0, delta.Z).Magnitude
-							end
-						end
-					else
-						local centerClosest = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
-						local centerDistSq = distanceSq(centerClosest, enemyPos)
-						local hitRadius = record.radius + enemyRadius + ENEMY_COLLISION_GRACE_RADIUS
-						if centerDistSq <= hitRadius * hitRadius then
-							hitThis = true
-							hitPosCandidate = centerClosest
-							raycastTarget = enemyPos
-						end
+					local centerClosest = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
+					local centerDistSq = distanceSq(centerClosest, enemyPos)
+					local hitRadius = inflatedBy + enemyRadius
+					if centerDistSq <= hitRadius * hitRadius then
+						hitThis = true
+						hitPosCandidate = centerClosest
+						raycastTarget = enemyPos
 					end
 				end
 

@@ -27,6 +27,8 @@ local ProjectilePool = require(game.ServerScriptService.ECS.ProjectilePool)
 local ExpOrbPool = require(game.ServerScriptService.ECS.ExpOrbPool)
 local EnemyPool = require(game.ServerScriptService.ECS.EnemyPool)
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
+local EnemyColliderOverlayService = require(game.ServerScriptService.Services.EnemyColliderOverlayService)
 local MovementSystem = require(game.ServerScriptService.ECS.Systems.MovementSystem)
 local LifetimeSystem = require(game.ServerScriptService.ECS.Systems.LifetimeSystem)
 local SyncSystem = require(game.ServerScriptService.ECS.Systems.SyncSystem)
@@ -52,6 +54,7 @@ local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 local INVINCIBLE_ENEMY_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.InvincibleEnemyDiagnostics or false
 local ENEMY_VISUAL_HITBOX_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.EnemyVisualHitboxDiagnostics or false
+local ENEMY_COLLIDER_OVERLAY = GameOptions.Debug and GameOptions.Debug.EnemyColliderOverlay or false
 
 -- Ability Registry - Auto-discovers and loads all abilities
 local AbilityRegistry = require(game.ServerScriptService.Abilities.AbilityRegistry)
@@ -228,6 +231,18 @@ function ECSWorldService.Initialize()
 	end
 	enemyVisualHitboxDiagFlag.Value = ENEMY_VISUAL_HITBOX_DIAGNOSTICS
 
+	local enemyColliderOverlayFlag = debugFlags:FindFirstChild("EnemyColliderOverlay")
+	if not enemyColliderOverlayFlag or not enemyColliderOverlayFlag:IsA("BoolValue") then
+		if enemyColliderOverlayFlag then
+			enemyColliderOverlayFlag:Destroy()
+		end
+		enemyColliderOverlayFlag = Instance.new("BoolValue")
+		enemyColliderOverlayFlag.Name = "EnemyColliderOverlay"
+		enemyColliderOverlayFlag.Parent = debugFlags
+	end
+	enemyColliderOverlayFlag.Value = ENEMY_COLLIDER_OVERLAY
+	enemyColliderOverlayDebugFlag = enemyColliderOverlayFlag
+
 	local projectileRemotesFolder = remotesFolder:FindFirstChild("Projectiles")
 	if projectileRemotesFolder and not projectileRemotesFolder:IsA("Folder") then
 		projectileRemotesFolder:Destroy()
@@ -245,6 +260,8 @@ function ECSWorldService.Initialize()
 	-- Initialize model replication first (clones models from ServerStorage to ReplicatedStorage)
 	ModelReplicationService.init()
 	ModelReplicationService.replicateExpOrb()
+	EnemyColliderService.init(world, Components)
+	EnemyColliderOverlayService.init(world, Components)
 	
 	-- Initialize seeded chunk world generation before gameplay systems depend on spawn/terrain.
 	ChunkGenerationService.init()
@@ -1173,6 +1190,7 @@ local lastTimerSync = 0
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local lastInvincibleDiagReport = 0
 local lastEnemyVisualHitboxDiagReport = 0
+local enemyColliderOverlayDebugFlag: BoolValue? = nil
 
 -- StepWorld debug throttle
 local lastStepWorldDebug = 0
@@ -1317,6 +1335,13 @@ local function emitEnemyVisualHitboxDiagnostics(now: number)
 	end
 end
 
+local function isEnemyColliderOverlayEnabled(): boolean
+	if enemyColliderOverlayDebugFlag and enemyColliderOverlayDebugFlag.Parent then
+		return enemyColliderOverlayDebugFlag.Value == true
+	end
+	return ENEMY_COLLIDER_OVERLAY
+end
+
 local function stepWorld(dt: number)
 	-- Debug: Log that stepWorld is running
 	local now = tick()
@@ -1330,6 +1355,7 @@ local function stepWorld(dt: number)
 		debug.profileend()
 		emitInvincibleEnemyDiagnostics(now)
 		emitEnemyVisualHitboxDiagnostics(now)
+		EnemyColliderOverlayService.step(dt, isEnemyColliderOverlayEnabled())
 		return
 	end
 	
@@ -1500,6 +1526,16 @@ local function stepWorld(dt: number)
 	MagnetPullSystem.step(dt)
 	debug.profileend()
 
+	-- Core simulation systems (after homing/magnet so movement uses updated velocities)
+	debug.profilebegin("Movement")
+	MovementSystem.step(dt)
+	debug.profileend()
+
+	-- Refresh octree after movement so projectile collision queries use up-to-date enemy positions.
+	debug.profilebegin("OctreePostMove")
+	OctreeSystem.updateEnemyPositions()
+	debug.profileend()
+
 	-- Record-based projectile simulation (no ECS entities)
 	debug.profilebegin("ProjectileService")
 	ProjectileService.step(dt)
@@ -1514,11 +1550,6 @@ local function stepWorld(dt: number)
 		warnedActiveEcsProjectiles = true
 		warn("[Bootstrap] ECS projectiles detected after record migration; check for legacy spawns.")
 	end
-
-	-- Core simulation systems (after homing/magnet so movement uses updated velocities)
-	debug.profilebegin("Movement")
-	MovementSystem.step(dt)
-	debug.profileend()
 
 	-- Combat systems (hit feedback, knockback, death animations)
 	debug.profilebegin("HitFlash")
@@ -1588,6 +1619,7 @@ local function stepWorld(dt: number)
 
 	emitInvincibleEnemyDiagnostics(tick())
 	emitEnemyVisualHitboxDiagnostics(tick())
+	EnemyColliderOverlayService.step(dt, isEnemyColliderOverlayEnabled())
 end
 
 RunService.Heartbeat:Connect(stepWorld)

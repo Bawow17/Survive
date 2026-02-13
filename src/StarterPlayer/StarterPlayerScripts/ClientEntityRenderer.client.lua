@@ -58,7 +58,7 @@ local EntityDespawn = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChil
 local RequestInitialSync = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):WaitForChild("RequestInitialSync")
 
 local INTERPOLATION_WINDOW = 0.25 -- default window for slow movement
-local ENEMY_INTERPOLATION_WINDOW = 0.12 -- linear interpolation window for enemies
+local ENEMY_INTERPOLATION_WINDOW = 0.08 -- tighter interpolation to reduce perceived server-hitbox lead/lag
 local FAST_MOVEMENT_INTERPOLATION_WINDOW = 0.1 -- smoother window for high-speed enemies (dashing)
 local FAST_MOVEMENT_THRESHOLD = 20 -- studs/sec; lowered from 40 to 20 for tighter interpolation
 local HARD_SNAP_THRESHOLD = 30 -- studs; if delta exceeds this, snap immediately (reduced from 50 to prevent teleporting)

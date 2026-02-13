@@ -39,6 +39,7 @@ return {
 	-- Spawn configuration
 	spawnOffset = Vector3.new(0, 0, 0),
 	scale = 1,
+	beamLengthAxis = "Z",
 	
 	-- Multi-shot configuration
 	projectileCount = 1,

@@ -111,6 +111,11 @@ end
 
 local function getBeamSize(stats: any, fallbackLength: number): (Vector3, Vector3, CFrame?, string)
 	local scale = stats.scale or 1
+	local configuredAxis = stats.beamLengthAxis
+	local forcedAxis: string? = nil
+	if configuredAxis == "X" or configuredAxis == "Y" or configuredAxis == "Z" then
+		forcedAxis = configuredAxis
+	end
 	local hitboxSize, hitboxOffset, hitboxRotation = ModelHitboxHelper.getModelHitboxTransform(Balance.modelPath)
 	if not hitboxSize and typeof(Balance.modelPath) == "string" then
 		local serverPath = Balance.modelPath:gsub("^ReplicatedStorage%.", "ServerStorage.")
@@ -122,16 +127,18 @@ local function getBeamSize(stats: any, fallbackLength: number): (Vector3, Vector
 	if hitboxSize then
 		local size = Vector3.new(hitboxSize.X * scale, hitboxSize.Y * scale, hitboxSize.Z * scale)
 		local offset = (hitboxOffset or Vector3.new(0, 0, 0)) * scale
-		local axis = "Z"
-		if size.X >= size.Y and size.X >= size.Z then
-			axis = "X"
-		elseif size.Y >= size.X and size.Y >= size.Z then
-			axis = "Y"
+		local axis = forcedAxis or "Z"
+		if not forcedAxis then
+			if size.X >= size.Y and size.X >= size.Z then
+				axis = "X"
+			elseif size.Y >= size.X and size.Y >= size.Z then
+				axis = "Y"
+			end
 		end
 		return size, offset, hitboxRotation, axis
 	end
 
-	return Vector3.new(2 * scale, 2 * scale, fallbackLength), Vector3.new(0, 0, 0), nil, "Z"
+	return Vector3.new(2 * scale, 2 * scale, fallbackLength), Vector3.new(0, 0, 0), nil, forcedAxis or "Z"
 end
 
 

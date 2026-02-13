@@ -6,7 +6,7 @@ local TargetingService = {}
 
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
-local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 
 local world: any
@@ -17,7 +17,6 @@ local enemyFallbackQuery: any
 
 local GRID_SIZE = SpatialGridSystem.getGridSize()
 local INVINCIBLE_ENEMY_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.InvincibleEnemyDiagnostics or false
-local ENEMY_VISUAL_HITBOX_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.EnemyVisualHitboxDiagnostics or false
 local targetingDiagCounters = {
 	acquireCalls = 0,
 	candidatesFromGridScanned = 0,
@@ -58,13 +57,6 @@ local targetLockUntil: {[string]: number} = {}
 local pendingSwitchUntil: {[string]: number} = {}
 local pendingTargetId: {[string]: number} = {}
 
--- Cached enemy hitbox transform data by subtype.
-local hitboxBySubtype: {[string]: {
-	offset: Vector3,
-	radius: number,
-}} = {}
-local warnedSuspiciousOffsetBySubtype: {[string]: boolean} = {}
-
 local function keyFor(playerEntity: number, abilityId: string?): string
 	return tostring(playerEntity) .. ":" .. tostring(abilityId or "default")
 end
@@ -75,40 +67,6 @@ function TargetingService.init(worldRef: any, components: any, enemyRegistry: an
 	EnemyRegistry = enemyRegistry
 	ModelHitboxHelper = hitboxHelper
 	enemyFallbackQuery = world:query(Components.EntityType, Components.Position, Components.Health):cached()
-
-	table.clear(hitboxBySubtype)
-	table.clear(warnedSuspiciousOffsetBySubtype)
-	if EnemyRegistry then
-		for enemyId in pairs(EnemyRegistry.getAll()) do
-			local replicatedHitbox = ModelReplicationService.getEnemyHitbox(enemyId)
-			if not replicatedHitbox then
-				ModelReplicationService.replicateEnemy(enemyId)
-				replicatedHitbox = ModelReplicationService.getEnemyHitbox(enemyId)
-			end
-			if replicatedHitbox and replicatedHitbox.size then
-				local size = replicatedHitbox.size
-				local offset = replicatedHitbox.offset or Vector3.new(0, 0, 0)
-				local radius = math.max(size.X, size.Y, size.Z) * 0.5
-				hitboxBySubtype[enemyId] = {
-					offset = offset,
-					radius = radius,
-				}
-				if ENEMY_VISUAL_HITBOX_DIAGNOSTICS then
-					local halfXZ = math.max(size.X, size.Z) * 0.5
-					local offsetXZ = Vector3.new(offset.X, 0, offset.Z).Magnitude
-					if halfXZ > 0 and offsetXZ > (halfXZ * 1.5) and not warnedSuspiciousOffsetBySubtype[enemyId] then
-						warnedSuspiciousOffsetBySubtype[enemyId] = true
-						warn(string.format(
-							"[TargetingService] Suspicious hitbox offset subtype=%s offsetXZ=%.2f halfXZ=%.2f",
-							tostring(enemyId),
-							offsetXZ,
-							halfXZ
-						))
-					end
-				end
-			end
-		end
-	end
 end
 
 local function cleanupStalePredictions()
@@ -216,97 +174,6 @@ local function gatherFallbackEnemyCandidates(): {number}
 	return candidates
 end
 
-local function getCachedHitboxForSubtype(subtype: string?): {offset: Vector3, radius: number}?
-	if not subtype or subtype == "" then
-		return nil
-	end
-	local cached = hitboxBySubtype[subtype]
-	if cached then
-		return cached
-	end
-
-	local replicatedHitbox = ModelReplicationService.getEnemyHitbox(subtype)
-	if not replicatedHitbox then
-		ModelReplicationService.replicateEnemy(subtype)
-		replicatedHitbox = ModelReplicationService.getEnemyHitbox(subtype)
-	end
-	if not replicatedHitbox or not replicatedHitbox.size then
-		return nil
-	end
-
-	local size = replicatedHitbox.size
-	local offset = replicatedHitbox.offset or Vector3.new(0, 0, 0)
-	cached = {
-		offset = offset,
-		radius = math.max(size.X, size.Y, size.Z) * 0.5,
-	}
-	hitboxBySubtype[subtype] = cached
-	if ENEMY_VISUAL_HITBOX_DIAGNOSTICS then
-		local halfXZ = math.max(size.X, size.Z) * 0.5
-		local offsetXZ = Vector3.new(offset.X, 0, offset.Z).Magnitude
-		if halfXZ > 0 and offsetXZ > (halfXZ * 1.5) and not warnedSuspiciousOffsetBySubtype[subtype] then
-			warnedSuspiciousOffsetBySubtype[subtype] = true
-			warn(string.format(
-				"[TargetingService] Suspicious hitbox offset subtype=%s offsetXZ=%.2f halfXZ=%.2f",
-				tostring(subtype),
-				offsetXZ,
-				halfXZ
-			))
-		end
-	end
-	return cached
-end
-
-local function getEnemyFacingOrientation(enemyEntity: number): CFrame
-	if not world or not Components or not Components.FacingDirection then
-		return CFrame.new()
-	end
-	local facing = world:get(enemyEntity, Components.FacingDirection)
-	if typeof(facing) ~= "table" then
-		return CFrame.new()
-	end
-	local fx = facing.x or facing.X
-	local fz = facing.z or facing.Z
-	if typeof(fx) ~= "number" or typeof(fz) ~= "number" then
-		return CFrame.new()
-	end
-	local dir = Vector3.new(fx, 0, fz)
-	if dir.Magnitude <= 1e-4 then
-		return CFrame.new()
-	end
-	return CFrame.lookAt(Vector3.zero, dir.Unit)
-end
-
-local function getEnemyScale(enemyEntity: number): number
-	local scale = 1.0
-	if not world or not Components then
-		return scale
-	end
-
-	local visual = Components.Visual and world:get(enemyEntity, Components.Visual)
-	local visualScale = visual and visual.scale
-	if typeof(visualScale) == "number" and visualScale == visualScale and visualScale > 0 then
-		scale = math.max(scale, math.clamp(visualScale, 0.1, 20.0))
-	end
-
-	local tierData = Components.EnemyTier and world:get(enemyEntity, Components.EnemyTier)
-	if typeof(tierData) == "table" then
-		local tierScale = tierData.scale
-		if typeof(tierScale) == "number" and tierScale == tierScale and tierScale > 0 then
-			scale = math.max(scale, math.clamp(tierScale, 0.1, 20.0))
-		else
-			local tierName = tierData.tier
-			if tierName == "Super" then
-				scale = math.max(scale, 4.0)
-			elseif tierName == "Elite" then
-				scale = math.max(scale, 7.5)
-			end
-		end
-	end
-
-	return scale
-end
-
 local function getEnemyAimPoint(enemyEntity: number): (Vector3?, any?, any?, any?, number?)
 	if not world or not Components then
 		return nil, nil, nil, nil, nil
@@ -317,28 +184,11 @@ local function getEnemyAimPoint(enemyEntity: number): (Vector3?, any?, any?, any
 	end
 	local base = Vector3.new(pos.x, pos.y, pos.z)
 	local entityType = world:get(enemyEntity, Components.EntityType)
-	local subtype = entityType and entityType.subtype
-	local scale = getEnemyScale(enemyEntity)
-	local hitbox = getCachedHitboxForSubtype(subtype)
-	local scaledOffset: Vector3? = nil
-	local enemyRadius = if hitbox then (hitbox.radius * scale) else nil
-	if hitbox then
-		scaledOffset = Vector3.new(hitbox.offset.X * scale, hitbox.offset.Y * scale, hitbox.offset.Z * scale)
+	local collider = EnemyColliderService.getWorldHitbox(enemyEntity)
+	if collider then
+		return collider.center, entityType, collider.center - base, base, collider.radius
 	end
-	if Components.Collision then
-		local collision = world:get(enemyEntity, Components.Collision)
-		if collision and collision.radius then
-			if enemyRadius then
-				enemyRadius = math.max(enemyRadius, collision.radius)
-			else
-				enemyRadius = collision.radius
-			end
-		end
-	end
-	if scaledOffset then
-		return base + scaledOffset, entityType, scaledOffset, base, enemyRadius
-	end
-	return base, entityType, nil, base, enemyRadius
+	return base, entityType, nil, base, nil
 end
 
 function TargetingService.getEnemyAimPoint(enemyEntity: number): Vector3?
@@ -615,30 +465,16 @@ function TargetingService.acquireTarget(ctx: any): {targetEntity: number?, aimPo
 	local targetChosenFromFallback = false
 	local function acquireFromRange(searchRange: number): (number?, Vector3?, boolean)
 		local gridCandidates = gatherGridEnemyCandidates(origin, searchRange)
-		local bestEntity, bestAim, bestDist = pickBestTargetFromCandidates(ctx, origin, searchRange, gridCandidates)
-
-		local shouldCompareFallback = (ctx.preferCurrentTarget == false)
-		if (not bestEntity) or shouldCompareFallback then
-			local fallbackCandidates = gatherFallbackEnemyCandidates()
-			if #fallbackCandidates > 0 then
-				local fallbackEntity, fallbackAim, fallbackDist = pickBestTargetFromCandidates(ctx, origin, searchRange, fallbackCandidates)
-				if fallbackEntity and fallbackAim then
-					if not bestEntity then
-						return fallbackEntity, fallbackAim, true
-					end
-					if fallbackDist and bestDist then
-						if (fallbackDist + 1e-4) < bestDist then
-							return fallbackEntity, fallbackAim, true
-						end
-						if math.abs(fallbackDist - bestDist) <= 1e-4 and fallbackEntity < bestEntity then
-							return fallbackEntity, fallbackAim, true
-						end
-					end
-				end
-			end
-		end
+		local bestEntity, bestAim = pickBestTargetFromCandidates(ctx, origin, searchRange, gridCandidates)
 		if bestEntity and bestAim then
 			return bestEntity, bestAim, false
+		end
+		local fallbackCandidates = gatherFallbackEnemyCandidates()
+		if #fallbackCandidates > 0 then
+			local fallbackEntity, fallbackAim = pickBestTargetFromCandidates(ctx, origin, searchRange, fallbackCandidates)
+			if fallbackEntity and fallbackAim then
+				return fallbackEntity, fallbackAim, true
+			end
 		end
 		return nil, nil, false
 	end

@@ -15,9 +15,10 @@ return {
 	
 	-- Debug toggles (extra logs/asserts should be gated here)
 	Debug = {
-		Enabled = false,
-		InvincibleEnemyDiagnostics = true,
-		EnemyVisualHitboxDiagnostics = false,
+		Enabled = true,
+		InvincibleEnemyDiagnostics = false,
+		EnemyVisualHitboxDiagnostics = true,
+		EnemyColliderOverlay = true,
 		LastHitDamageDiagnostics = false,
 		ModMenu = {
 			AllowedUserIds = {},

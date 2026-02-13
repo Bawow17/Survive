@@ -11,6 +11,7 @@ local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSyst
 local EnemyRegistry = require(game.ServerScriptService.Enemies.EnemyRegistry)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
+local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -78,8 +79,6 @@ local GROUND_RAYCAST_DOWN = 600
 local MAX_GROUND_DELTA_FROM_PLAYER_Y = 80
 local MAX_CANOPY_DELTA_FROM_PLAYER_Y = 40
 local MAX_SPAWN_HEIGHT_OFFSET = 12
-
-local enemySpawnHeightOffsetCache: {[string]: number} = {}
 
 -- RNG for enemy type selection
 local enemyTypeRNG = Random.new()
@@ -264,7 +263,6 @@ function EnemySpawner.init(worldRef: any, components: any, ecsWorldService: any,
 	Components = components
 	ECSWorldService = ecsWorldService
 	ModelReplicationService = modelReplicationService
-	table.clear(enemySpawnHeightOffsetCache)
 
 	PlayerStats = Components.PlayerStats
 	Position = Components.Position
@@ -314,36 +312,7 @@ local function getGroundedPosition(position: Vector3, heightOffset: number): Vec
 end
 
 local function getEnemySpawnHeightOffset(enemyType: string, scale: number?): number
-	local subtype = if typeof(enemyType) == "string" and enemyType ~= "" then enemyType else "Zombie"
-	local safeScale = 1.0
-	if typeof(scale) == "number" and scale == scale and scale > 0 then
-		safeScale = math.clamp(scale, 0.1, 20.0)
-	end
-	local scaleBucket = math.floor(safeScale * 100 + 0.5)
-	local cacheKey = string.format("%s@%d", subtype, scaleBucket)
-	local cached = enemySpawnHeightOffsetCache[cacheKey]
-	if cached then
-		return cached
-	end
-
-	local spawnOffset = SPAWN_GROUND_CLEARANCE
-	if ModelReplicationService then
-		local hitbox = ModelReplicationService.getEnemyHitbox(subtype)
-		if not hitbox then
-			ModelReplicationService.replicateEnemy(subtype)
-			hitbox = ModelReplicationService.getEnemyHitbox(subtype)
-		end
-		if hitbox and hitbox.size then
-			local scaledOffsetY = (hitbox.offset and hitbox.offset.Y or 0) * safeScale
-			local scaledSizeY = hitbox.size.Y * safeScale
-			-- Keep Position as model pivot, while hitbox bottom sits on the ground surface.
-			spawnOffset = SPAWN_GROUND_CLEARANCE - scaledOffsetY + (scaledSizeY * 0.5)
-			spawnOffset = math.clamp(spawnOffset, 0, MAX_SPAWN_HEIGHT_OFFSET)
-		end
-	end
-
-	enemySpawnHeightOffsetCache[cacheKey] = spawnOffset
-	return spawnOffset
+	return EnemyColliderService.getGroundSnapOffsetForSubtype(enemyType, scale, SPAWN_GROUND_CLEARANCE, MAX_SPAWN_HEIGHT_OFFSET)
 end
 
 local function adjustSpawnHeightForEnemy(groundedPos: Vector3, enemyType: string, scale: number?): Vector3

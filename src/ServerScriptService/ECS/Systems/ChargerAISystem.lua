@@ -6,8 +6,8 @@
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
-local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local ObstacleRaycastCache = require(game.ServerScriptService.ECS.Systems.ObstacleRaycastCache)
+local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -37,8 +37,6 @@ local FacingDirection
 local _EntityTypeComponent
 local _Target
 local _PlayerStats
-local _Visual
-local _EnemyTier
 
 -- State constants
 local S_APPROACH = 1
@@ -100,47 +98,7 @@ local pausedPlayerEnemies: {[number]: {
 
 -- Helper function to get attack range from Attackbox part size
 local function getAttackRangeFromAttackbox(enemyEntity: number): number
-	if not world then
-		return 3.5 -- Default attack range (fallback)
-	end
-	
-	local entityType = world:get(enemyEntity, _EntityTypeComponent)
-	local enemyType = entityType and entityType.subtype or "Charger"
-
-	local attackboxData = ModelReplicationService.getEnemyAttackbox(enemyType)
-	if not attackboxData then
-		ModelReplicationService.replicateEnemy(enemyType)
-		attackboxData = ModelReplicationService.getEnemyAttackbox(enemyType)
-	end
-
-	if not attackboxData or not attackboxData.size then
-		return 3.5 -- Default if no attackbox found
-	end
-
-	local attackboxSize = attackboxData.size
-	local maxDimension = math.max(attackboxSize.X, attackboxSize.Z)
-
-	-- Scale attack range with enemy size (Super/Elite) so melee reach matches visuals.
-	local scale = 1.0
-	local visual = _Visual and world:get(enemyEntity, _Visual)
-	local rawScale = visual and visual.scale
-	if typeof(rawScale) == "number" and rawScale == rawScale and rawScale > 0 then
-		scale = math.max(scale, math.clamp(rawScale, 0.1, 20.0))
-	end
-	local tierData = _EnemyTier and world:get(enemyEntity, _EnemyTier)
-	if typeof(tierData) == "table" then
-		local tierScale = tierData.scale
-		if typeof(tierScale) == "number" and tierScale == tierScale and tierScale > 0 then
-			scale = math.max(scale, math.clamp(tierScale, 0.1, 20.0))
-		elseif tierData.tier == "Super" then
-			scale = math.max(scale, 4.0)
-		elseif tierData.tier == "Elite" then
-			scale = math.max(scale, 7.5)
-		end
-	end
-	
-	-- Add a small buffer (0.5 studs) to ensure reliable contact detection
-	return (maxDimension * scale) + 0.5
+	return EnemyColliderService.getScaledAttackRange(enemyEntity, 0.5)
 end
 
 -- Helper function to find nearest non-paused player
@@ -286,8 +244,6 @@ function ChargerAISystem.init(worldRef: any, components: any, dirtyService: any)
 	_EntityTypeComponent = Components.EntityType
 	_Target = Components.Target
 	_PlayerStats = Components.PlayerStats
-	_Visual = Components.Visual
-	_EnemyTier = Components.EnemyTier
 	
 	-- Create cached queries for performance (JECS best practice)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing
