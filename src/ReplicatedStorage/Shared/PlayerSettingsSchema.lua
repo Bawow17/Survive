@@ -17,6 +17,7 @@ export type SettingsV1 = {
 	},
 	controls: {
 		settingsHotkeyEnabled: boolean,
+		toggleSprintMode: boolean,
 	},
 }
 
@@ -37,6 +38,7 @@ local DEFAULTS: SettingsV1 = {
 	},
 	controls = {
 		settingsHotkeyEnabled = true,
+		toggleSprintMode = true,
 	},
 }
 
@@ -99,6 +101,7 @@ local function sanitizeInternal(raw: any): SettingsV1
 		},
 		controls = {
 			settingsHotkeyEnabled = asBoolean(controls.settingsHotkeyEnabled, DEFAULTS.controls.settingsHotkeyEnabled),
+			toggleSprintMode = asBoolean(controls.toggleSprintMode, DEFAULTS.controls.toggleSprintMode),
 		},
 	}
 end
@@ -145,6 +148,9 @@ local function mergeKnown(base: SettingsV1, patch: any): SettingsV1
 		local incoming = patch.controls
 		if incoming.settingsHotkeyEnabled ~= nil then
 			merged.controls.settingsHotkeyEnabled = incoming.settingsHotkeyEnabled
+		end
+		if incoming.toggleSprintMode ~= nil then
+			merged.controls.toggleSprintMode = incoming.toggleSprintMode
 		end
 	end
 

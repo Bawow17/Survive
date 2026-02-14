@@ -12,7 +12,7 @@ local replicatedModels: {[string]: boolean} = {}
 
 -- Cache of enemy hitbox data by type: { [enemyType]: { size: Vector3, offset: Vector3 } }
 local enemyHitboxData: {[string]: {size: Vector3, offset: Vector3, rotation: CFrame?}} = {}
-local enemyAttackboxData: {[string]: {size: Vector3, offset: Vector3}} = {}
+local enemyAttackboxData: {[string]: {size: Vector3, offset: Vector3, rotation: CFrame?}} = {}
 
 local function findNamedPart(model: Model, name: string): BasePart?
 	local exact = model:FindFirstChild(name, true)
@@ -92,16 +92,19 @@ local function computeHitboxData(model: Model): {size: Vector3, offset: Vector3,
 	}
 end
 
-local function computeAttackboxData(model: Model): {size: Vector3, offset: Vector3}?
+local function computeAttackboxData(model: Model): {size: Vector3, offset: Vector3, rotation: CFrame?}?
 	local attackbox = findNamedPart(model, "Attackbox")
 	if not attackbox then
 		return nil
 	end
 
 	local pivot = model:GetPivot()
+	local localCf = pivot:ToObjectSpace(attackbox.CFrame)
+	local rotation = CFrame.fromMatrix(Vector3.new(0, 0, 0), localCf.RightVector, localCf.UpVector, localCf.LookVector)
 	return {
 		size = attackbox.Size,
-		offset = attackbox.Position - pivot.Position,
+		offset = localCf.Position,
+		rotation = rotation,
 	}
 end
 
@@ -276,7 +279,7 @@ function ModelReplicationService.getEnemyHitbox(enemyType: string): {size: Vecto
 	return enemyHitboxData[enemyType]
 end
 
-function ModelReplicationService.getEnemyAttackbox(enemyType: string): {size: Vector3, offset: Vector3}?
+function ModelReplicationService.getEnemyAttackbox(enemyType: string): {size: Vector3, offset: Vector3, rotation: CFrame?}?
 	return enemyAttackboxData[enemyType]
 end
 

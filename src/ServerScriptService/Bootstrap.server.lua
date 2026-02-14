@@ -202,6 +202,8 @@ function ECSWorldService.Initialize()
 	ensureRemoteEvent(remotesFolder, "PlayerBodyFade")
 	ensureRemoteEvent(remotesFolder, "SessionTimerUpdate")
 	ensureRemoteEvent(remotesFolder, "PlayerBodyRestore")
+	ensureRemoteEvent(remotesFolder, "PlayerHitMarker")
+	ensureRemoteEvent(remotesFolder, "SprintState")
 
 	local debugFlags = ReplicatedStorage:FindFirstChild("DebugFlags")
 	if not debugFlags then
@@ -1142,6 +1144,9 @@ function ECSWorldService.DestroyEntity(entity: number)
 			break
 		end
 	end
+	if PassiveEffectSystem.clearSprintIntent then
+		PassiveEffectSystem.clearSprintIntent(entity)
+	end
 	activeEntities[entity] = nil
 	SyncSystem.queueDespawn(entity)
 	ZombieAISystem.cleanupEntity(entity)
@@ -1692,6 +1697,29 @@ end)
 
 -- Death system - Spectator controls
 local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
+local SprintStateRemote = remotes:FindFirstChild("SprintState")
+if not SprintStateRemote or not SprintStateRemote:IsA("RemoteEvent") then
+	if SprintStateRemote then
+		SprintStateRemote:Destroy()
+	end
+	SprintStateRemote = Instance.new("RemoteEvent")
+	SprintStateRemote.Name = "SprintState"
+	SprintStateRemote.Parent = remotes
+end
+
+SprintStateRemote.OnServerEvent:Connect(function(player: Player, isSprintIntent: any)
+	if typeof(isSprintIntent) ~= "boolean" then
+		return
+	end
+	local playerEntity = playerEntities[player]
+	if not playerEntity then
+		return
+	end
+	if PassiveEffectSystem.setSprintIntent then
+		PassiveEffectSystem.setSprintIntent(playerEntity, isSprintIntent)
+	end
+end)
+
 local ChangeSpectatorTarget = remotes:FindFirstChild("ChangeSpectatorTarget")
 if not ChangeSpectatorTarget then
 	ChangeSpectatorTarget = Instance.new("RemoteEvent")

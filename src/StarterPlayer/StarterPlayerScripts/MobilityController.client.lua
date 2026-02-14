@@ -1,6 +1,6 @@
 --!strict
 -- MobilityController - Client-side mobility ability activation (Dash, Double Jump)
--- Handles Q keybind, client-predicted movement, and server communication
+-- Handles Shift/Space keybinds, client-predicted movement, and server communication
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -9,6 +9,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
 
 local TweenService = game:GetService("TweenService")
+
+local MOBILITY_KEY = Enum.KeyCode.LeftShift
+local DOUBLE_JUMP_ALT_KEY = Enum.KeyCode.Space
 
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
@@ -2316,8 +2319,8 @@ local function executeManaGrapple()
 	return true
 end
 
--- Handle Q key press
-local function onQKeyPressed()
+-- Handle mobility key press
+local function onMobilityKeyPressed()
 	-- Don't allow mobility while paused
 	if isPaused then
 		return
@@ -2340,14 +2343,20 @@ local function onQKeyPressed()
 	end
 end
 
--- Listen for Q key input
+-- Listen for mobility key input
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then
 		return
 	end
 	
-	if input.KeyCode == Enum.KeyCode.Q then
-		onQKeyPressed()
+	if input.KeyCode == MOBILITY_KEY then
+		onMobilityKeyPressed()
+		return
+	end
+
+	-- Double Jump can also be triggered with Space while airborne.
+	if input.KeyCode == DOUBLE_JUMP_ALT_KEY and equippedMobility == "DoubleJump" then
+		onMobilityKeyPressed()
 	end
 end)
 
@@ -2355,7 +2364,7 @@ UserInputService.InputEnded:Connect(function(input, gameProcessed)
 	if gameProcessed then
 		return
 	end
-	if input.KeyCode == Enum.KeyCode.Q then
+	if input.KeyCode == MOBILITY_KEY then
 		if isGrappling then
 			grappleHoldActive = false
 		end
@@ -2367,7 +2376,7 @@ local mobilityTrigger = Instance.new("BindableEvent")
 mobilityTrigger.Name = "MobilityTrigger"
 mobilityTrigger.Parent = ReplicatedStorage
 mobilityTrigger.Event:Connect(function()
-	onQKeyPressed()
+	onMobilityKeyPressed()
 end)
 
 -- Handle character respawn

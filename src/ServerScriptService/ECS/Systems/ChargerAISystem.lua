@@ -70,6 +70,7 @@ local entityTypeAIQuery: any  -- EntityType + AI (for pause handling)
 local OBSTACLE_CHECK_MAX_DISTANCE_SQ = OBSTACLE_CHECK_MAX_DISTANCE * OBSTACLE_CHECK_MAX_DISTANCE
 local BASE_ENEMY_VISUAL_SCALE = 1.0
 local CHARGER_RANGE_SCALE_PER_SIZE = 0.4
+local PLAYER_CONTACT_BUFFER = 1.5
 
 -- Profiling accumulators (reset per step)
 local aiRaycastTime = 0
@@ -267,6 +268,18 @@ local function getScaledChargerPreferredRange(baseRange: number, visualScale: nu
 	local rangeMultiplier = 1 + (sizeDelta * CHARGER_RANGE_SCALE_PER_SIZE)
 	rangeMultiplier = math.max(0.1, rangeMultiplier)
 	return baseRange * rangeMultiplier
+end
+
+local function pointInsideCollider(point: Vector3, collider: {[string]: any}, inflateAmount: number): boolean
+	local boxCFrame = collider and collider.boxCFrame
+	local halfExtents = collider and collider.halfExtents
+	if typeof(boxCFrame) ~= "CFrame" or typeof(halfExtents) ~= "Vector3" then
+		return false
+	end
+	local localPoint = boxCFrame:PointToObjectSpace(point)
+	return math.abs(localPoint.X) <= (halfExtents.X + inflateAmount)
+		and math.abs(localPoint.Y) <= (halfExtents.Y + inflateAmount)
+		and math.abs(localPoint.Z) <= (halfExtents.Z + inflateAmount)
 end
 
 local function setFacingDirection(entity: number, direction: {x: number, y: number, z: number})
@@ -942,29 +955,48 @@ function ChargerAISystem.step(dt: number)
 			
 			-- Check for dash collision (deal damage once)
 			if not chargerState.hitOnThisDash then
-				-- Get attack range from Attackbox part size
-				local attackRange = getAttackRangeFromAttackbox(entity)
-				local hitRadius = attackRange + 3.0
-				local nearbyPlayers = OctreeSystem.getPlayersInRadius(myPos, hitRadius)
+				-- Match dash damage checks to the same world attackbox used by diagnostics.
+				local attackboxCollider = EnemyColliderService.getWorldAttackbox(entity)
+				local hitCenter = myPos
+				local hitRadius = getAttackRangeFromAttackbox(entity)
+				if attackboxCollider then
+					if typeof(attackboxCollider.center) == "Vector3" then
+						hitCenter = attackboxCollider.center
+					end
+					if typeof(attackboxCollider.radius) == "number" and attackboxCollider.radius > 0 then
+						hitRadius = attackboxCollider.radius
+					end
+				end
+				hitRadius += PLAYER_CONTACT_BUFFER
+				local nearbyPlayers = OctreeSystem.getPlayersInRadius(hitCenter, hitRadius)
 				
 				for _, playerEntity in ipairs(nearbyPlayers) do
 					if not isPlayerInvincible(playerEntity) then
-						-- Check vertical distance - player must be close to ground to be hit
-						local canHitPlayer = true
+						local playerRootPos: Vector3? = nil
 						local playerStats = world:get(playerEntity, Components.PlayerStats)
 						if playerStats and playerStats.player and playerStats.player.Character then
 							local playerRootPart = playerStats.player.Character:FindFirstChild("HumanoidRootPart")
 							if playerRootPart then
-								local playerY = playerRootPart.Position.Y
-								local chargerY = position.y
-								local verticalDistance = math.abs(playerY - chargerY)
-								
-								-- Charger attackbox stays on ground
-								local maxVerticalReach = 4  -- Same as zombies
-								
-								if verticalDistance > maxVerticalReach then
-									canHitPlayer = false  -- Player is too high
-								end
+								playerRootPos = playerRootPart.Position
+							end
+						end
+
+						if not playerRootPos then
+							local playerPos = world:get(playerEntity, _Position)
+							if playerPos then
+								playerRootPos = Vector3.new(playerPos.x, playerPos.y, playerPos.z)
+							end
+						end
+
+						local canHitPlayer = false
+						if playerRootPos then
+							if attackboxCollider then
+								canHitPlayer = pointInsideCollider(playerRootPos, attackboxCollider, PLAYER_CONTACT_BUFFER)
+							else
+								local offset = playerRootPos - myPos
+								local horizontal = Vector3.new(offset.X, 0, offset.Z).Magnitude
+								local verticalDistance = math.abs(offset.Y)
+								canHitPlayer = horizontal <= hitRadius and verticalDistance <= 4
 							end
 						end
 						

@@ -18,6 +18,8 @@ local ATTR_PROJECTILE_OPACITY_OTHERS = "Setting_graphics_projectileOpacityOthers
 local ATTR_OTHER_PLAYER_VFX_OPACITY = "Setting_graphics_otherPlayerVfxOpacity"
 local ATTR_REDUCE_FLASH = "Setting_accessibility_reduceFlash"
 local ATTR_REDUCE_MOTION = "Setting_accessibility_reduceMotion"
+local ATTR_TOGGLE_SPRINT_MODE = "Setting_controls_toggleSprintMode"
+local ATTR_SETTINGS_OPEN = "UI_SettingsOpen"
 
 local function ensureOpenSignal(): BindableEvent
 	local existing = ReplicatedStorage:FindFirstChild("OpenSettingsPanel")
@@ -41,6 +43,8 @@ local currentSettings: SettingsV1 = PlayerSettingsSchema.createDefault()
 local refreshRows: {() -> ()} = {}
 local pendingPushToken = 0
 local isOpen = false
+
+player:SetAttribute(ATTR_SETTINGS_OPEN, false)
 
 local mainMenuGuiInstance = playerGui:WaitForChild("MainMenuGui", 30)
 if not mainMenuGuiInstance or not mainMenuGuiInstance:IsA("ScreenGui") then
@@ -108,6 +112,7 @@ local function setOpen(open: boolean)
 		controlsFrame.Visible = false
 	end
 	isOpen = open
+	player:SetAttribute(ATTR_SETTINGS_OPEN, open)
 	root.Visible = open
 end
 
@@ -143,6 +148,7 @@ local function applyToAttributes(settings: SettingsV1)
 	player:SetAttribute(ATTR_OTHER_PLAYER_VFX_OPACITY, settings.graphics.otherPlayerVfxOpacity)
 	player:SetAttribute(ATTR_REDUCE_FLASH, settings.accessibility.reduceFlash)
 	player:SetAttribute(ATTR_REDUCE_MOTION, false)
+	player:SetAttribute(ATTR_TOGGLE_SPRINT_MODE, settings.controls.toggleSprintMode)
 end
 
 local function refreshAllRows()
@@ -308,6 +314,13 @@ addToggleRow("Reduce Flash Effects", function()
 	return currentSettings.accessibility.reduceFlash
 end, function(value: boolean)
 	currentSettings.accessibility.reduceFlash = value
+	applyToAttributes(currentSettings)
+end)
+
+addToggleRow("Toggle/Hold Sprint", function()
+	return currentSettings.controls.toggleSprintMode
+end, function(value: boolean)
+	currentSettings.controls.toggleSprintMode = value
 	applyToAttributes(currentSettings)
 end)
 

@@ -20,6 +20,8 @@ local DEFAULT_MAX_HEALTH = PlayerBalance.BaseMaxHealth
 local DEFAULT_WALK_SPEED = PlayerBalance.BaseWalkSpeed
 local DEFAULT_PICKUP_RANGE = PlayerBalance.BasePickupRange
 local MOVEMENT_SPEED_TO_MOBILITY_WEIGHT = 0.2
+local SPRINT_MULTIPLIER = 1.45
+local sprintIntentByPlayerEntity: {[number]: boolean} = {}
 
 -- Cached query for players
 local playerQuery: any
@@ -67,6 +69,11 @@ local function calculateMobilityDistanceMultiplier(effects: any, totalSpeedMult:
 	local speedBonus = totalSpeedMult - 1.0
 	local speedContribution = 1.0 + (speedBonus * MOVEMENT_SPEED_TO_MOBILITY_WEIGHT)
 	return mobilityBase * math.max(0, speedContribution)
+end
+
+local function shouldApplySprint(playerEntity: number): boolean
+	-- W-only enforcement is handled by SprintController's client-side intent.
+	return sprintIntentByPlayerEntity[playerEntity] == true
 end
 
 -- Apply passive effects to a player
@@ -154,7 +161,8 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 	end
 	
 	-- Apply walkspeed
-	local newWalkSpeed = baseWalkSpeed * totalSpeedMult
+	local sprintMult = if shouldApplySprint(playerEntity) then SPRINT_MULTIPLIER else 1.0
+	local newWalkSpeed = baseWalkSpeed * totalSpeedMult * sprintMult
 	if math.abs(humanoid.WalkSpeed - newWalkSpeed) > 0.1 then
 		humanoid.WalkSpeed = newWalkSpeed
 	end
@@ -284,11 +292,21 @@ function PassiveEffectSystem.refreshPlayerSpeed(playerEntity: number)
 	local baseWalkSpeed = player:GetAttribute("BaseWalkSpeed") or DEFAULT_WALK_SPEED
 	
 	-- Apply walkspeed
-	humanoid.WalkSpeed = baseWalkSpeed * totalSpeedMult
+	local sprintMult = if shouldApplySprint(playerEntity) then SPRINT_MULTIPLIER else 1.0
+	humanoid.WalkSpeed = baseWalkSpeed * totalSpeedMult * sprintMult
 	
 	-- Mobility abilities: full Mobility Power + 20% Movement Speed bonus.
 	effects.mobilityDistanceMultiplier = calculateMobilityDistanceMultiplier(effects, totalSpeedMult)
 	DirtyService.setIfChanged(world, playerEntity, PassiveEffects, effects, "PassiveEffects")
+end
+
+function PassiveEffectSystem.setSprintIntent(playerEntity: number, isIntent: boolean)
+	sprintIntentByPlayerEntity[playerEntity] = isIntent == true
+	PassiveEffectSystem.refreshPlayerSpeed(playerEntity)
+end
+
+function PassiveEffectSystem.clearSprintIntent(playerEntity: number)
+	sprintIntentByPlayerEntity[playerEntity] = nil
 end
 
 return PassiveEffectSystem

@@ -4,6 +4,8 @@
 
 local DamageSystem = {}
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
@@ -14,6 +16,7 @@ local DirtyService: any
 local EnemyExpDropSystem: any  -- Reference to enemy drop system
 local StatusEffectSystem: any  -- Reference to status effect system
 local OverhealSystem: any  -- Reference to overheal system
+local PlayerHitMarkerRemote: RemoteEvent? = nil
 
 -- Component references
 local Health: any
@@ -135,6 +138,17 @@ function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	EnemyAggro = Components.EnemyAggro
 	AttackCooldown = Components.AttackCooldown
 	EnemyTier = Components.EnemyTier
+
+	local remotesFolder = ReplicatedStorage:FindFirstChild("RemoteEvents")
+	if not remotesFolder then
+		remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents", 5)
+	end
+	if remotesFolder then
+		local remote = remotesFolder:FindFirstChild("PlayerHitMarker")
+		if remote and remote:IsA("RemoteEvent") then
+			PlayerHitMarkerRemote = remote
+		end
+	end
 end
 
 -- Set EnemyExpDropSystem reference (called after it's initialized)
@@ -684,6 +698,13 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 
 	-- Apply lifesteal for player sources damaging enemies
 	if isEnemy and sourceEntity and appliedToTarget > 0 and isPlayerSourceEntity(sourceEntity) then
+		if PlayerHitMarkerRemote then
+			local sourceStats = world:get(sourceEntity, Components.PlayerStats)
+			if sourceStats and sourceStats.player then
+				PlayerHitMarkerRemote:FireClient(sourceStats.player)
+			end
+		end
+
 		local sourceEffects = world:get(sourceEntity, PassiveEffects)
 		local lifesteal = sourceEffects and sourceEffects.lifesteal or 0
 		if lifesteal > 0 then

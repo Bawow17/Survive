@@ -291,6 +291,7 @@ export type SettingsV1 = {
 	},
 	controls: {
 		settingsHotkeyEnabled: boolean,
+		toggleSprintMode: boolean,
 	},
 }
 
@@ -311,6 +312,7 @@ local DEFAULTS: SettingsV1 = {
 	},
 	controls = {
 		settingsHotkeyEnabled = true,
+		toggleSprintMode = true,
 	},
 }
 
@@ -373,6 +375,7 @@ local function sanitizeInternal(raw: any): SettingsV1
 		},
 		controls = {
 			settingsHotkeyEnabled = asBoolean(controls.settingsHotkeyEnabled, DEFAULTS.controls.settingsHotkeyEnabled),
+			toggleSprintMode = asBoolean(controls.toggleSprintMode, DEFAULTS.controls.toggleSprintMode),
 		},
 	}
 end
@@ -419,6 +422,9 @@ local function mergeKnown(base: SettingsV1, patch: any): SettingsV1
 		local incoming = patch.controls
 		if incoming.settingsHotkeyEnabled ~= nil then
 			merged.controls.settingsHotkeyEnabled = incoming.settingsHotkeyEnabled
+		end
+		if incoming.toggleSprintMode ~= nil then
+			merged.controls.toggleSprintMode = incoming.toggleSprintMode
 		end
 	end
 
@@ -6179,7 +6185,7 @@ return {
 return {
 	id = "Blink",
 	displayName = "Blink",
-	description = "Tap into space. Ground: short 25-stud blink. Air: 0.3s windup, then blink 110 studs upward at 30°.",
+	description = "Tap into space. Ground: short 25-stud blink. Air: 0.3s windup, then blink 110 studs upward at 30 degrees.",
 	
 	-- UI color (shown in upgrade selection)
 	color = Color3.fromRGB(160, 120, 255),
@@ -6240,7 +6246,8 @@ return {
 	category = "mobility",
 }
 
-    ]]></string>
+    
+]]></string>
             </Properties>
           </Item>
           <Item class="ModuleScript" referent="54">
@@ -7419,6 +7426,8 @@ function ECSWorldService.Initialize()
 	ensureRemoteEvent(remotesFolder, "PlayerBodyFade")
 	ensureRemoteEvent(remotesFolder, "SessionTimerUpdate")
 	ensureRemoteEvent(remotesFolder, "PlayerBodyRestore")
+	ensureRemoteEvent(remotesFolder, "PlayerHitMarker")
+	ensureRemoteEvent(remotesFolder, "SprintState")
 
 	local debugFlags = ReplicatedStorage:FindFirstChild("DebugFlags")
 	if not debugFlags then
@@ -8359,6 +8368,9 @@ function ECSWorldService.DestroyEntity(entity: number)
 			break
 		end
 	end
+	if PassiveEffectSystem.clearSprintIntent then
+		PassiveEffectSystem.clearSprintIntent(entity)
+	end
 	activeEntities[entity] = nil
 	SyncSystem.queueDespawn(entity)
 	ZombieAISystem.cleanupEntity(entity)
@@ -8909,6 +8921,29 @@ end)
 
 -- Death system - Spectator controls
 local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
+local SprintStateRemote = remotes:FindFirstChild("SprintState")
+if not SprintStateRemote or not SprintStateRemote:IsA("RemoteEvent") then
+	if SprintStateRemote then
+		SprintStateRemote:Destroy()
+	end
+	SprintStateRemote = Instance.new("RemoteEvent")
+	SprintStateRemote.Name = "SprintState"
+	SprintStateRemote.Parent = remotes
+end
+
+SprintStateRemote.OnServerEvent:Connect(function(player: Player, isSprintIntent: any)
+	if typeof(isSprintIntent) ~= "boolean" then
+		return
+	end
+	local playerEntity = playerEntities[player]
+	if not playerEntity then
+		return
+	end
+	if PassiveEffectSystem.setSprintIntent then
+		PassiveEffectSystem.setSprintIntent(playerEntity, isSprintIntent)
+	end
+end)
+
 local ChangeSpectatorTarget = remotes:FindFirstChild("ChangeSpectatorTarget")
 if not ChangeSpectatorTarget then
 	ChangeSpectatorTarget = Instance.new("RemoteEvent")
@@ -10065,7 +10100,7 @@ local replicatedModels: {[string]: boolean} = {}
 
 -- Cache of enemy hitbox data by type: { [enemyType]: { size: Vector3, offset: Vector3 } }
 local enemyHitboxData: {[string]: {size: Vector3, offset: Vector3, rotation: CFrame?}} = {}
-local enemyAttackboxData: {[string]: {size: Vector3, offset: Vector3}} = {}
+local enemyAttackboxData: {[string]: {size: Vector3, offset: Vector3, rotation: CFrame?}} = {}
 
 local function findNamedPart(model: Model, name: string): BasePart?
 	local exact = model:FindFirstChild(name, true)
@@ -10145,16 +10180,19 @@ local function computeHitboxData(model: Model): {size: Vector3, offset: Vector3,
 	}
 end
 
-local function computeAttackboxData(model: Model): {size: Vector3, offset: Vector3}?
+local function computeAttackboxData(model: Model): {size: Vector3, offset: Vector3, rotation: CFrame?}?
 	local attackbox = findNamedPart(model, "Attackbox")
 	if not attackbox then
 		return nil
 	end
 
 	local pivot = model:GetPivot()
+	local localCf = pivot:ToObjectSpace(attackbox.CFrame)
+	local rotation = CFrame.fromMatrix(Vector3.new(0, 0, 0), localCf.RightVector, localCf.UpVector, localCf.LookVector)
 	return {
 		size = attackbox.Size,
-		offset = attackbox.Position - pivot.Position,
+		offset = localCf.Position,
+		rotation = rotation,
 	}
 end
 
@@ -10329,7 +10367,7 @@ function ModelReplicationService.getEnemyHitbox(enemyType: string): {size: Vecto
 	return enemyHitboxData[enemyType]
 end
 
-function ModelReplicationService.getEnemyAttackbox(enemyType: string): {size: Vector3, offset: Vector3}?
+function ModelReplicationService.getEnemyAttackbox(enemyType: string): {size: Vector3, offset: Vector3, rotation: CFrame?}?
 	return enemyAttackboxData[enemyType]
 end
 
@@ -11177,6 +11215,7 @@ local entityTypeAIQuery: any  -- EntityType + AI (for pause handling)
 local OBSTACLE_CHECK_MAX_DISTANCE_SQ = OBSTACLE_CHECK_MAX_DISTANCE * OBSTACLE_CHECK_MAX_DISTANCE
 local BASE_ENEMY_VISUAL_SCALE = 1.0
 local CHARGER_RANGE_SCALE_PER_SIZE = 0.4
+local PLAYER_CONTACT_BUFFER = 1.5
 
 -- Profiling accumulators (reset per step)
 local aiRaycastTime = 0
@@ -11374,6 +11413,18 @@ local function getScaledChargerPreferredRange(baseRange: number, visualScale: nu
 	local rangeMultiplier = 1 + (sizeDelta * CHARGER_RANGE_SCALE_PER_SIZE)
 	rangeMultiplier = math.max(0.1, rangeMultiplier)
 	return baseRange * rangeMultiplier
+end
+
+local function pointInsideCollider(point: Vector3, collider: {[string]: any}, inflateAmount: number): boolean
+	local boxCFrame = collider and collider.boxCFrame
+	local halfExtents = collider and collider.halfExtents
+	if typeof(boxCFrame) ~= "CFrame" or typeof(halfExtents) ~= "Vector3" then
+		return false
+	end
+	local localPoint = boxCFrame:PointToObjectSpace(point)
+	return math.abs(localPoint.X) <= (halfExtents.X + inflateAmount)
+		and math.abs(localPoint.Y) <= (halfExtents.Y + inflateAmount)
+		and math.abs(localPoint.Z) <= (halfExtents.Z + inflateAmount)
 end
 
 local function setFacingDirection(entity: number, direction: {x: number, y: number, z: number})
@@ -12049,29 +12100,48 @@ function ChargerAISystem.step(dt: number)
 			
 			-- Check for dash collision (deal damage once)
 			if not chargerState.hitOnThisDash then
-				-- Get attack range from Attackbox part size
-				local attackRange = getAttackRangeFromAttackbox(entity)
-				local hitRadius = attackRange + 3.0
-				local nearbyPlayers = OctreeSystem.getPlayersInRadius(myPos, hitRadius)
+				-- Match dash damage checks to the same world attackbox used by diagnostics.
+				local attackboxCollider = EnemyColliderService.getWorldAttackbox(entity)
+				local hitCenter = myPos
+				local hitRadius = getAttackRangeFromAttackbox(entity)
+				if attackboxCollider then
+					if typeof(attackboxCollider.center) == "Vector3" then
+						hitCenter = attackboxCollider.center
+					end
+					if typeof(attackboxCollider.radius) == "number" and attackboxCollider.radius > 0 then
+						hitRadius = attackboxCollider.radius
+					end
+				end
+				hitRadius += PLAYER_CONTACT_BUFFER
+				local nearbyPlayers = OctreeSystem.getPlayersInRadius(hitCenter, hitRadius)
 				
 				for _, playerEntity in ipairs(nearbyPlayers) do
 					if not isPlayerInvincible(playerEntity) then
-						-- Check vertical distance - player must be close to ground to be hit
-						local canHitPlayer = true
+						local playerRootPos: Vector3? = nil
 						local playerStats = world:get(playerEntity, Components.PlayerStats)
 						if playerStats and playerStats.player and playerStats.player.Character then
 							local playerRootPart = playerStats.player.Character:FindFirstChild("HumanoidRootPart")
 							if playerRootPart then
-								local playerY = playerRootPart.Position.Y
-								local chargerY = position.y
-								local verticalDistance = math.abs(playerY - chargerY)
-								
-								-- Charger attackbox stays on ground
-								local maxVerticalReach = 4  -- Same as zombies
-								
-								if verticalDistance > maxVerticalReach then
-									canHitPlayer = false  -- Player is too high
-								end
+								playerRootPos = playerRootPart.Position
+							end
+						end
+
+						if not playerRootPos then
+							local playerPos = world:get(playerEntity, _Position)
+							if playerPos then
+								playerRootPos = Vector3.new(playerPos.x, playerPos.y, playerPos.z)
+							end
+						end
+
+						local canHitPlayer = false
+						if playerRootPos then
+							if attackboxCollider then
+								canHitPlayer = pointInsideCollider(playerRootPos, attackboxCollider, PLAYER_CONTACT_BUFFER)
+							else
+								local offset = playerRootPos - myPos
+								local horizontal = Vector3.new(offset.X, 0, offset.Z).Magnitude
+								local verticalDistance = math.abs(offset.Y)
+								canHitPlayer = horizontal <= hitRadius and verticalDistance <= 4
 							end
 						end
 						
@@ -12260,6 +12330,8 @@ return ChargerAISystem
 
 local DamageSystem = {}
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
@@ -12270,6 +12342,7 @@ local DirtyService: any
 local EnemyExpDropSystem: any  -- Reference to enemy drop system
 local StatusEffectSystem: any  -- Reference to status effect system
 local OverhealSystem: any  -- Reference to overheal system
+local PlayerHitMarkerRemote: RemoteEvent? = nil
 
 -- Component references
 local Health: any
@@ -12391,6 +12464,17 @@ function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	EnemyAggro = Components.EnemyAggro
 	AttackCooldown = Components.AttackCooldown
 	EnemyTier = Components.EnemyTier
+
+	local remotesFolder = ReplicatedStorage:FindFirstChild("RemoteEvents")
+	if not remotesFolder then
+		remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents", 5)
+	end
+	if remotesFolder then
+		local remote = remotesFolder:FindFirstChild("PlayerHitMarker")
+		if remote and remote:IsA("RemoteEvent") then
+			PlayerHitMarkerRemote = remote
+		end
+	end
 end
 
 -- Set EnemyExpDropSystem reference (called after it's initialized)
@@ -12940,6 +13024,13 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 
 	-- Apply lifesteal for player sources damaging enemies
 	if isEnemy and sourceEntity and appliedToTarget > 0 and isPlayerSourceEntity(sourceEntity) then
+		if PlayerHitMarkerRemote then
+			local sourceStats = world:get(sourceEntity, Components.PlayerStats)
+			if sourceStats and sourceStats.player then
+				PlayerHitMarkerRemote:FireClient(sourceStats.player)
+			end
+		end
+
 		local sourceEffects = world:get(sourceEntity, PassiveEffects)
 		local lifesteal = sourceEffects and sourceEffects.lifesteal or 0
 		if lifesteal > 0 then
@@ -21672,6 +21763,8 @@ local DEFAULT_MAX_HEALTH = PlayerBalance.BaseMaxHealth
 local DEFAULT_WALK_SPEED = PlayerBalance.BaseWalkSpeed
 local DEFAULT_PICKUP_RANGE = PlayerBalance.BasePickupRange
 local MOVEMENT_SPEED_TO_MOBILITY_WEIGHT = 0.2
+local SPRINT_MULTIPLIER = 1.45
+local sprintIntentByPlayerEntity: {[number]: boolean} = {}
 
 -- Cached query for players
 local playerQuery: any
@@ -21719,6 +21812,11 @@ local function calculateMobilityDistanceMultiplier(effects: any, totalSpeedMult:
 	local speedBonus = totalSpeedMult - 1.0
 	local speedContribution = 1.0 + (speedBonus * MOVEMENT_SPEED_TO_MOBILITY_WEIGHT)
 	return mobilityBase * math.max(0, speedContribution)
+end
+
+local function shouldApplySprint(playerEntity: number): boolean
+	-- W-only enforcement is handled by SprintController's client-side intent.
+	return sprintIntentByPlayerEntity[playerEntity] == true
 end
 
 -- Apply passive effects to a player
@@ -21806,7 +21904,8 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 	end
 	
 	-- Apply walkspeed
-	local newWalkSpeed = baseWalkSpeed * totalSpeedMult
+	local sprintMult = if shouldApplySprint(playerEntity) then SPRINT_MULTIPLIER else 1.0
+	local newWalkSpeed = baseWalkSpeed * totalSpeedMult * sprintMult
 	if math.abs(humanoid.WalkSpeed - newWalkSpeed) > 0.1 then
 		humanoid.WalkSpeed = newWalkSpeed
 	end
@@ -21936,11 +22035,21 @@ function PassiveEffectSystem.refreshPlayerSpeed(playerEntity: number)
 	local baseWalkSpeed = player:GetAttribute("BaseWalkSpeed") or DEFAULT_WALK_SPEED
 	
 	-- Apply walkspeed
-	humanoid.WalkSpeed = baseWalkSpeed * totalSpeedMult
+	local sprintMult = if shouldApplySprint(playerEntity) then SPRINT_MULTIPLIER else 1.0
+	humanoid.WalkSpeed = baseWalkSpeed * totalSpeedMult * sprintMult
 	
 	-- Mobility abilities: full Mobility Power + 20% Movement Speed bonus.
 	effects.mobilityDistanceMultiplier = calculateMobilityDistanceMultiplier(effects, totalSpeedMult)
 	DirtyService.setIfChanged(world, playerEntity, PassiveEffects, effects, "PassiveEffects")
+end
+
+function PassiveEffectSystem.setSprintIntent(playerEntity: number, isIntent: boolean)
+	sprintIntentByPlayerEntity[playerEntity] = isIntent == true
+	PassiveEffectSystem.refreshPlayerSpeed(playerEntity)
+end
+
+function PassiveEffectSystem.clearSprintIntent(playerEntity: number)
+	sprintIntentByPlayerEntity[playerEntity] = nil
 end
 
 return PassiveEffectSystem
@@ -47051,6 +47160,206 @@ return HighlightManager
       </Item>
       <Item class="LocalScript" referent="178">
         <Properties>
+          <string name="Name">HitMarkerController</string>
+          <string name="Source"><![CDATA[--!strict
+-- HitMarkerController
+-- Shows ShiftLock.HitMarkerFrame when the local player deals applied damage.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local localPlayer = Players.LocalPlayer
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+local HOLD_DURATION = 0.12
+local FADE_DURATION = 0.21
+local HIT_MARKER_FRAME_NAME = "HitMarkerFrame"
+
+local hitMarkerFrame: GuiObject? = nil
+local fadeTweens: {Tween} = {}
+local baselineTransparency: {[Instance]: {[string]: number}} = {}
+local pulseToken = 0
+
+local function clearFadeTweens()
+	for _, tween in ipairs(fadeTweens) do
+		tween:Cancel()
+	end
+	table.clear(fadeTweens)
+end
+
+local function recordTransparency(instance: Instance, propertyName: string, out: {[string]: number})
+	local ok, value = pcall(function()
+		return (instance :: any)[propertyName]
+	end)
+	if ok and typeof(value) == "number" then
+		out[propertyName] = value
+	end
+end
+
+local function cacheBaselineTransparency(frame: GuiObject)
+	table.clear(baselineTransparency)
+
+	local function cacheFor(instance: Instance)
+		local props: {[string]: number} = {}
+		if instance:IsA("GuiObject") then
+			recordTransparency(instance, "BackgroundTransparency", props)
+		end
+		if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+			recordTransparency(instance, "ImageTransparency", props)
+		end
+		if instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox") then
+			recordTransparency(instance, "TextTransparency", props)
+		end
+		if instance:IsA("UIStroke") then
+			recordTransparency(instance, "Transparency", props)
+		end
+		if next(props) then
+			baselineTransparency[instance] = props
+		end
+	end
+
+	cacheFor(frame)
+	for _, descendant in ipairs(frame:GetDescendants()) do
+		cacheFor(descendant)
+	end
+end
+
+local function applyBaselineTransparency()
+	for instance, props in pairs(baselineTransparency) do
+		if not instance.Parent then
+			continue
+		end
+		for propertyName, value in pairs(props) do
+			pcall(function()
+				(instance :: any)[propertyName] = value
+			end)
+		end
+	end
+end
+
+local function createFadeTweens()
+	clearFadeTweens()
+	local tweenInfo = TweenInfo.new(FADE_DURATION, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+
+	for instance, props in pairs(baselineTransparency) do
+		if not instance.Parent then
+			continue
+		end
+		local goals: {[string]: number} = {}
+		for propertyName in pairs(props) do
+			goals[propertyName] = 1
+		end
+		if next(goals) then
+			local tween = TweenService:Create(instance, tweenInfo, goals)
+			table.insert(fadeTweens, tween)
+		end
+	end
+end
+
+local function bindHitMarkerFrame(frame: GuiObject)
+	hitMarkerFrame = frame
+	cacheBaselineTransparency(frame)
+	clearFadeTweens()
+	applyBaselineTransparency()
+	frame.Visible = false
+end
+
+local function findHitMarkerFrame(): GuiObject?
+	local shiftLock = playerGui:FindFirstChild("ShiftLock")
+	if shiftLock then
+		local direct = shiftLock:FindFirstChild(HIT_MARKER_FRAME_NAME, true)
+		if direct and direct:IsA("GuiObject") then
+			return direct
+		end
+	end
+
+	local fallback = playerGui:FindFirstChild(HIT_MARKER_FRAME_NAME, true)
+	if fallback and fallback:IsA("GuiObject") then
+		return fallback
+	end
+
+	return nil
+end
+
+local function ensureBoundHitMarker()
+	local frame = findHitMarkerFrame()
+	if frame then
+		if hitMarkerFrame ~= frame then
+			bindHitMarkerFrame(frame)
+		end
+		return
+	end
+	hitMarkerFrame = nil
+	table.clear(baselineTransparency)
+	clearFadeTweens()
+end
+
+local function playHitMarkerPulse()
+	ensureBoundHitMarker()
+	local frame = hitMarkerFrame
+	if not frame then
+		return
+	end
+
+	pulseToken += 1
+	local currentToken = pulseToken
+
+	clearFadeTweens()
+	applyBaselineTransparency()
+	frame.Visible = true
+
+	task.delay(HOLD_DURATION, function()
+		if currentToken ~= pulseToken then
+			return
+		end
+		if hitMarkerFrame ~= frame or not frame.Parent then
+			return
+		end
+
+		createFadeTweens()
+		for _, tween in ipairs(fadeTweens) do
+			tween:Play()
+		end
+
+		task.delay(FADE_DURATION, function()
+			if currentToken ~= pulseToken then
+				return
+			end
+			if hitMarkerFrame ~= frame or not frame.Parent then
+				return
+			end
+			frame.Visible = false
+		end)
+	end)
+end
+
+playerGui.DescendantAdded:Connect(function(descendant: Instance)
+	if descendant.Name == HIT_MARKER_FRAME_NAME and descendant:IsA("GuiObject") then
+		bindHitMarkerFrame(descendant)
+	end
+end)
+
+playerGui.DescendantRemoving:Connect(function(descendant: Instance)
+	if hitMarkerFrame and descendant == hitMarkerFrame then
+		hitMarkerFrame = nil
+		table.clear(baselineTransparency)
+		clearFadeTweens()
+	end
+end)
+
+ensureBoundHitMarker()
+
+local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
+local playerHitMarkerRemote = remotesFolder:WaitForChild("PlayerHitMarker")
+if playerHitMarkerRemote:IsA("RemoteEvent") then
+	playerHitMarkerRemote.OnClientEvent:Connect(playHitMarkerPulse)
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="LocalScript" referent="179">
+        <Properties>
           <string name="Name">LoopGameController</string>
           <string name="Source"><![CDATA[--!strict
 -- LoopGameController - Client-side Loop minigame UI + generator
@@ -48173,7 +48482,7 @@ end)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="179">
+      <Item class="LocalScript" referent="180">
         <Properties>
           <string name="Name">MainMenuController</string>
           <string name="Source"><![CDATA[--!strict
@@ -48605,7 +48914,7 @@ showMenu()
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="180">
+      <Item class="LocalScript" referent="181">
         <Properties>
           <string name="Name">MenuCameraController</string>
           <string name="Source"><![CDATA[--!strict
@@ -48692,12 +49001,12 @@ end
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="181">
+      <Item class="LocalScript" referent="182">
         <Properties>
           <string name="Name">MobilityController</string>
           <string name="Source"><![CDATA[--!strict
 -- MobilityController - Client-side mobility ability activation (Dash, Double Jump)
--- Handles Q keybind, client-predicted movement, and server communication
+-- Handles Shift/Space keybinds, client-predicted movement, and server communication
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -48706,6 +49015,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
 
 local TweenService = game:GetService("TweenService")
+
+local MOBILITY_KEY = Enum.KeyCode.LeftShift
+local DOUBLE_JUMP_ALT_KEY = Enum.KeyCode.Space
 
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
@@ -51013,8 +51325,8 @@ local function executeManaGrapple()
 	return true
 end
 
--- Handle Q key press
-local function onQKeyPressed()
+-- Handle mobility key press
+local function onMobilityKeyPressed()
 	-- Don't allow mobility while paused
 	if isPaused then
 		return
@@ -51037,14 +51349,20 @@ local function onQKeyPressed()
 	end
 end
 
--- Listen for Q key input
+-- Listen for mobility key input
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then
 		return
 	end
 	
-	if input.KeyCode == Enum.KeyCode.Q then
-		onQKeyPressed()
+	if input.KeyCode == MOBILITY_KEY then
+		onMobilityKeyPressed()
+		return
+	end
+
+	-- Double Jump can also be triggered with Space while airborne.
+	if input.KeyCode == DOUBLE_JUMP_ALT_KEY and equippedMobility == "DoubleJump" then
+		onMobilityKeyPressed()
 	end
 end)
 
@@ -51052,7 +51370,7 @@ UserInputService.InputEnded:Connect(function(input, gameProcessed)
 	if gameProcessed then
 		return
 	end
-	if input.KeyCode == Enum.KeyCode.Q then
+	if input.KeyCode == MOBILITY_KEY then
 		if isGrappling then
 			grappleHoldActive = false
 		end
@@ -51064,7 +51382,7 @@ local mobilityTrigger = Instance.new("BindableEvent")
 mobilityTrigger.Name = "MobilityTrigger"
 mobilityTrigger.Parent = ReplicatedStorage
 mobilityTrigger.Event:Connect(function()
-	onQKeyPressed()
+	onMobilityKeyPressed()
 end)
 
 -- Handle character respawn
@@ -51195,7 +51513,7 @@ setupPauseListeners()
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="182">
+      <Item class="LocalScript" referent="183">
         <Properties>
           <string name="Name">PauseController</string>
           <string name="Source"><![CDATA[--!strict
@@ -52363,7 +52681,7 @@ end)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="183">
+      <Item class="LocalScript" referent="184">
         <Properties>
           <string name="Name">PickupRenderer</string>
           <string name="Source"><![CDATA[--!strict
@@ -52769,7 +53087,7 @@ end)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="184">
+      <Item class="LocalScript" referent="185">
         <Properties>
           <string name="Name">PowerupEffectRenderer</string>
           <string name="Source"><![CDATA[--!strict
@@ -52834,7 +53152,7 @@ end)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="185">
+      <Item class="LocalScript" referent="186">
         <Properties>
           <string name="Name">ProjectileRenderer</string>
           <string name="Source"><![CDATA[--!strict
@@ -54182,7 +54500,7 @@ end)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="186">
+      <Item class="LocalScript" referent="187">
         <Properties>
           <string name="Name">ProjectileRotationController</string>
           <string name="Source"><![CDATA[--!strict
@@ -54373,7 +54691,7 @@ EntityDespawn.OnClientEvent:Connect(handleEntityDespawn)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="187">
+      <Item class="LocalScript" referent="188">
         <Properties>
           <string name="Name">SessionTimerDisplay</string>
           <string name="Source"><![CDATA[--!strict
@@ -54465,7 +54783,7 @@ timerLabel.Text = formatTime(0)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="188">
+      <Item class="LocalScript" referent="189">
         <Properties>
           <string name="Name">SettingsController</string>
           <string name="Source"><![CDATA[--!strict
@@ -54488,6 +54806,8 @@ local ATTR_PROJECTILE_OPACITY_OTHERS = "Setting_graphics_projectileOpacityOthers
 local ATTR_OTHER_PLAYER_VFX_OPACITY = "Setting_graphics_otherPlayerVfxOpacity"
 local ATTR_REDUCE_FLASH = "Setting_accessibility_reduceFlash"
 local ATTR_REDUCE_MOTION = "Setting_accessibility_reduceMotion"
+local ATTR_TOGGLE_SPRINT_MODE = "Setting_controls_toggleSprintMode"
+local ATTR_SETTINGS_OPEN = "UI_SettingsOpen"
 
 local function ensureOpenSignal(): BindableEvent
 	local existing = ReplicatedStorage:FindFirstChild("OpenSettingsPanel")
@@ -54511,6 +54831,8 @@ local currentSettings: SettingsV1 = PlayerSettingsSchema.createDefault()
 local refreshRows: {() -> ()} = {}
 local pendingPushToken = 0
 local isOpen = false
+
+player:SetAttribute(ATTR_SETTINGS_OPEN, false)
 
 local mainMenuGuiInstance = playerGui:WaitForChild("MainMenuGui", 30)
 if not mainMenuGuiInstance or not mainMenuGuiInstance:IsA("ScreenGui") then
@@ -54578,6 +54900,7 @@ local function setOpen(open: boolean)
 		controlsFrame.Visible = false
 	end
 	isOpen = open
+	player:SetAttribute(ATTR_SETTINGS_OPEN, open)
 	root.Visible = open
 end
 
@@ -54613,6 +54936,7 @@ local function applyToAttributes(settings: SettingsV1)
 	player:SetAttribute(ATTR_OTHER_PLAYER_VFX_OPACITY, settings.graphics.otherPlayerVfxOpacity)
 	player:SetAttribute(ATTR_REDUCE_FLASH, settings.accessibility.reduceFlash)
 	player:SetAttribute(ATTR_REDUCE_MOTION, false)
+	player:SetAttribute(ATTR_TOGGLE_SPRINT_MODE, settings.controls.toggleSprintMode)
 end
 
 local function refreshAllRows()
@@ -54781,6 +55105,13 @@ end, function(value: boolean)
 	applyToAttributes(currentSettings)
 end)
 
+addToggleRow("Toggle/Hold Sprint", function()
+	return currentSettings.controls.toggleSprintMode
+end, function(value: boolean)
+	currentSettings.controls.toggleSprintMode = value
+	applyToAttributes(currentSettings)
+end)
+
 if closeButton then
 	closeButton.Activated:Connect(function()
 		setOpen(false)
@@ -54858,7 +55189,609 @@ end
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="189">
+      <Item class="LocalScript" referent="190">
+        <Properties>
+          <string name="Name">ShiftLockCameraController</string>
+          <string name="Source"><![CDATA[--!strict
+-- ShiftLockCameraController
+-- Centers shift-lock horizontally and raises camera pivot slightly.
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+
+local localPlayer = Players.LocalPlayer
+
+-- Keep shift-lock horizontally centered; raise camera pivot slightly.
+local SHIFT_LOCK_CAMERA_OFFSET = Vector3.new(0, 3.2, 0)
+local ZERO_CAMERA_OFFSET = Vector3.new(0, 0, 0)
+local FIRST_PERSON_DISTANCE_THRESHOLD = 1.0
+local CAMERA_OFFSET_SMOOTH_SPEED = 14.0
+local SHIFT_LOCK_ACTION = "CustomShiftLockToggle"
+local SHIFT_LOCK_ACTION_PRIORITY = Enum.ContextActionPriority.High.Value + 100
+local ATTR_SETTINGS_OPEN = "UI_SettingsOpen"
+local TOGGLE_BUTTON_NAME_HINTS: {[string]: boolean} = {
+	ShiftLockButton = true,
+	ShiftLockToggle = true,
+	Toggle = true,
+	Button = true,
+}
+
+local currentHumanoid: Humanoid? = nil
+local shiftLockEnabled = false
+local shiftLockFrame: GuiObject? = nil
+local shiftLockFrameButtonConnections: {RBXScriptConnection} = {}
+local settingsOpen = false
+local restoreShiftLockAfterSettings = false
+
+local function applyNamedStateVisuals(frame: GuiObject, enabled: boolean)
+	local function setIfGuiObject(name: string, visible: boolean)
+		local obj = frame:FindFirstChild(name, true)
+		if obj and obj:IsA("GuiObject") then
+			obj.Visible = visible
+		end
+	end
+
+	local function setByNamePattern(pattern: string, visible: boolean)
+		local needle = string.lower(pattern)
+		for _, descendant in ipairs(frame:GetDescendants()) do
+			if descendant:IsA("GuiObject") then
+				local lowerName = string.lower(descendant.Name)
+				if string.find(lowerName, needle, 1, true) then
+					descendant.Visible = visible
+				end
+			end
+		end
+	end
+
+	setIfGuiObject("On", enabled)
+	setIfGuiObject("Off", not enabled)
+	setIfGuiObject("Enabled", enabled)
+	setIfGuiObject("Disabled", not enabled)
+	setIfGuiObject("Active", enabled)
+	setIfGuiObject("Inactive", not enabled)
+	setIfGuiObject("Crosshair", enabled)
+	setIfGuiObject("Reticle", enabled)
+	setIfGuiObject("CenterDot", enabled)
+	setIfGuiObject("Cursor", not enabled)
+	setIfGuiObject("Mouse", not enabled)
+	setByNamePattern("crosshair", enabled)
+	setByNamePattern("reticle", enabled)
+	setByNamePattern("cursor", not enabled)
+	setByNamePattern("mouse", not enabled)
+end
+
+local function clearShiftLockFrameConnections()
+	for _, connection in ipairs(shiftLockFrameButtonConnections) do
+		connection:Disconnect()
+	end
+	table.clear(shiftLockFrameButtonConnections)
+end
+
+local function setShiftLockIndicatorState(enabled: boolean)
+	local frame = shiftLockFrame
+	if not frame then
+		return
+	end
+	frame.Visible = enabled
+	frame:SetAttribute("ShiftLockEnabled", enabled)
+	applyNamedStateVisuals(frame, enabled)
+end
+
+local function setShiftLockState(enabled: boolean)
+	shiftLockEnabled = enabled
+	UserInputService.MouseBehavior = enabled and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
+	UserInputService.MouseIconEnabled = not enabled
+	setShiftLockIndicatorState(enabled)
+end
+
+local function toggleShiftLock()
+	if settingsOpen then
+		return
+	end
+	setShiftLockState(not shiftLockEnabled)
+end
+
+local function syncSettingsLockout()
+	if settingsOpen then
+		restoreShiftLockAfterSettings = shiftLockEnabled
+		-- Force temporary unlocked interaction for menus.
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = true
+		setShiftLockIndicatorState(false)
+		return
+	end
+
+	if restoreShiftLockAfterSettings then
+		restoreShiftLockAfterSettings = false
+		setShiftLockState(true)
+		return
+	end
+
+	setShiftLockIndicatorState(shiftLockEnabled)
+end
+
+local function onShiftLockAction(_: string, inputState: Enum.UserInputState): Enum.ContextActionResult
+	if inputState == Enum.UserInputState.Begin then
+		if settingsOpen then
+			return Enum.ContextActionResult.Sink
+		end
+		if UserInputService:GetFocusedTextBox() then
+			return Enum.ContextActionResult.Sink
+		end
+		toggleShiftLock()
+		return Enum.ContextActionResult.Sink
+	end
+	if inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
+		-- Sink key-up/cancel too so LeftAlt does not leak into default window/menu behavior.
+		return Enum.ContextActionResult.Sink
+	end
+	return Enum.ContextActionResult.Sink
+end
+
+local function bindShiftLockFrame(frame: GuiObject)
+	clearShiftLockFrameConnections()
+	shiftLockFrame = frame
+	setShiftLockIndicatorState(shiftLockEnabled)
+
+	local toggleButtons: {GuiButton} = {}
+	local function addToggleButton(button: GuiButton)
+		for _, existing in ipairs(toggleButtons) do
+			if existing == button then
+				return
+			end
+		end
+		toggleButtons[#toggleButtons + 1] = button
+	end
+
+	if frame:IsA("GuiButton") then
+		addToggleButton(frame)
+	end
+
+	for _, descendant in ipairs(frame:GetDescendants()) do
+		if descendant:IsA("GuiButton") then
+			local isExplicitToggle = descendant:GetAttribute("ShiftLockToggle") == true
+				or TOGGLE_BUTTON_NAME_HINTS[descendant.Name] == true
+			if isExplicitToggle then
+				addToggleButton(descendant)
+			end
+		end
+	end
+
+	for _, button in ipairs(toggleButtons) do
+		table.insert(shiftLockFrameButtonConnections, button.Activated:Connect(toggleShiftLock))
+	end
+end
+
+local function tryBindShiftLockFrame()
+	local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+	if not playerGui then
+		return
+	end
+
+	local root = playerGui:FindFirstChild("ShiftLock")
+	local frame: GuiObject? = nil
+	if root then
+		local found = root:FindFirstChild("ShiftLockFrame", true)
+		if found and found:IsA("GuiObject") then
+			frame = found
+		end
+	end
+	if not frame then
+		local found = playerGui:FindFirstChild("ShiftLockFrame", true)
+		if found and found:IsA("GuiObject") then
+			frame = found
+		end
+	end
+
+	if frame then
+		bindShiftLockFrame(frame)
+	end
+end
+
+local function restoreOffsetIfNeeded()
+	local humanoid = currentHumanoid
+	if not humanoid or not humanoid.Parent then
+		return
+	end
+	humanoid.CameraOffset = ZERO_CAMERA_OFFSET
+end
+
+local function isThirdPersonCamera(): boolean
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return false
+	end
+	local distance = (camera.CFrame.Position - camera.Focus.Position).Magnitude
+	return distance > FIRST_PERSON_DISTANCE_THRESHOLD
+end
+
+local function shouldApplyShiftLockOffset(): boolean
+	if not shiftLockEnabled then
+		return false
+	end
+
+	if not currentHumanoid or not currentHumanoid.Parent then
+		return false
+	end
+
+	local camera = workspace.CurrentCamera
+	if not camera or camera.CameraType ~= Enum.CameraType.Custom then
+		return false
+	end
+
+	if localPlayer.CameraMode == Enum.CameraMode.LockFirstPerson then
+		return false
+	end
+
+	local mouseBehavior = UserInputService.MouseBehavior
+	local isLockedMouse = mouseBehavior == Enum.MouseBehavior.LockCenter
+		or mouseBehavior == Enum.MouseBehavior.LockCurrentPosition
+	local preserveShiftLockCameraDuringSettings = settingsOpen and restoreShiftLockAfterSettings
+	if not isLockedMouse and not preserveShiftLockCameraDuringSettings then
+		return false
+	end
+
+	if not isThirdPersonCamera() then
+		return false
+	end
+
+	return true
+end
+
+local function getTargetCameraOffset(): Vector3
+	if shouldApplyShiftLockOffset() then
+		return SHIFT_LOCK_CAMERA_OFFSET
+	end
+	return ZERO_CAMERA_OFFSET
+end
+
+local function updateCameraOffset(dt: number?)
+	local humanoid = currentHumanoid
+	if not humanoid or not humanoid.Parent then
+		return
+	end
+
+	local targetOffset = getTargetCameraOffset()
+	local currentOffset = humanoid.CameraOffset
+	local delta = targetOffset - currentOffset
+	if delta.Magnitude <= 1e-4 then
+		if currentOffset ~= targetOffset then
+			humanoid.CameraOffset = targetOffset
+		end
+		return
+	end
+
+	local stepDt = if typeof(dt) == "number" and dt > 0 then dt else (1 / 60)
+	local alpha = 1 - math.exp(-CAMERA_OFFSET_SMOOTH_SPEED * stepDt)
+	alpha = math.clamp(alpha, 0, 1)
+	humanoid.CameraOffset = currentOffset:Lerp(targetOffset, alpha)
+end
+
+local function bindCharacter(character: Model)
+	restoreOffsetIfNeeded()
+
+	currentHumanoid = character:FindFirstChildOfClass("Humanoid")
+	if not currentHumanoid then
+		local found = character:WaitForChild("Humanoid", 5)
+		if found and found:IsA("Humanoid") then
+			currentHumanoid = found
+		end
+	end
+
+	updateCameraOffset(0)
+end
+
+localPlayer.CharacterAdded:Connect(function(character)
+	bindCharacter(character)
+end)
+
+localPlayer.CharacterRemoving:Connect(function()
+	restoreOffsetIfNeeded()
+	currentHumanoid = nil
+end)
+
+UserInputService:GetPropertyChangedSignal("MouseBehavior"):Connect(updateCameraOffset)
+localPlayer:GetPropertyChangedSignal("CameraMode"):Connect(updateCameraOffset)
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(updateCameraOffset)
+
+ContextActionService:BindActionAtPriority(
+	SHIFT_LOCK_ACTION,
+	onShiftLockAction,
+	false,
+	SHIFT_LOCK_ACTION_PRIORITY,
+	Enum.KeyCode.LeftAlt
+)
+
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+playerGui.DescendantAdded:Connect(function(descendant: Instance)
+	if descendant.Name == "ShiftLockFrame" and descendant:IsA("GuiObject") then
+		bindShiftLockFrame(descendant)
+	end
+end)
+tryBindShiftLockFrame()
+setShiftLockState(false)
+settingsOpen = (localPlayer:GetAttribute(ATTR_SETTINGS_OPEN) == true)
+syncSettingsLockout()
+localPlayer:GetAttributeChangedSignal(ATTR_SETTINGS_OPEN):Connect(function()
+	settingsOpen = (localPlayer:GetAttribute(ATTR_SETTINGS_OPEN) == true)
+	syncSettingsLockout()
+end)
+
+RunService:BindToRenderStep("ShiftLockCameraOffset", Enum.RenderPriority.Camera.Value - 1, function(dt: number)
+	updateCameraOffset(dt)
+end)
+
+if localPlayer.Character then
+	bindCharacter(localPlayer.Character)
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="LocalScript" referent="191">
+        <Properties>
+          <string name="Name">SprintController</string>
+          <string name="Source"><![CDATA[--!strict
+-- SprintController
+-- LeftControl sprint with Toggle/Hold mode and W-only gating.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
+local sprintStateRemote = remotesFolder:WaitForChild("SprintState")
+local playerGui = player:WaitForChild("PlayerGui")
+
+local ATTR_TOGGLE_SPRINT_MODE = "Setting_controls_toggleSprintMode"
+local SHIFTLOCK_ROOT_NAME = "ShiftLock"
+local DEFAULT_CROSSHAIR_FRAME_NAME = "ShiftLockFrame"
+local SPRINT_FRAME_NAME = "SprintFrame"
+
+local toggleActive = false
+local shiftHeld = false
+local wHeld = false
+local lastSentIntent = false
+local shiftLockFrame: GuiObject? = nil
+local sprintFrame: GuiObject? = nil
+local transformLockConnections: {RBXScriptConnection} = {}
+local shiftLockStateConnection: RBXScriptConnection? = nil
+local shiftLockEnabled = false
+
+local function isToggleMode(): boolean
+	local value = player:GetAttribute(ATTR_TOGGLE_SPRINT_MODE)
+	if typeof(value) == "boolean" then
+		return value
+	end
+	return true
+end
+
+local function getSprintIntent(): boolean
+	if isToggleMode() then
+		return toggleActive and wHeld
+	end
+	return shiftHeld and wHeld
+end
+
+local function clearTransformLocks()
+	for _, connection in ipairs(transformLockConnections) do
+		connection:Disconnect()
+	end
+	table.clear(transformLockConnections)
+end
+
+local function clearShiftLockStateConnection()
+	if shiftLockStateConnection then
+		shiftLockStateConnection:Disconnect()
+		shiftLockStateConnection = nil
+	end
+end
+
+local function readShiftLockEnabled(frame: GuiObject?): boolean
+	if not frame then
+		return false
+	end
+	local value = frame:GetAttribute("ShiftLockEnabled")
+	return typeof(value) == "boolean" and value or false
+end
+
+local function lockGuiTransform(frame: GuiObject)
+	local lockedPosition = frame.Position
+	local lockedSize = frame.Size
+	local lockedAnchor = frame.AnchorPoint
+	local lockedRotation = frame.Rotation
+
+	table.insert(transformLockConnections, frame:GetPropertyChangedSignal("Position"):Connect(function()
+		if frame.Position ~= lockedPosition then
+			frame.Position = lockedPosition
+		end
+	end))
+
+	table.insert(transformLockConnections, frame:GetPropertyChangedSignal("Size"):Connect(function()
+		if frame.Size ~= lockedSize then
+			frame.Size = lockedSize
+		end
+	end))
+
+	table.insert(transformLockConnections, frame:GetPropertyChangedSignal("AnchorPoint"):Connect(function()
+		if frame.AnchorPoint ~= lockedAnchor then
+			frame.AnchorPoint = lockedAnchor
+		end
+	end))
+
+	table.insert(transformLockConnections, frame:GetPropertyChangedSignal("Rotation"):Connect(function()
+		if frame.Rotation ~= lockedRotation then
+			frame.Rotation = lockedRotation
+		end
+	end))
+end
+
+local function applySprintUi(intent: boolean)
+	if not shiftLockFrame or not sprintFrame then
+		return
+	end
+
+	local crosshair = shiftLockFrame
+	local sprint = sprintFrame
+	local showSprint = shiftLockEnabled and intent
+	local showCrosshair = shiftLockEnabled and not intent
+
+	crosshair.Visible = showCrosshair
+	sprint.Visible = showSprint
+end
+
+local function resolveSprintUi()
+	local root = playerGui:FindFirstChild(SHIFTLOCK_ROOT_NAME)
+	if not root then
+		clearTransformLocks()
+		clearShiftLockStateConnection()
+		shiftLockEnabled = false
+		shiftLockFrame = nil
+		sprintFrame = nil
+		return
+	end
+
+	if root:IsA("ScreenGui") then
+		pcall(function()
+			root.IgnoreGuiInset = true
+		end)
+		pcall(function()
+			root.ScreenInsets = Enum.ScreenInsets.None
+		end)
+		pcall(function()
+			root.SafeAreaCompatibility = Enum.SafeAreaCompatibility.None
+		end)
+	end
+
+	local foundCrosshair = root:FindFirstChild(DEFAULT_CROSSHAIR_FRAME_NAME, true)
+	local newShiftLockFrame = if foundCrosshair and foundCrosshair:IsA("GuiObject") then foundCrosshair else nil
+
+	local foundSprint = root:FindFirstChild(SPRINT_FRAME_NAME, true)
+	local newSprintFrame = if foundSprint and foundSprint:IsA("GuiObject") then foundSprint else nil
+
+	local changedFrameRefs = (shiftLockFrame ~= newShiftLockFrame) or (sprintFrame ~= newSprintFrame)
+	shiftLockFrame = newShiftLockFrame
+	sprintFrame = newSprintFrame
+
+	if changedFrameRefs then
+		clearTransformLocks()
+		clearShiftLockStateConnection()
+		if shiftLockFrame then
+			lockGuiTransform(shiftLockFrame)
+			shiftLockEnabled = readShiftLockEnabled(shiftLockFrame)
+			shiftLockStateConnection = shiftLockFrame:GetAttributeChangedSignal("ShiftLockEnabled"):Connect(function()
+				shiftLockEnabled = readShiftLockEnabled(shiftLockFrame)
+				applySprintUi(getSprintIntent())
+			end)
+		else
+			shiftLockEnabled = false
+		end
+		if sprintFrame then
+			lockGuiTransform(sprintFrame)
+		end
+	end
+end
+
+local function pushSprintIntent()
+	local intent = getSprintIntent()
+	if not shiftLockFrame or not sprintFrame then
+		resolveSprintUi()
+	end
+	applySprintUi(intent)
+	if intent == lastSentIntent then
+		return
+	end
+	lastSentIntent = intent
+	if sprintStateRemote and sprintStateRemote:IsA("RemoteEvent") then
+		sprintStateRemote:FireServer(intent)
+	end
+end
+
+local function resetLocalSprintState()
+	toggleActive = false
+	shiftHeld = false
+	wHeld = false
+	pushSprintIntent()
+end
+
+UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+	if gameProcessed then
+		return
+	end
+	if UserInputService:GetFocusedTextBox() then
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.W then
+		wHeld = true
+		pushSprintIntent()
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.LeftControl then
+		shiftHeld = true
+		if isToggleMode() then
+			toggleActive = not toggleActive
+		end
+		pushSprintIntent()
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input: InputObject, _gameProcessed: boolean)
+	if input.KeyCode == Enum.KeyCode.W then
+		wHeld = false
+		if isToggleMode() then
+			-- Releasing W fully ends toggle sprint; player must toggle again.
+			toggleActive = false
+		else
+			-- Releasing W in hold mode requires re-pressing sprint key.
+			shiftHeld = false
+		end
+		pushSprintIntent()
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.LeftControl then
+		shiftHeld = false
+		pushSprintIntent()
+	end
+end)
+
+player:GetAttributeChangedSignal(ATTR_TOGGLE_SPRINT_MODE):Connect(function()
+	if not isToggleMode() then
+		-- Moving from Toggle -> Hold should not keep old toggle state latched.
+		toggleActive = false
+	end
+	pushSprintIntent()
+end)
+
+player.CharacterAdded:Connect(function()
+	resetLocalSprintState()
+end)
+
+player.CharacterRemoving:Connect(function()
+	resetLocalSprintState()
+end)
+
+playerGui.DescendantAdded:Connect(function(descendant: Instance)
+	if not descendant:IsA("GuiObject") then
+		return
+	end
+	if descendant.Name ~= DEFAULT_CROSSHAIR_FRAME_NAME and descendant.Name ~= SPRINT_FRAME_NAME then
+		return
+	end
+	resolveSprintUi()
+	applySprintUi(getSprintIntent())
+end)
+
+resolveSprintUi()
+resetLocalSprintState()
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="LocalScript" referent="192">
         <Properties>
           <string name="Name">StatsPanelController</string>
           <string name="Source"><![CDATA[--!strict
@@ -55884,7 +56817,7 @@ end)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="190">
+      <Item class="LocalScript" referent="193">
         <Properties>
           <string name="Name">StatusEffectController</string>
           <string name="Source"><![CDATA[--!strict
@@ -55985,7 +56918,7 @@ end)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="191">
+      <Item class="LocalScript" referent="194">
         <Properties>
           <string name="Name">WipeScoreboardController</string>
           <string name="Source"><![CDATA[--!strict
@@ -56117,7 +57050,7 @@ _G.WipeScoreboardController = {
 ]]></string>
         </Properties>
       </Item>
-      <Item class="LocalScript" referent="192">
+      <Item class="LocalScript" referent="195">
         <Properties>
           <string name="Name">WipeScreenController</string>
           <string name="Source"><![CDATA[--!strict
@@ -56439,23 +57372,23 @@ end)
       </Item>
     </Item>
   </Item>
-  <Item class="Teams" referent="193">
+  <Item class="Teams" referent="196">
     <Properties>
       <string name="Name">Teams</string>
     </Properties>
-    <Item class="Folder" referent="194">
+    <Item class="Folder" referent="197">
       <Properties>
         <string name="Name">GUI</string>
       </Properties>
-      <Item class="Folder" referent="195">
+      <Item class="Folder" referent="198">
         <Properties>
           <string name="Name">Backup</string>
         </Properties>
-        <Item class="ScreenGui" referent="196">
+        <Item class="ScreenGui" referent="199">
           <Properties>
             <string name="Name">MobileButtons</string>
           </Properties>
-          <Item class="LocalScript" referent="197">
+          <Item class="LocalScript" referent="200">
             <Properties>
               <string name="Name">MobilityButtonHandler</string>
               <string name="Source"><![CDATA[--!strict

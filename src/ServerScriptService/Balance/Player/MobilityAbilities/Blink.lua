@@ -6,7 +6,7 @@
 return {
 	id = "Blink",
 	displayName = "Blink",
-	description = "Tap into space. Ground: short 25-stud blink. Air: 0.3s windup, then blink 110 studs upward at 30°.",
+	description = "Tap into space. Ground: short 25-stud blink. Air: 0.3s windup, then blink 110 studs upward at 30 degrees.",
 	
 	-- UI color (shown in upgrade selection)
 	color = Color3.fromRGB(160, 120, 255),
