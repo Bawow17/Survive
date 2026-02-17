@@ -11,6 +11,7 @@ local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColl
 local TargetingService = require(game.ServerScriptService.Abilities.TargetingService)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local FacingResolver = require(ReplicatedStorage.Shared.FacingResolver)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -155,6 +156,9 @@ local Collision: any
 local Health: any
 local PlayerStats: any
 local DeathAnimation: any
+local Velocity: any
+local DesiredVelocity: any
+local FacingDirection: any
 
 local playerQuery: any
 
@@ -271,6 +275,24 @@ local function getEnemyDebugMeta(enemyId: number): (number, string?, string?)
 	local subtype = EnemyColliderService.getEnemySubtype(enemyId)
 	local tier = EnemyColliderService.getEnemyTier(enemyId)
 	return scale, subtype, tier
+end
+
+local function horizontalYawDegFromVector(vec: Vector3?): number?
+	if typeof(vec) ~= "Vector3" then
+		return nil
+	end
+	local horizontal = Vector3.new(vec.X, 0, vec.Z)
+	if horizontal.Magnitude <= 1e-4 then
+		return nil
+	end
+	return math.deg(math.atan2(horizontal.X, horizontal.Z))
+end
+
+local function horizontalYawDegFromCFrame(cf: CFrame?): number?
+	if typeof(cf) ~= "CFrame" then
+		return nil
+	end
+	return horizontalYawDegFromVector(cf.LookVector)
 end
 
 local function recordProjectileRejectionSample(
@@ -951,6 +973,9 @@ function ProjectileService.init(worldRef: any, components: any, getPlayerFromEnt
 	Health = Components.Health
 	PlayerStats = Components.PlayerStats
 	DeathAnimation = Components.DeathAnimation
+	Velocity = Components.Velocity
+	DesiredVelocity = Components.DesiredVelocity
+	FacingDirection = Components.FacingDirection
 
 	playerQuery = world:query(Components.Position, Components.PlayerStats):cached()
 
@@ -1951,8 +1976,14 @@ function ProjectileService.getEnemyVisualHitboxDebugSamples(maxSamples: number?)
 	for enemyId, entityType, pos in world:query(EntityType, Position) do
 		if entityType and entityType.type == "Enemy" then
 			local basePos = Vector3.new(pos.x, pos.y, pos.z)
-			local center, _, _, _, halfExtents = getEnemyCollisionCenter(enemyId)
+			local center, _, _, boxCFrame, halfExtents = getEnemyCollisionCenter(enemyId)
 			local scale, subtype, tier = getEnemyDebugMeta(enemyId)
+			local facingData = FacingDirection and world:get(enemyId, FacingDirection) or nil
+			local desiredVelocityData = DesiredVelocity and world:get(enemyId, DesiredVelocity) or nil
+			local velocityData = Velocity and world:get(enemyId, Velocity) or nil
+			local resolvedFacing = FacingResolver.resolveEnemyFacing(facingData, desiredVelocityData, velocityData, Vector3.new(0, 0, 1))
+			local facingYaw = horizontalYawDegFromVector(resolvedFacing)
+			local boxYaw = horizontalYawDegFromCFrame(boxCFrame)
 			samples[#samples + 1] = {
 				enemyId = enemyId,
 				subtype = subtype,
@@ -1963,6 +1994,8 @@ function ProjectileService.getEnemyVisualHitboxDebugSamples(maxSamples: number?)
 				halfExtents = halfExtents,
 				baseToCenterY = (center and (center.Y - basePos.Y)) or 0,
 				bottomY = (center and halfExtents and (center.Y - halfExtents.Y)) or nil,
+				facingYaw = facingYaw,
+				boxYaw = boxYaw,
 			}
 			count += 1
 			if count >= limit then

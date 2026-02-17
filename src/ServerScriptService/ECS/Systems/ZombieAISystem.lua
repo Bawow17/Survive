@@ -107,6 +107,49 @@ local function getAttackRangeFromAttackbox(enemyEntity: number): number
 	return EnemyColliderService.getScaledAttackRange(enemyEntity, 0.5)
 end
 
+local ATTACKBOX_CONTACT_PADDING = 0.1
+local meleeOverlapParams = OverlapParams.new()
+meleeOverlapParams.FilterType = Enum.RaycastFilterType.Include
+meleeOverlapParams.MaxParts = 1
+local meleeOverlapFilter: {Instance} = {}
+
+local function getPlayerRootPart(playerEntity: number): BasePart?
+	local playerStats = world:get(playerEntity, Components.PlayerStats)
+	if not playerStats or not playerStats.player then
+		return nil
+	end
+	local character = playerStats.player.Character
+	if not character then
+		return nil
+	end
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if rootPart and rootPart:IsA("BasePart") then
+		return rootPart
+	end
+	return nil
+end
+
+local function isPlayerInsideEnemyAttackbox(enemyEntity: number, rootPart: BasePart): boolean
+	local attackboxCollider = EnemyColliderService.getWorldAttackbox(enemyEntity)
+	if not attackboxCollider then
+		return false
+	end
+
+	local boxCFrame = attackboxCollider.boxCFrame
+	local halfExtents = attackboxCollider.halfExtents
+	if typeof(boxCFrame) ~= "CFrame" or typeof(halfExtents) ~= "Vector3" then
+		return false
+	end
+
+	local querySize = (halfExtents + Vector3.new(ATTACKBOX_CONTACT_PADDING, ATTACKBOX_CONTACT_PADDING, ATTACKBOX_CONTACT_PADDING)) * 2
+	table.clear(meleeOverlapFilter)
+	meleeOverlapFilter[1] = rootPart
+	meleeOverlapParams.FilterDescendantsInstances = meleeOverlapFilter
+
+	local overlaps = Workspace:GetPartBoundsInBox(boxCFrame, querySize, meleeOverlapParams)
+	return #overlaps > 0
+end
+
 
 local function findNearestPlayer(enemyPosition: {x: number, y: number, z: number}, players: {[number]: any}): number?
 	local nearestId: number? = nil
@@ -820,16 +863,6 @@ function ZombieAISystem.step(dt: number)
 		local dz = targetPosition.z - enemyPosition.z
 		local distSq = dx * dx + dz * dz
 		local distance = math.sqrt(distSq)
-
-		-- Update facing direction
-		if distSq > 0 and distance > 0 then
-			local facingDirection = {
-				x = dx / distance,
-				y = 0,
-				z = dz / distance
-			}
-			setFacingDirection(enemyEntity, facingDirection)
-		end
 		
 		-- Check if target player is paused (individual pause mode)
 		if not GameOptions.GlobalPause and PauseSystem then
@@ -880,6 +913,16 @@ function ZombieAISystem.step(dt: number)
 			dz = targetPosition.z - enemyPosition.z
 			distSq = dx * dx + dz * dz
 			distance = math.sqrt(distSq)
+		end
+
+		-- Update facing direction after all retargeting/recalculation.
+		if distSq > 0 and distance > 0 then
+			local facingDirection = {
+				x = dx / distance,
+				y = 0,
+				z = dz / distance
+			}
+			setFacingDirection(enemyEntity, facingDirection)
 		end
 		
 		setTarget(enemyEntity, nearestPlayerId)
@@ -1057,32 +1100,13 @@ function ZombieAISystem.step(dt: number)
 
 		-- Attack only when within attack range (based on attackbox size)
 		if distance <= attackRange and cooldownRemaining <= 0 then
-				-- Check vertical distance - player must be close to ground to be hit
-				local canHitPlayer = true
-				local playerStats = world:get(nearestPlayerId, Components.PlayerStats)
-				if playerStats and playerStats.player and playerStats.player.Character then
-					local playerRootPart = playerStats.player.Character:FindFirstChild("HumanoidRootPart")
-					if playerRootPart then
-						-- Get player's Y position
-						local playerY = playerRootPart.Position.Y
-						local enemyY = enemyPosition.y
-						local verticalDistance = math.abs(playerY - enemyY)
-						
-						-- Enemy attackbox stays on ground - can only hit players within vertical range
-						-- Typical attackbox height is ~5-6 studs, add buffer for jumping
-						local maxVerticalReach = 4  -- Can hit players up to 4 studs above enemy
-						
-						if verticalDistance > maxVerticalReach then
-							canHitPlayer = false  -- Player is too high (jumping/double jumping)
-						end
-					end
-				end
-				
-				if canHitPlayer then
-					applyDamageToPlayer(nearestPlayerId, damageAmount, enemyEntity)
-					cooldownRemaining = configuredCooldownMax
-					setAttackCooldown(enemyEntity, cooldownRemaining, configuredCooldownMax)
-				end
+			local playerRootPart = getPlayerRootPart(nearestPlayerId)
+			local canHitPlayer = playerRootPart ~= nil and isPlayerInsideEnemyAttackbox(enemyEntity, playerRootPart)
+			if canHitPlayer then
+				applyDamageToPlayer(nearestPlayerId, damageAmount, enemyEntity)
+				cooldownRemaining = configuredCooldownMax
+				setAttackCooldown(enemyEntity, cooldownRemaining, configuredCooldownMax)
+			end
 		end
 
 		setVelocity(enemyEntity, newVelocity)

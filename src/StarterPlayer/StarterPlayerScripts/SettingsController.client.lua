@@ -176,14 +176,27 @@ local function pushDebounced()
 	end)
 end
 
-local function findSettingRow(componentBaseName: string): Frame?
+local function findSettingRow(componentBaseName: string, labelText: string?): Frame?
 	if not content then
 		return nil
 	end
-	local row = content:FindFirstChild(componentBaseName .. "Frame")
-	if row and row:IsA("Frame") then
-		return row
+
+	local candidateNames = { componentBaseName .. "Frame" }
+	if labelText then
+		-- Support authored names that intentionally keep special separators, e.g. "Toggle/HoldSprintFrame".
+		local compactLabelName = string.gsub(labelText, "%s+", "") .. "Frame"
+		if compactLabelName ~= candidateNames[1] then
+			table.insert(candidateNames, compactLabelName)
+		end
 	end
+
+	for _, candidate in ipairs(candidateNames) do
+		local row = content:FindFirstChild(candidate)
+		if row and row:IsA("Frame") then
+			return row
+		end
+	end
+
 	warn(string.format("[SettingsController] Missing row: %sFrame", componentBaseName))
 	return nil
 end
@@ -197,7 +210,7 @@ local function addSliderRow(
 	setter: (number) -> ()
 )
 	local componentBaseName = toComponentBaseName(labelText)
-	local row = findSettingRow(componentBaseName)
+	local row = findSettingRow(componentBaseName, labelText)
 	if not row then
 		return
 	end
@@ -239,16 +252,21 @@ local function addSliderRow(
 	refresh()
 end
 
-local function addToggleRow(labelText: string, getter: () -> boolean, setter: (boolean) -> ())
+local function addToggleRow(
+	labelText: string,
+	getter: () -> boolean,
+	setter: (boolean) -> (),
+	displayLabelText: string?
+)
 	local componentBaseName = toComponentBaseName(labelText)
-	local row = findSettingRow(componentBaseName)
+	local row = findSettingRow(componentBaseName, labelText)
 	if not row then
 		return
 	end
 
 	local description = row:FindFirstChild("DescriptionLabel")
 	if description and description:IsA("TextLabel") then
-		description.Text = labelText
+		description.Text = displayLabelText or labelText
 	end
 
 	local toggle = row:FindFirstChild("ToggleButton")
@@ -322,7 +340,7 @@ addToggleRow("Toggle/Hold Sprint", function()
 end, function(value: boolean)
 	currentSettings.controls.toggleSprintMode = value
 	applyToAttributes(currentSettings)
-end)
+end, "Toggle to sprint")
 
 if closeButton then
 	closeButton.Activated:Connect(function()

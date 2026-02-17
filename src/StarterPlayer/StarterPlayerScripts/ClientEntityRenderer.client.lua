@@ -8,6 +8,7 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local ModelPaths = require(ReplicatedStorage.Shared.ModelPaths)
+local FacingResolver = require(ReplicatedStorage.Shared.FacingResolver)
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingClient) or require(ReplicatedStorage.Shared.ProfilingStub)
 local PROFILING_ENABLED = ProfilingConfig.ENABLED
@@ -1889,16 +1890,27 @@ local function emitEnemyVisualHitboxDiagnostics(now: number)
 			local expectedScale = sanitizeEnemyScale(record.expectedScale)
 			local tier = record.enemyTier
 			local hasOutline = model:FindFirstChild("TierOutline") ~= nil
+			local modelLook = model:GetPivot().LookVector
+			local modelYaw = math.deg(math.atan2(modelLook.X, modelLook.Z))
+			local resolvedFacing = FacingResolver.resolveEnemyFacing(record.facingDirection, nil, record.velocity, modelLook)
+			local facingYaw = math.deg(math.atan2(resolvedFacing.X, resolvedFacing.Z))
+			local yawDelta = math.abs((modelYaw - facingYaw + 180) % 360 - 180)
 			print(string.format(
-				"[EVHDBG][cli] enemy=%s subtype=%s tier=%s expectedScale=%.2f actualScale=%.2f pivot=(%.2f,%.2f,%.2f) outline=%s",
+				"[EVHDBG][cli] enemy=%s subtype=%s tier=%s expectedScale=%.2f actualScale=%.2f pivot=(%.2f,%.2f,%.2f) modelYaw=%.2f facingYaw=%.2f yawDelta=%.2f outline=%s",
 				tostring(key),
 				tostring(record.entitySubtype),
 				tostring(tier),
 				expectedScale,
 				actualScale,
 				pivot.X, pivot.Y, pivot.Z,
+				modelYaw,
+				facingYaw,
+				yawDelta,
 				tostring(hasOutline)
 			))
+			if yawDelta > 10 then
+				print(string.format("[EVHDBG][cli][yawWarn] enemy=%s yawDelta=%.2f", tostring(key), yawDelta))
+			end
 			printed += 1
 			if printed >= 3 then
 				break
@@ -1991,19 +2003,20 @@ local function computeTargetCFrame(position: Vector3?, facingData: any, velocity
 		local facingX = facingData.x or facingData.X
 		local facingY = facingData.y or facingData.Y
 		local facingZ = facingData.z or facingData.Z
-		
+
 		-- For projectiles, use full 3D facing direction
 		if entityType == "Projectile" and facingX and facingY and facingZ then
 			local facingVector = Vector3.new(facingX, facingY, facingZ)
 			if facingVector.Magnitude > FACE_THRESHOLD then
 				return CFrame.lookAt(targetPosition, targetPosition + facingVector.Unit)
 			end
-		-- For other entities (like enemies), use horizontal facing only
-		elseif facingX and facingZ then
-			local facingVector = Vector3.new(facingX, 0, facingZ)
-			if facingVector.Magnitude > FACE_THRESHOLD then
-				return CFrame.lookAt(targetPosition, targetPosition + facingVector.Unit)
-			end
+		end
+	end
+
+	if entityType == "Enemy" then
+		local resolvedFacing = FacingResolver.resolveEnemyFacing(facingData, nil, velocityData, reference.LookVector)
+		if resolvedFacing.Magnitude > FACE_THRESHOLD then
+			return CFrame.lookAt(targetPosition, targetPosition + resolvedFacing)
 		end
 	end
 

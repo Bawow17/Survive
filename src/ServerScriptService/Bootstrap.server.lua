@@ -559,10 +559,10 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 		enemyHitbox = ModelReplicationService.getEnemyHitbox(enemyType or "Zombie")
 	end
 	if enemyHitbox and enemyHitbox.size then
-		collisionRadius = math.max(enemyHitbox.size.X, enemyHitbox.size.Y, enemyHitbox.size.Z) * 0.5
+		collisionRadius = math.max(enemyHitbox.size.X, enemyHitbox.size.Z) * 0.5
 	end
-	-- Keep physical hurtbox radius in sync with visual tier scale (Super/Elite).
-	collisionRadius = collisionRadius * math.max(visualScale, 1.0)
+	-- Keep physical collision radius in sync with exact visual scale.
+	collisionRadius = collisionRadius * (if typeof(visualScale) == "number" and visualScale > 0 then visualScale else 1.0)
 	setComponent(entity, Collision, { radius = collisionRadius, solid = true }, "Collision")
 
 	-- Owner/aggro metadata for adaptive targeting/exp
@@ -1324,8 +1324,14 @@ local function emitEnemyVisualHitboxDiagnostics(now: number)
 		local center = sample.center
 		local halfExtents = sample.halfExtents
 		if typeof(basePos) == "Vector3" and typeof(center) == "Vector3" and typeof(halfExtents) == "Vector3" then
+			local facingYaw = tonumber(sample.facingYaw)
+			local boxYaw = tonumber(sample.boxYaw)
+			local yawDelta = -1
+			if facingYaw and boxYaw then
+				yawDelta = math.abs((boxYaw - facingYaw + 180) % 360 - 180)
+			end
 			print(string.format(
-				"[EVHDBG][srv] enemy=%s subtype=%s tier=%s scale=%.2f pos=(%.2f,%.2f,%.2f) center=(%.2f,%.2f,%.2f) half=(%.2f,%.2f,%.2f) dY=%.2f bottomY=%s",
+				"[EVHDBG][srv] enemy=%s subtype=%s tier=%s scale=%.2f pos=(%.2f,%.2f,%.2f) center=(%.2f,%.2f,%.2f) half=(%.2f,%.2f,%.2f) dY=%.2f bottomY=%s facingYaw=%s boxYaw=%s yawDelta=%s",
 				tostring(sample.enemyId),
 				tostring(sample.subtype),
 				tostring(sample.tier),
@@ -1334,8 +1340,14 @@ local function emitEnemyVisualHitboxDiagnostics(now: number)
 				center.X, center.Y, center.Z,
 				halfExtents.X, halfExtents.Y, halfExtents.Z,
 				tonumber(sample.baseToCenterY) or 0,
-				tostring(sample.bottomY)
+				tostring(sample.bottomY),
+				tostring(facingYaw),
+				tostring(boxYaw),
+				if yawDelta >= 0 then string.format("%.2f", yawDelta) else "nil"
 			))
+			if yawDelta > 10 then
+				print(string.format("[EVHDBG][srv][yawWarn] enemy=%s yawDelta=%.2f", tostring(sample.enemyId), yawDelta))
+			end
 		end
 	end
 end

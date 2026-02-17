@@ -40,6 +40,15 @@ end
 local topBarFrame = mainHud:WaitForChild("TopBarFrame")
 local hpFrame = topBarFrame:WaitForChild("HPFrame")
 local hpFill = hpFrame:WaitForChild("HPFill") :: Frame
+local healthLabelInstance = hpFrame:FindFirstChild("HealthLabel")
+local healthLabel = if healthLabelInstance and healthLabelInstance:IsA("TextLabel")
+	then (healthLabelInstance :: TextLabel)
+	else nil
+local warnedMissingHealthLabel = false
+if not healthLabel then
+	warnedMissingHealthLabel = true
+	warn("[HUDController] MainHUD.TopBarFrame.HPFrame.HealthLabel not found; numeric health display disabled")
+end
 
 -- Remove any existing overheal fill (in case of reload)
 local existingOverhealFill = hpFrame:FindFirstChild("OverhealFill")
@@ -333,10 +342,10 @@ local function onHealthChange(newHealth: number, newMaxHealth: number)
 		hideTimer = nil
 	end
 	
-	-- Always set timer to hide if at max HP (including on spawn)
-	if currentHealth >= maxHealth and not flashActive then
+	-- Only set timer to hide at max HP when no overheal is active.
+	if currentHealth >= maxHealth and currentOverheal < 0.1 and not flashActive then
 		hideTimer = task.delay(3, function()
-			if currentHealth >= maxHealth and not flashActive then
+			if currentHealth >= maxHealth and currentOverheal < 0.1 and not flashActive then
 				hideHPBar()
 			end
 		end)
@@ -433,58 +442,73 @@ local function startLowHealthFlash()
 	end)
 end
 
+local function formatHealthNumber(value: number): string
+	local rounded = math.floor(value + 0.5)
+	return tostring(math.max(rounded, 0))
+end
+
+local function computeDisplayedHealth(currentHealthValue: number, currentOverhealValue: number): number
+	return math.max(currentHealthValue + currentOverhealValue, 0)
+end
+
+local function updateHealthLabel(current: number, maxHealthValue: number)
+	if not healthLabel then
+		if not warnedMissingHealthLabel then
+			warnedMissingHealthLabel = true
+			warn("[HUDController] HealthLabel missing during update; numeric health display disabled")
+		end
+		return
+	end
+
+	local safeMax = math.max(maxHealthValue, 1)
+	local displayedCurrent = computeDisplayedHealth(current, currentOverheal)
+	healthLabel.Text = string.format("%s/%s", formatHealthNumber(displayedCurrent), formatHealthNumber(safeMax))
+end
+
 local function updateHealthUI(current: number, maxHealthValue: number)
 	maxHealthValue = math.max(maxHealthValue, 1)
+	updateHealthLabel(current, maxHealthValue)
 	local healthRatio = math.clamp(current / maxHealthValue, 0, 1)
 	
-	-- Determine which mode to use
-	local isFullHealth = current >= maxHealthValue
+	-- Shared-bar rules:
+	-- 1) health + overheal <= max: additive fill
+	-- 2) health + overheal > max: ratio-shared full bar
 	local totalEffectiveHP = current + currentOverheal
-	local shouldCompress = not isFullHealth and totalEffectiveHP > maxHealthValue
+	local isOverflow = totalEffectiveHP > maxHealthValue
 	
 	-- Update white health bar
-	if isFullHealth or currentOverheal < 0.1 then
-		-- Mode 1 or Mode 3: White shows actual health percentage
+	if currentOverheal < 0.1 then
 		tweenFill(hpFill, healthRatio)
-	elseif shouldCompress then
-		-- Mode 2: Compress - white shows health / total effective
-		local compressedHealthRatio = current / totalEffectiveHP
-		tweenFill(hpFill, compressedHealthRatio)
+	elseif isOverflow then
+		local healthShare = current / totalEffectiveHP
+		tweenFill(hpFill, healthShare)
 	else
-		-- Mode 3: Actual percentage - white shows actual health percentage
 		tweenFill(hpFill, healthRatio)
 	end
 	
-	-- CRITICAL: Always make health bar visible when overheal is active
+	-- Always make health bar visible when overheal is active.
 	if currentOverheal > 0 then
+		if isHPBarHidden then
+			showHPBar()
+		end
 		hpFill.BackgroundTransparency = baseHealthTransparency
 	end
 	
-	-- Update overheal bar (yellowish overlay) with synchronized tweening
+	-- Update overheal bar (yellow overlay) with synchronized tweening.
 	if currentOverheal >= 0.1 then
 		overhealFill.Visible = true
 		
-		if isFullHealth then
-			-- Mode 1: Full health - Yellow overlaps from right
-			local overhealRatio = math.min(currentOverheal / maxHealthValue, 1.0)
-			
-			overhealFill.AnchorPoint = Vector2.new(1, 0)
-			tweenOverheal(
-				UDim2.new(1, OVERHEAL_OVERLAP, 0, 0),  -- Push right edge by overlap
-				UDim2.new(overhealRatio, OVERHEAL_OVERLAP * 2, 1, 0)  -- Extend both sides
-			)
-		elseif shouldCompress then
-			-- Mode 2: Compress - Share bar proportionally
-			local compressedHealthRatio = current / totalEffectiveHP
-			local compressedOverhealRatio = currentOverheal / totalEffectiveHP
-			
+		if isOverflow then
+			local healthShare = current / totalEffectiveHP
+			local overhealShare = currentOverheal / totalEffectiveHP
+
 			overhealFill.AnchorPoint = Vector2.new(0, 0)
 			tweenOverheal(
-				UDim2.new(compressedHealthRatio, -OVERHEAL_OVERLAP, 0, 0),  -- Start slightly inside white
-				UDim2.new(compressedOverhealRatio, OVERHEAL_OVERLAP * 2, 1, 0)  -- Extend both sides
+				UDim2.new(healthShare, -OVERHEAL_OVERLAP, 0, 0),  -- Start slightly inside white
+				UDim2.new(overhealShare, OVERHEAL_OVERLAP * 2, 1, 0)  -- Extend both sides
 			)
 		else
-			-- Mode 3: Actual percentages - Yellow starts after white
+			-- Non-overflow additive mode.
 			local overhealRatio = currentOverheal / maxHealthValue
 			
 			overhealFill.AnchorPoint = Vector2.new(0, 0)

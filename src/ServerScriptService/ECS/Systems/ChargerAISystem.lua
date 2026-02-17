@@ -71,6 +71,11 @@ local OBSTACLE_CHECK_MAX_DISTANCE_SQ = OBSTACLE_CHECK_MAX_DISTANCE * OBSTACLE_CH
 local BASE_ENEMY_VISUAL_SCALE = 1.0
 local CHARGER_RANGE_SCALE_PER_SIZE = 0.4
 local PLAYER_CONTACT_BUFFER = 1.5
+local ATTACKBOX_CONTACT_PADDING = 0.1
+local meleeOverlapParams = OverlapParams.new()
+meleeOverlapParams.FilterType = Enum.RaycastFilterType.Include
+meleeOverlapParams.MaxParts = 1
+local meleeOverlapFilter: {Instance} = {}
 
 -- Profiling accumulators (reset per step)
 local aiRaycastTime = 0
@@ -280,6 +285,37 @@ local function pointInsideCollider(point: Vector3, collider: {[string]: any}, in
 	return math.abs(localPoint.X) <= (halfExtents.X + inflateAmount)
 		and math.abs(localPoint.Y) <= (halfExtents.Y + inflateAmount)
 		and math.abs(localPoint.Z) <= (halfExtents.Z + inflateAmount)
+end
+
+local function getPlayerRootPart(playerEntity: number): BasePart?
+	local playerStats = world:get(playerEntity, Components.PlayerStats)
+	if not playerStats or not playerStats.player then
+		return nil
+	end
+	local character = playerStats.player.Character
+	if not character then
+		return nil
+	end
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if rootPart and rootPart:IsA("BasePart") then
+		return rootPart
+	end
+	return nil
+end
+
+local function rootPartIntersectsCollider(rootPart: BasePart, collider: {[string]: any}, inflateAmount: number): boolean
+	local boxCFrame = collider and collider.boxCFrame
+	local halfExtents = collider and collider.halfExtents
+	if typeof(boxCFrame) ~= "CFrame" or typeof(halfExtents) ~= "Vector3" then
+		return false
+	end
+
+	local querySize = (halfExtents + Vector3.new(inflateAmount, inflateAmount, inflateAmount)) * 2
+	table.clear(meleeOverlapFilter)
+	meleeOverlapFilter[1] = rootPart
+	meleeOverlapParams.FilterDescendantsInstances = meleeOverlapFilter
+	local overlaps = Workspace:GetPartBoundsInBox(boxCFrame, querySize, meleeOverlapParams)
+	return #overlaps > 0
 end
 
 local function setFacingDirection(entity: number, direction: {x: number, y: number, z: number})
@@ -972,13 +1008,10 @@ function ChargerAISystem.step(dt: number)
 				
 				for _, playerEntity in ipairs(nearbyPlayers) do
 					if not isPlayerInvincible(playerEntity) then
+						local playerRootPart = getPlayerRootPart(playerEntity)
 						local playerRootPos: Vector3? = nil
-						local playerStats = world:get(playerEntity, Components.PlayerStats)
-						if playerStats and playerStats.player and playerStats.player.Character then
-							local playerRootPart = playerStats.player.Character:FindFirstChild("HumanoidRootPart")
-							if playerRootPart then
-								playerRootPos = playerRootPart.Position
-							end
+						if playerRootPart then
+							playerRootPos = playerRootPart.Position
 						end
 
 						if not playerRootPos then
@@ -989,7 +1022,9 @@ function ChargerAISystem.step(dt: number)
 						end
 
 						local canHitPlayer = false
-						if playerRootPos then
+						if attackboxCollider and playerRootPart then
+							canHitPlayer = rootPartIntersectsCollider(playerRootPart, attackboxCollider, ATTACKBOX_CONTACT_PADDING)
+						elseif playerRootPos then
 							if attackboxCollider then
 								canHitPlayer = pointInsideCollider(playerRootPos, attackboxCollider, PLAYER_CONTACT_BUFFER)
 							else
@@ -1000,7 +1035,7 @@ function ChargerAISystem.step(dt: number)
 							end
 						end
 						
-						-- Deal dash damage if within vertical reach (use scaled Damage component)
+						-- Deal dash damage when player root overlaps authored attackbox volume.
 						if canHitPlayer and DamageSystem then
 							local damageComp = world:get(entity, Components.Damage)
 							local dashDamage = (damageComp and damageComp.amount) or balance.baseDamage or 15

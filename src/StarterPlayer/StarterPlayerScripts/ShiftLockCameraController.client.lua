@@ -30,6 +30,10 @@ local shiftLockFrame: GuiObject? = nil
 local shiftLockFrameButtonConnections: {RBXScriptConnection} = {}
 local settingsOpen = false
 local restoreShiftLockAfterSettings = false
+local mainMenuOpen = false
+local restoreShiftLockAfterMainMenu = false
+local mainMenuFrame: GuiObject? = nil
+local mainMenuFrameConnection: RBXScriptConnection? = nil
 
 local function applyNamedStateVisuals(frame: GuiObject, enabled: boolean)
 	local function setIfGuiObject(name: string, visible: boolean)
@@ -93,7 +97,7 @@ local function setShiftLockState(enabled: boolean)
 end
 
 local function toggleShiftLock()
-	if settingsOpen then
+	if settingsOpen or mainMenuOpen then
 		return
 	end
 	setShiftLockState(not shiftLockEnabled)
@@ -118,9 +122,37 @@ local function syncSettingsLockout()
 	setShiftLockIndicatorState(shiftLockEnabled)
 end
 
+local function syncMainMenuLockout()
+	if mainMenuOpen then
+		restoreShiftLockAfterMainMenu = restoreShiftLockAfterMainMenu or shiftLockEnabled
+		if shiftLockEnabled then
+			setShiftLockState(false)
+		else
+			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+			UserInputService.MouseIconEnabled = true
+			setShiftLockIndicatorState(false)
+		end
+		return
+	end
+
+	if restoreShiftLockAfterMainMenu then
+		restoreShiftLockAfterMainMenu = false
+		if not settingsOpen then
+			setShiftLockState(true)
+			return
+		end
+	end
+
+	if settingsOpen then
+		-- Settings lockout decides UI while settings are open.
+		return
+	end
+	setShiftLockIndicatorState(shiftLockEnabled)
+end
+
 local function onShiftLockAction(_: string, inputState: Enum.UserInputState): Enum.ContextActionResult
 	if inputState == Enum.UserInputState.Begin then
-		if settingsOpen then
+		if settingsOpen or mainMenuOpen then
 			return Enum.ContextActionResult.Sink
 		end
 		if UserInputService:GetFocusedTextBox() then
@@ -134,6 +166,53 @@ local function onShiftLockAction(_: string, inputState: Enum.UserInputState): En
 		return Enum.ContextActionResult.Sink
 	end
 	return Enum.ContextActionResult.Sink
+end
+
+local function bindMainMenuFrame(frame: GuiObject)
+	if mainMenuFrameConnection then
+		mainMenuFrameConnection:Disconnect()
+		mainMenuFrameConnection = nil
+	end
+
+	mainMenuFrame = frame
+	local function refreshMainMenuState()
+		local wasOpen = mainMenuOpen
+		mainMenuOpen = frame.Visible
+		-- Default behavior: entering gameplay from main menu enables shift-lock.
+		if wasOpen and not mainMenuOpen then
+			restoreShiftLockAfterMainMenu = true
+		end
+		syncMainMenuLockout()
+	end
+
+	mainMenuFrameConnection = frame:GetPropertyChangedSignal("Visible"):Connect(refreshMainMenuState)
+	refreshMainMenuState()
+end
+
+local function tryBindMainMenuFrame()
+	local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+	if not playerGui then
+		return
+	end
+
+	local mainMenuGui = playerGui:FindFirstChild("MainMenuGui")
+	local frame: GuiObject? = nil
+	if mainMenuGui then
+		local found = mainMenuGui:FindFirstChild("MainMenuFrame", true)
+		if found and found:IsA("GuiObject") then
+			frame = found
+		end
+	end
+	if not frame then
+		local found = playerGui:FindFirstChild("MainMenuFrame", true)
+		if found and found:IsA("GuiObject") then
+			frame = found
+		end
+	end
+
+	if frame then
+		bindMainMenuFrame(frame)
+	end
 end
 
 local function bindShiftLockFrame(frame: GuiObject)
@@ -314,15 +393,20 @@ local playerGui = localPlayer:WaitForChild("PlayerGui")
 playerGui.DescendantAdded:Connect(function(descendant: Instance)
 	if descendant.Name == "ShiftLockFrame" and descendant:IsA("GuiObject") then
 		bindShiftLockFrame(descendant)
+	elseif descendant.Name == "MainMenuFrame" and descendant:IsA("GuiObject") then
+		bindMainMenuFrame(descendant)
 	end
 end)
 tryBindShiftLockFrame()
+tryBindMainMenuFrame()
 setShiftLockState(false)
 settingsOpen = (localPlayer:GetAttribute(ATTR_SETTINGS_OPEN) == true)
 syncSettingsLockout()
+syncMainMenuLockout()
 localPlayer:GetAttributeChangedSignal(ATTR_SETTINGS_OPEN):Connect(function()
 	settingsOpen = (localPlayer:GetAttribute(ATTR_SETTINGS_OPEN) == true)
 	syncSettingsLockout()
+	syncMainMenuLockout()
 end)
 
 RunService:BindToRenderStep("ShiftLockCameraOffset", Enum.RenderPriority.Camera.Value - 1, function(dt: number)

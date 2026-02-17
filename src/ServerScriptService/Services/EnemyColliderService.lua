@@ -2,7 +2,10 @@
 -- EnemyColliderService - Centralized enemy collider and scale resolution.
 -- Single source of truth for hitbox/attackbox world transforms.
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+local FacingResolver = require(ReplicatedStorage.Shared.FacingResolver)
 
 local EnemyColliderService = {}
 
@@ -36,23 +39,19 @@ function EnemyColliderService.init(worldRef: any, componentsRef: any)
 end
 
 local function getFacingOrientation(enemyEntity: number): CFrame
-	if not world or not Components or not Components.FacingDirection then
+	if not world or not Components then
 		return CFrame.new()
 	end
-	local facing = world:get(enemyEntity, Components.FacingDirection)
-	if typeof(facing) ~= "table" then
-		return CFrame.new()
-	end
-	local fx = facing.x or facing.X
-	local fz = facing.z or facing.Z
-	if typeof(fx) ~= "number" or typeof(fz) ~= "number" then
-		return CFrame.new()
-	end
-	local dir = Vector3.new(fx, 0, fz)
-	if dir.Magnitude <= 1e-4 then
-		return CFrame.new()
-	end
-	return CFrame.lookAt(Vector3.zero, dir.Unit)
+	local facing = Components.FacingDirection and world:get(enemyEntity, Components.FacingDirection) or nil
+	local desiredVelocity = Components.DesiredVelocity and world:get(enemyEntity, Components.DesiredVelocity) or nil
+	local velocity = Components.Velocity and world:get(enemyEntity, Components.Velocity) or nil
+	local resolvedFacing = FacingResolver.resolveEnemyFacing(
+		facing,
+		desiredVelocity,
+		velocity,
+		Vector3.new(0, 0, 1)
+	)
+	return CFrame.lookAt(Vector3.zero, resolvedFacing)
 end
 
 local function getCollisionRadius(enemyEntity: number): number?
@@ -104,16 +103,16 @@ function EnemyColliderService.getEnemyTier(enemyEntity: number): string?
 end
 
 function EnemyColliderService.getEffectiveScale(enemyEntity: number): number
-	local scale = DEFAULT_SCALE
 	if not world or not Components then
-		return scale
+		return DEFAULT_SCALE
 	end
 
+	-- Scale must match rendered model scale exactly.
 	if Components.Visual then
 		local visual = world:get(enemyEntity, Components.Visual)
 		local visualScale = visual and visual.scale
 		if typeof(visualScale) == "number" and visualScale == visualScale and visualScale > 0 then
-			scale = math.max(scale, math.clamp(visualScale, 0.1, 20.0))
+			return math.clamp(visualScale, 0.1, 20.0)
 		end
 	end
 
@@ -122,14 +121,13 @@ function EnemyColliderService.getEffectiveScale(enemyEntity: number): number
 		if typeof(tierData) == "table" then
 			local tierScale = tierData.scale
 			if typeof(tierScale) == "number" and tierScale == tierScale and tierScale > 0 then
-				scale = math.max(scale, math.clamp(tierScale, 0.1, 20.0))
-			else
-				scale = math.max(scale, getTierFallbackScale(tierData.tier))
+				return math.clamp(tierScale, 0.1, 20.0)
 			end
+			return getTierFallbackScale(tierData.tier)
 		end
 	end
 
-	return scale
+	return DEFAULT_SCALE
 end
 
 function EnemyColliderService.getBasePosition(enemyEntity: number): Vector3?
@@ -149,12 +147,19 @@ local function toColliderProfile(data: any): ColliderProfile?
 	end
 	local size = data.size
 	local offset = data.offset or Vector3.new(0, 0, 0)
+	local rotation = data.rotation
+	if typeof(rotation) == "CFrame" then
+		rotation = rotation - rotation.Position
+	else
+		rotation = nil
+	end
 	return {
 		size = size,
 		offset = offset,
 		halfExtents = size * 0.5,
-		radius = math.max(size.X, size.Y, size.Z) * 0.5,
-		rotation = data.rotation,
+		-- Use horizontal radius so tall hitboxes do not inflate collision breadth.
+		radius = math.max(size.X, size.Z) * 0.5,
+		rotation = rotation,
 	}
 end
 
@@ -206,15 +211,6 @@ local function buildWorldCollider(enemyEntity: number, basePos: Vector3, scale: 
 	local center = basePos + worldOffset
 	local halfExtents = profile.halfExtents * scale
 	local radius = profile.radius * scale
-	local collisionRadius = getCollisionRadius(enemyEntity)
-	if collisionRadius then
-		radius = math.max(radius, collisionRadius)
-		halfExtents = Vector3.new(
-			math.max(halfExtents.X, collisionRadius),
-			math.max(halfExtents.Y, collisionRadius),
-			math.max(halfExtents.Z, collisionRadius)
-		)
-	end
 	local rotation = facingOrientation * localRotation
 	return {
 		basePos = basePos,
@@ -236,12 +232,16 @@ function EnemyColliderService.getWorldHitbox(enemyEntity: number): {[string]: an
 	if not profile then
 		local fallbackRadius = getCollisionRadius(enemyEntity) or (2.5 * scale)
 		local half = Vector3.new(fallbackRadius, fallbackRadius, fallbackRadius)
+		local fallbackFacing = getFacingOrientation(enemyEntity)
+		local attackProfile = ensureAttackboxProfile(subtype)
+		local attackLocalRotation = attackProfile and attackProfile.rotation or CFrame.new()
+		local fallbackRotation = fallbackFacing * attackLocalRotation
 		return {
 			basePos = basePos,
 			center = basePos,
 			halfExtents = half,
 			radius = fallbackRadius,
-			boxCFrame = CFrame.new(basePos),
+			boxCFrame = CFrame.new(basePos) * fallbackRotation,
 			scale = scale,
 			subtype = subtype,
 			tier = EnemyColliderService.getEnemyTier(enemyEntity),
@@ -279,12 +279,15 @@ function EnemyColliderService.getScaledAttackRange(enemyEntity: number, contactB
 		return fallback
 	end
 	local half = worldAttackbox.halfExtents
-	if typeof(half) ~= "Vector3" then
+	local center = worldAttackbox.center
+	local basePos = worldAttackbox.basePos
+	if typeof(half) ~= "Vector3" or typeof(center) ~= "Vector3" or typeof(basePos) ~= "Vector3" then
 		return fallback
 	end
-	local maxDimension = math.max(half.X, half.Z) * 2
+	local horizontalOffset = Vector3.new(center.X - basePos.X, 0, center.Z - basePos.Z).Magnitude
+	local horizontalHalfExtent = math.max(half.X, half.Z)
 	local buffer = if typeof(contactBuffer) == "number" then contactBuffer else 0.5
-	return maxDimension + buffer
+	return horizontalOffset + horizontalHalfExtent + buffer
 end
 
 function EnemyColliderService.getGroundSnapOffsetForSubtype(

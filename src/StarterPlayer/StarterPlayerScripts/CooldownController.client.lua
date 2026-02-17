@@ -141,6 +141,11 @@ end
 local abilityCastRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("AbilityCast")
 
 abilityCastRemote.OnClientEvent:Connect(function(abilityId: string, cooldownDuration: number, abilityName: string?)
+	-- Slot HUD owns MagicBolt + mobility cooldown display.
+	if abilityId == "MagicBolt" or string.sub(abilityId, 1, 9) == "Mobility_" then
+		return
+	end
+
 	local displayName = abilityName or abilityId
 	
 	-- Remove old row if it exists

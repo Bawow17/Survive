@@ -30,17 +30,6 @@ local function findNamedPart(model: Model, name: string): BasePart?
 	return nil
 end
 
-local function normalizeEnemyHitboxOffset(size: Vector3, offset: Vector3): Vector3
-	-- Some authored hitboxes are placed near feet while still representing full body size.
-	-- Treat hitbox part as size source, but clamp center Y to at least half-height so
-	-- collision/targeting stay centered on body and scale correctly for Super/Elite.
-	local minCenterY = size.Y * 0.5
-	if offset.Y < minCenterY then
-		return Vector3.new(offset.X, minCenterY, offset.Z)
-	end
-	return offset
-end
-
 local function computeHitboxData(model: Model): {size: Vector3, offset: Vector3, rotation: CFrame?}?
 	-- Always prefer explicit author-defined hurtbox from the model hierarchy.
 	local explicitHitbox = findNamedPart(model, "Hitbox")
@@ -48,10 +37,9 @@ local function computeHitboxData(model: Model): {size: Vector3, offset: Vector3,
 		local pivot = model:GetPivot()
 		local localCf = pivot:ToObjectSpace(explicitHitbox.CFrame)
 		local rotation = CFrame.fromMatrix(Vector3.new(0, 0, 0), localCf.RightVector, localCf.UpVector, localCf.LookVector)
-		local normalizedOffset = normalizeEnemyHitboxOffset(explicitHitbox.Size, localCf.Position)
 		return {
 			size = explicitHitbox.Size,
-			offset = normalizedOffset,
+			offset = localCf.Position,
 			rotation = rotation,
 		}
 	end
@@ -64,10 +52,9 @@ local function computeHitboxData(model: Model): {size: Vector3, offset: Vector3,
 		local pivot = model:GetPivot()
 		local localCf = pivot:ToObjectSpace(bboxCFrame)
 		local rotation = CFrame.fromMatrix(Vector3.new(0, 0, 0), localCf.RightVector, localCf.UpVector, localCf.LookVector)
-		local normalizedOffset = normalizeEnemyHitboxOffset(bboxSize, localCf.Position)
 		return {
 			size = bboxSize,
-			offset = normalizedOffset,
+			offset = localCf.Position,
 			rotation = rotation,
 		}
 	end
@@ -77,10 +64,9 @@ local function computeHitboxData(model: Model): {size: Vector3, offset: Vector3,
 		local pivot = model:GetPivot()
 		local localCf = pivot:ToObjectSpace(primary.CFrame)
 		local rotation = CFrame.fromMatrix(Vector3.new(0, 0, 0), localCf.RightVector, localCf.UpVector, localCf.LookVector)
-		local normalizedOffset = normalizeEnemyHitboxOffset(primary.Size, localCf.Position)
 		return {
 			size = primary.Size,
-			offset = normalizedOffset,
+			offset = localCf.Position,
 			rotation = rotation,
 		}
 	end
