@@ -343,8 +343,23 @@ local function canFire(player: Player, playerEntity: number): boolean
 	return true
 end
 
-local function handlePrimaryFireRequest(player: Player, targetPoint: any)
-	if typeof(targetPoint) ~= "Vector3" then
+local function handlePrimaryFireRequest(player: Player, requestPayload: any)
+	local targetPoint: Vector3? = nil
+	local clientShotId: number? = nil
+	if typeof(requestPayload) == "Vector3" then
+		targetPoint = requestPayload
+	elseif typeof(requestPayload) == "table" then
+		if typeof(requestPayload.targetPoint) == "Vector3" then
+			targetPoint = requestPayload.targetPoint
+		end
+		if typeof(requestPayload.clientShotId) == "number" then
+			local normalized = math.floor(requestPayload.clientShotId + 0.5)
+			if normalized >= 0 then
+				clientShotId = normalized
+			end
+		end
+	end
+	if not targetPoint then
 		return
 	end
 	if not getPlayerEntity or not primaryShotRemote then
@@ -396,6 +411,7 @@ local function handlePrimaryFireRequest(player: Player, targetPoint: any)
 	primaryShotRemote:FireAllClients({
 		shooterUserId = player.UserId,
 		weaponId = Oathkeeper.id,
+		clientShotId = clientShotId,
 		origin = shot.origin,
 		impactPosition = shot.impactPosition,
 		impactNormal = shot.impactNormal,

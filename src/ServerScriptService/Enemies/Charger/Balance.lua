@@ -10,9 +10,9 @@ ChargerBalance.modelPath = "game.ServerStorage.ContentDrawer.Enemies.Mobs.Charge
 
 -- Base stats (affected by global scaling)
 -- Tuned toward a tougher RoR2-style uncommon threat.
-ChargerBalance.baseHealth = 240
-ChargerBalance.baseDamage = 16 -- Primary threat comes from dash connect
-ChargerBalance.baseSpeed = 18
+ChargerBalance.baseHealth = 165
+ChargerBalance.baseDamage = 28 -- Primary threat comes from dash connect
+ChargerBalance.baseSpeed = 20
 
 -- AI behavior identifier
 ChargerBalance.behavior = "Charger"

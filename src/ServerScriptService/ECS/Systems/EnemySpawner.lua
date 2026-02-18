@@ -66,7 +66,7 @@ local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 raycastParams.IgnoreWater = true
 
-local SPAWN_GROUND_CLEARANCE = 0.15
+local SPAWN_GROUND_CLEARANCE = 0
 local GROUND_RAYCAST_UP = 120
 local GROUND_RAYCAST_DOWN = 600
 local MAX_GROUND_DELTA_FROM_PLAYER_Y = 80

@@ -2,9 +2,9 @@
 
 return {
 	id = "Oathkeeper",
-	damage = 90,
+	damage = 38,
 	range = 1500,
-	baseCooldown = 0.4,
+	baseCooldown = 0.33,
 	activeWalkWindow = 2.5,
 	tracerLifetime = 0.6,
 	tracerFadeDuration = 0.5,

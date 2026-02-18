@@ -1,5 +1,5 @@
 --!strict
--- GameSessionTimer - Tracks session time using os.clock baseline + additive offset.
+-- GameSessionTimer - Tracks session time using wall-clock baseline + additive offset.
 
 local GameSessionTimer = {}
 
@@ -7,9 +7,12 @@ local sessionStartClock: number? = nil
 local sessionTimeOffset = 0
 local sessionPaused = false
 local pausedAtClock: number? = nil
+local function nowSeconds(): number
+	return time()
+end
 
 function GameSessionTimer.startSession()
-	sessionStartClock = os.clock()
+	sessionStartClock = nowSeconds()
 	sessionTimeOffset = 0
 	sessionPaused = false
 	pausedAtClock = nil
@@ -24,7 +27,7 @@ function GameSessionTimer.pauseSession()
 		return
 	end
 	sessionPaused = true
-	pausedAtClock = os.clock()
+	pausedAtClock = nowSeconds()
 end
 
 function GameSessionTimer.resumeSession()
@@ -35,7 +38,7 @@ function GameSessionTimer.resumeSession()
 	local pausedAt = pausedAtClock
 	if startClock and pausedAt then
 		-- Shift baseline forward by pause duration so elapsed time remains frozen while paused.
-		sessionStartClock = startClock + (os.clock() - pausedAt)
+		sessionStartClock = startClock + (nowSeconds() - pausedAt)
 	end
 	sessionPaused = false
 	pausedAtClock = nil
@@ -47,7 +50,7 @@ function GameSessionTimer.getSessionTime(): number
 		return 0
 	end
 
-	local nowClock = os.clock()
+	local nowClock = nowSeconds()
 	if sessionPaused and pausedAtClock then
 		nowClock = pausedAtClock
 	end
@@ -60,7 +63,7 @@ function GameSessionTimer.addTime(seconds: number)
 		return
 	end
 	if not sessionStartClock then
-		sessionStartClock = os.clock()
+		sessionStartClock = nowSeconds()
 	end
 	sessionTimeOffset += seconds
 end

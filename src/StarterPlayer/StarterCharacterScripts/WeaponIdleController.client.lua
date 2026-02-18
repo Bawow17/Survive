@@ -323,6 +323,10 @@ local function updateWeaponAnimationState(dt: number?)
 	ensureTrack("M1", m1Id, Enum.AnimationPriority.Action2, false)
 
 	local sprinting = isSprintTrackPlaying()
+	if sprinting and lastShotTime ~= nil then
+		-- Entering sprint cancels the weapon-active animation window.
+		lastShotTime = nil
+	end
 	local moving = humanoidRef.MoveDirection.Magnitude > 0.05
 	local shotTime = lastShotTime
 	local activeWalkWindow = resolveActiveWalkWindow(characterModel)

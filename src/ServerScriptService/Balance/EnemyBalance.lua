@@ -12,7 +12,7 @@ EnemyBalance.MaxEnemies = 190 -- Global cap
 -- Global difficulty coefficient (RoR2-style, Normal)
 EnemyBalance.DifficultyCoeff = {
 	EnemyDifficulty = 1.0,
-	RateMult = 1.0,
+	RateMult = 1.6,
 }
 
 -- RoR2-style enemy stat scaling:
@@ -20,7 +20,7 @@ EnemyBalance.DifficultyCoeff = {
 -- 2) Apply per-level growth (HP +30%, damage +20%, speed +0%)
 EnemyBalance.DifficultyScaling = {
 	Mode = "RoR2Ambient",
-	AmbientLevelStep = 0.33,
+	AmbientLevelStep = 0.25,
 	HealthPerLevel = 0.30,
 	DamagePerLevel = 0.20,
 	SpeedPerLevel = 0.00,
@@ -36,7 +36,7 @@ EnemyBalance.DifficultyScaling = {
 -- Dynamic scaling correction clamp (player stats vs expected power by time).
 -- Hard-limited to +/-12% in EnemySpawner even if these values are increased.
 EnemyBalance.ScalingCorrection = {
-	Enabled = true,
+	Enabled = false,
 	SpawnClamp = 0.12,
 	StatClamp = 0.12,
 	SmoothingAlpha = 0.35,

@@ -11,8 +11,8 @@ return {
 	
 	-- Base stats (before multipliers and scaling)
 	-- RoR2-like baseline (Lemurian/Beetle-range):
-	baseHealth = 80,
-	baseDamage = 12,
+	baseHealth = 95,
+	baseDamage = 14,
 	baseSpeed = 11,
 	
 	-- AI behavior

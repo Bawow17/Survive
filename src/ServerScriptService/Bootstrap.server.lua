@@ -169,6 +169,9 @@ local STARTER_WEAPON_IDLE_ATTRIBUTE = "StarterWeaponIdleAnimationId"
 local STARTER_WEAPON_WALK_ATTRIBUTE = "StarterWeaponWalkAnimationId"
 local STARTER_WEAPON_M1_ATTRIBUTE = "StarterWeaponM1AnimationId"
 local STARTER_WEAPON_ACTIVE_WALK_WINDOW_ATTRIBUTE = "StarterWeaponActiveWalkWindow"
+local STARTER_WEAPON_RANGE_ATTRIBUTE = "StarterWeaponRange"
+local STARTER_WEAPON_TRACER_LIFETIME_ATTRIBUTE = "StarterWeaponTracerLifetime"
+local STARTER_WEAPON_TRACER_FADE_DURATION_ATTRIBUTE = "StarterWeaponTracerFadeDuration"
 local STARTER_WEAPON_PATH = Oathkeeper.assetPaths.weaponFolder
 local STARTER_WEAPON_MODEL_NAME = Oathkeeper.assetPaths.model
 local STARTER_WEAPON_GRIP_C0_NAME = Oathkeeper.assetPaths.gripC0
@@ -255,6 +258,9 @@ local function clearStarterWeaponAttributes(character: Model)
 	character:SetAttribute(STARTER_WEAPON_WALK_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_M1_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_ACTIVE_WALK_WINDOW_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_RANGE_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_TRACER_LIFETIME_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_TRACER_FADE_DURATION_ATTRIBUTE, nil)
 end
 
 local function attachStarterWeapon(character: Model)
@@ -351,7 +357,22 @@ local function attachStarterWeapon(character: Model)
 	if typeof(configuredActiveWalkWindow) ~= "number" or configuredActiveWalkWindow < 0 then
 		configuredActiveWalkWindow = 5.0
 	end
+	local configuredRange = Oathkeeper.range
+	if typeof(configuredRange) ~= "number" or configuredRange <= 0 then
+		configuredRange = 1000
+	end
+	local configuredTracerLifetime = Oathkeeper.tracerLifetime
+	if typeof(configuredTracerLifetime) ~= "number" or configuredTracerLifetime <= 0 then
+		configuredTracerLifetime = 2.0
+	end
+	local configuredTracerFadeDuration = Oathkeeper.tracerFadeDuration
+	if typeof(configuredTracerFadeDuration) ~= "number" or configuredTracerFadeDuration < 0 then
+		configuredTracerFadeDuration = 0.5
+	end
 	character:SetAttribute(STARTER_WEAPON_ACTIVE_WALK_WINDOW_ATTRIBUTE, configuredActiveWalkWindow)
+	character:SetAttribute(STARTER_WEAPON_RANGE_ATTRIBUTE, configuredRange)
+	character:SetAttribute(STARTER_WEAPON_TRACER_LIFETIME_ATTRIBUTE, configuredTracerLifetime)
+	character:SetAttribute(STARTER_WEAPON_TRACER_FADE_DURATION_ATTRIBUTE, configuredTracerFadeDuration)
 end
 
 local function setComponent(entity: number, component: any, value: any, componentName: string)

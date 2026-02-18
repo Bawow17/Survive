@@ -236,12 +236,17 @@ local function onAddSessionTime(player: Player, data: any)
 	end
 
 	DifficultyCoeff.addTime(seconds)
+	if GameTimeSystem and GameTimeSystem.addTime then
+		GameTimeSystem.addTime(seconds)
+	end
 	GameSessionTimer.addTime(seconds)
 
 	if sessionTimerUpdateRemote then
 		sessionTimerUpdateRemote:FireAllClients(GameSessionTimer.getSessionTime())
 	end
-	fireAck(player, true, string.format("Added +%ds", seconds))
+	local coeff, details = DifficultyCoeff.getCoeff()
+	local minutes = (type(details) == "table" and details.timeMinutes) or 0
+	fireAck(player, true, string.format("Added +%ds | diff %.2f @ %.1fm", seconds, coeff, minutes))
 	sendOpenState(player)
 end
 

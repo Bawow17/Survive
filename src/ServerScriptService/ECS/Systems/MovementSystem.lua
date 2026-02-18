@@ -207,7 +207,7 @@ local function updateRaycastParams()
 end
 
 local DEFAULT_HEIGHT_OFFSET = 0
-local SPAWN_GROUND_CLEARANCE = 0.15
+local SPAWN_GROUND_CLEARANCE = 0
 
 local function getGeneratedChunksRoot(): Instance?
 	local now = tick()

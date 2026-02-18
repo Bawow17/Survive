@@ -7,6 +7,7 @@ local OctreeSystem = require(script.Parent.OctreeSystem)
 local GameTimeSystem = require(script.Parent.GameTimeSystem)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local EnemyRegistry = require(game.ServerScriptService.Enemies.EnemyRegistry)
 local ObstacleRaycastCache = require(game.ServerScriptService.ECS.Systems.ObstacleRaycastCache)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
@@ -417,6 +418,26 @@ local function findNearestNonPausedPlayer(enemyEntity: number): number?
 	return nearestPlayer
 end
 
+local function resolveFrozenEnemyBaseSpeed(entity: number, ai: any): number
+	if ai and typeof(ai) == "table" and ai.balance then
+		local speed = ai.balance.baseSpeed
+		if typeof(speed) == "number" and speed > 0 then
+			return speed
+		end
+	end
+
+	local entityType = world:get(entity, Components.EntityType)
+	local subtype = if entityType and typeof(entityType.subtype) == "string" then entityType.subtype else nil
+	if subtype then
+		local config = EnemyRegistry.getEnemyConfig(subtype)
+		if config and typeof(config.baseSpeed) == "number" and config.baseSpeed > 0 then
+			return config.baseSpeed
+		end
+	end
+
+	return 8.0
+end
+
 -- Called when a player enters individual pause
 function ZombieAISystem.onPlayerPaused(playerEntity: number)
 	if not world or GameOptions.GlobalPause then
@@ -430,16 +451,8 @@ function ZombieAISystem.onPlayerPaused(playerEntity: number)
 		if target.id == playerEntity then
 			-- Store original speed (use balance base speed if already frozen)
 			local originalSpeed = ai.speed
-			if originalSpeed == 0 then
-				-- Enemy already frozen, get base speed from balance
-				local entityType = world:get(entity, Components.EntityType)
-				if entityType and entityType.subtype == "Zombie" then
-					originalSpeed = 8.0  -- Zombie base speed from balance
-				elseif entityType and entityType.subtype == "Charger" then
-					originalSpeed = 27.0  -- Charger base speed from balance
-				else
-					originalSpeed = 8.0  -- Fallback
-				end
+			if typeof(originalSpeed) ~= "number" or originalSpeed <= 0 then
+				originalSpeed = resolveFrozenEnemyBaseSpeed(entity, ai)
 			end
 			affectedEnemies[entity] = originalSpeed
 		end

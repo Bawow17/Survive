@@ -18,15 +18,85 @@ local primaryShotRemote = weaponRemotesFolder:WaitForChild("PrimaryShot")
 local WEAPON_ID = "Oathkeeper"
 local DEFAULT_COOLDOWN = 1.2
 local AIM_RAY_DISTANCE = 5000
+local DEFAULT_PRIMARY_RANGE = 1000
+local WEAPON_MUZZLE_PATH = "OathkeeperModel.Barrel.BarrelEnd"
+local DEFAULT_TRACER_LIFETIME = 2.0
+local DEFAULT_TRACER_FADE_DURATION = 0.5
+local ATTR_WEAPON_RANGE = "StarterWeaponRange"
+local ATTR_WEAPON_TRACER_LIFETIME = "StarterWeaponTracerLifetime"
+local ATTR_WEAPON_TRACER_FADE_DURATION = "StarterWeaponTracerFadeDuration"
 
 local m1Held = false
 local predictedCooldown = DEFAULT_COOLDOWN
 local nextLocalFireAt = 0
 local humanoid: Humanoid? = nil
+local shotSequence = 0
 
 local aimRayParams = RaycastParams.new()
 aimRayParams.FilterType = Enum.RaycastFilterType.Exclude
 aimRayParams.IgnoreWater = true
+
+local shotRayParams = RaycastParams.new()
+shotRayParams.FilterType = Enum.RaycastFilterType.Exclude
+shotRayParams.IgnoreWater = true
+
+local function getOrCreatePrimaryShotLocalEvent(): BindableEvent
+	local existing = weaponRemotesFolder:FindFirstChild("PrimaryShotLocal")
+	if existing and existing:IsA("BindableEvent") then
+		return existing
+	end
+	local created = Instance.new("BindableEvent")
+	created.Name = "PrimaryShotLocal"
+	created.Parent = weaponRemotesFolder
+
+	local resolved = weaponRemotesFolder:FindFirstChild("PrimaryShotLocal")
+	if resolved and resolved:IsA("BindableEvent") then
+		if resolved ~= created then
+			created:Destroy()
+		end
+		return resolved
+	end
+	return created
+end
+
+local primaryShotLocalEvent = getOrCreatePrimaryShotLocalEvent()
+
+local function findByPath(root: Instance, path: string): Instance?
+	local current: Instance = root
+	for _, part in ipairs(string.split(path, ".")) do
+		local child = current:FindFirstChild(part)
+		if not child then
+			return nil
+		end
+		current = child
+	end
+	return current
+end
+
+local function resolveMuzzleOrigin(character: Model): Vector3?
+	local muzzle = findByPath(character, WEAPON_MUZZLE_PATH)
+	if not muzzle then
+		return nil
+	end
+	if muzzle:IsA("Attachment") then
+		return muzzle.WorldPosition
+	end
+	if muzzle:IsA("BasePart") then
+		return muzzle.Position
+	end
+	return nil
+end
+
+local function readWeaponNumberAttribute(character: Model?, attributeName: string, fallback: number, minValue: number): number
+	if not character then
+		return fallback
+	end
+	local raw = character:GetAttribute(attributeName)
+	if typeof(raw) == "number" and raw >= minValue then
+		return raw
+	end
+	return fallback
+end
 
 local function bindCharacter(character: Model?)
 	humanoid = nil
@@ -83,6 +153,38 @@ local function buildAimPoint(): Vector3?
 	return ray.Origin + rayDirection
 end
 
+local function buildPredictedShot(aimPoint: Vector3): (Vector3?, Vector3?, Vector3?)
+	local character = localPlayer.Character
+	if not character then
+		return nil, nil, nil
+	end
+
+	local origin = resolveMuzzleOrigin(character)
+	if not origin then
+		return nil, nil, nil
+	end
+
+	shotRayParams.FilterDescendantsInstances = { character }
+
+	local direction = aimPoint - origin
+	if direction.Magnitude <= 1e-4 then
+		local camera = Workspace.CurrentCamera
+		if camera then
+			direction = camera.CFrame.LookVector
+		else
+			direction = Vector3.new(0, 0, -1)
+		end
+	end
+	direction = direction.Unit
+
+	local rayDistance = readWeaponNumberAttribute(character, ATTR_WEAPON_RANGE, DEFAULT_PRIMARY_RANGE, 1)
+	local result = Workspace:Raycast(origin, direction * rayDistance, shotRayParams)
+	if result then
+		return origin, result.Position, result.Normal
+	end
+	return origin, origin + (direction * rayDistance), -direction
+end
+
 local function attemptFire()
 	local now = tick()
 	if now < nextLocalFireAt then
@@ -96,7 +198,32 @@ local function attemptFire()
 		return
 	end
 
-	primaryFireRequestRemote:FireServer(aimPoint)
+	shotSequence += 1
+	local clientShotId = shotSequence
+
+	primaryFireRequestRemote:FireServer({
+		targetPoint = aimPoint,
+		clientShotId = clientShotId,
+	})
+
+	local predictedOrigin, predictedImpact, predictedNormal = buildPredictedShot(aimPoint)
+	if predictedOrigin and predictedImpact and predictedNormal then
+		local character = localPlayer.Character
+		local tracerLifetime = readWeaponNumberAttribute(character, ATTR_WEAPON_TRACER_LIFETIME, DEFAULT_TRACER_LIFETIME, 0)
+		local tracerFadeDuration = readWeaponNumberAttribute(character, ATTR_WEAPON_TRACER_FADE_DURATION, DEFAULT_TRACER_FADE_DURATION, 0)
+		primaryShotLocalEvent:Fire({
+			shooterUserId = localPlayer.UserId,
+			weaponId = WEAPON_ID,
+			clientShotId = clientShotId,
+			origin = predictedOrigin,
+			impactPosition = predictedImpact,
+			impactNormal = predictedNormal,
+			tracerLifetime = tracerLifetime,
+			tracerFadeDuration = tracerFadeDuration,
+			predicted = true,
+		})
+	end
+
 	nextLocalFireAt = now + predictedCooldown
 end
 

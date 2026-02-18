@@ -8,9 +8,12 @@ local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local DifficultyCoeff = {}
 
 local runStartTime: number? = nil
+local function nowSeconds(): number
+	return time()
+end
 
 function DifficultyCoeff.reset(startTime: number?)
-	runStartTime = startTime or os.clock()
+	runStartTime = startTime or nowSeconds()
 end
 
 function DifficultyCoeff.addTime(seconds: number)
@@ -18,7 +21,7 @@ function DifficultyCoeff.addTime(seconds: number)
 		return
 	end
 	if not runStartTime then
-		runStartTime = os.clock()
+		runStartTime = nowSeconds()
 	end
 	runStartTime -= seconds
 end
@@ -35,14 +38,14 @@ end
 
 function DifficultyCoeff.getCoeff(): (number, {[string]: number})
 	if not runStartTime then
-		runStartTime = os.clock()
+		runStartTime = nowSeconds()
 	end
 
 	local cfg = EnemyBalance.DifficultyCoeff or {}
 	local enemyDifficulty = cfg.EnemyDifficulty or 1.0
 	local rateMult = cfg.RateMult or 1.25
 	local playerCount = getPlayerCount()
-	local timeMinutes = (os.clock() - runStartTime) / 60
+	local timeMinutes = (nowSeconds() - runStartTime) / 60
 
 	local playerFactor = 0.7 + 0.3 * playerCount
 	local timeFactor = 0.0506 * enemyDifficulty * (playerCount ^ 0.2) * rateMult

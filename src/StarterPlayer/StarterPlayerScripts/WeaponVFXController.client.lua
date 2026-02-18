@@ -6,6 +6,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
+local localPlayer = Players.LocalPlayer
+
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local weaponRemotesFolder = remotesFolder:WaitForChild("Weapons")
 local primaryShotRemote = weaponRemotesFolder:WaitForChild("PrimaryShot")
@@ -13,9 +15,12 @@ local primaryShotRemote = weaponRemotesFolder:WaitForChild("PrimaryShot")
 local WEAPON_ID = "Oathkeeper"
 local DEFAULT_TRACER_LIFETIME = 2.0
 local DEFAULT_TRACER_FADE_DURATION = 0.5
-local MUZZLE_FLASH_PATH = "OathkeeperModel.Barrel.BarrelEnd.MuzzleFlash"
+local WEAPON_MUZZLE_PART_PATH = "OathkeeperModel.Barrel.BarrelEnd"
+local MUZZLE_FLASH_PATH = WEAPON_MUZZLE_PART_PATH .. ".MuzzleFlash"
 
 local warned: {[string]: boolean} = {}
+local predictedShotIds: {[number]: number} = {}
+local PREDICTED_SHOT_ID_TTL = 4.0
 
 local function warnOnce(key: string, message: string)
 	if warned[key] then
@@ -36,6 +41,27 @@ local function findByPath(root: Instance, path: string): Instance?
 	end
 	return current
 end
+
+local function getOrCreatePrimaryShotLocalEvent(): BindableEvent
+	local existing = weaponRemotesFolder:FindFirstChild("PrimaryShotLocal")
+	if existing and existing:IsA("BindableEvent") then
+		return existing
+	end
+	local created = Instance.new("BindableEvent")
+	created.Name = "PrimaryShotLocal"
+	created.Parent = weaponRemotesFolder
+
+	local resolved = weaponRemotesFolder:FindFirstChild("PrimaryShotLocal")
+	if resolved and resolved:IsA("BindableEvent") then
+		if resolved ~= created then
+			created:Destroy()
+		end
+		return resolved
+	end
+	return created
+end
+
+local primaryShotLocalEvent = getOrCreatePrimaryShotLocalEvent()
 
 local function getWeaponFolder(): Instance?
 	return findByPath(ReplicatedStorage, "ContentDrawer.WeaponModels.HandCannons.Oathkeeper")
@@ -241,7 +267,45 @@ local function emitMuzzleFlashForShot(shooterUserId: number)
 	emitParticles(muzzleFlash, 1)
 end
 
-primaryShotRemote.OnClientEvent:Connect(function(payload: any)
+local function resolveLiveMuzzleOrigin(shooterUserId: number, fallbackOrigin: Vector3?): Vector3?
+	local shooter = Players:GetPlayerByUserId(shooterUserId)
+	if shooter and shooter.Character then
+		local muzzle = findByPath(shooter.Character, WEAPON_MUZZLE_PART_PATH)
+		if muzzle then
+			if muzzle:IsA("Attachment") then
+				return muzzle.WorldPosition
+			end
+			if muzzle:IsA("BasePart") then
+				return muzzle.Position
+			end
+		end
+	end
+	return fallbackOrigin
+end
+
+local function isPredictedShotId(clientShotId: number): boolean
+	local expiresAt = predictedShotIds[clientShotId]
+	if not expiresAt then
+		return false
+	end
+	predictedShotIds[clientShotId] = nil
+	return expiresAt >= tick()
+end
+
+local function rememberPredictedShotId(clientShotId: number)
+	predictedShotIds[clientShotId] = tick() + PREDICTED_SHOT_ID_TTL
+end
+
+local function cleanupExpiredPredictedShotIds()
+	local now = tick()
+	for shotId, expiresAt in pairs(predictedShotIds) do
+		if expiresAt <= now then
+			predictedShotIds[shotId] = nil
+		end
+	end
+end
+
+local function renderShotVfx(payload: any)
 	if typeof(payload) ~= "table" then
 		return
 	end
@@ -251,7 +315,23 @@ primaryShotRemote.OnClientEvent:Connect(function(payload: any)
 	if typeof(payload.shooterUserId) ~= "number" then
 		return
 	end
-	if typeof(payload.origin) ~= "Vector3" or typeof(payload.impactPosition) ~= "Vector3" then
+	if typeof(payload.impactPosition) ~= "Vector3" then
+		return
+	end
+
+	cleanupExpiredPredictedShotIds()
+
+	local shooterUserId = payload.shooterUserId
+	local clientShotId = payload.clientShotId
+	if shooterUserId == localPlayer.UserId and typeof(clientShotId) == "number" then
+		if isPredictedShotId(math.floor(clientShotId + 0.5)) then
+			return
+		end
+	end
+
+	local fallbackOrigin = if typeof(payload.origin) == "Vector3" then payload.origin else nil
+	local liveOrigin = resolveLiveMuzzleOrigin(shooterUserId, fallbackOrigin)
+	if not liveOrigin then
 		return
 	end
 
@@ -271,7 +351,24 @@ primaryShotRemote.OnClientEvent:Connect(function(payload: any)
 	local lifetime = typeof(payload.tracerLifetime) == "number" and payload.tracerLifetime or DEFAULT_TRACER_LIFETIME
 	local fadeDuration = typeof(payload.tracerFadeDuration) == "number" and payload.tracerFadeDuration or DEFAULT_TRACER_FADE_DURATION
 
-	emitMuzzleFlashForShot(payload.shooterUserId)
-	spawnTracer(payload.origin, payload.impactPosition, tracerTemplate, lifetime, fadeDuration)
+	emitMuzzleFlashForShot(shooterUserId)
+	spawnTracer(liveOrigin, payload.impactPosition, tracerTemplate, lifetime, fadeDuration)
 	spawnImpactEffect(payload.impactPosition, impactNormal, endpointTemplate)
+end
+
+primaryShotLocalEvent.Event:Connect(function(payload: any)
+	if typeof(payload) ~= "table" then
+		return
+	end
+	if payload.weaponId ~= WEAPON_ID or payload.shooterUserId ~= localPlayer.UserId then
+		return
+	end
+	if typeof(payload.clientShotId) == "number" then
+		rememberPredictedShotId(math.floor(payload.clientShotId + 0.5))
+	end
+	renderShotVfx(payload)
+end)
+
+primaryShotRemote.OnClientEvent:Connect(function(payload: any)
+	renderShotVfx(payload)
 end)

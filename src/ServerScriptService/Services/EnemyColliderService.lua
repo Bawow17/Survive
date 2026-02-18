@@ -15,7 +15,7 @@ local Components: any
 local DEFAULT_SUPER_SCALE = 4.0
 local DEFAULT_ELITE_SCALE = 7.5
 local DEFAULT_SCALE = 1.0
-local DEFAULT_GROUND_CLEARANCE = 0.15
+local DEFAULT_GROUND_CLEARANCE = 0
 local DEFAULT_MAX_GROUND_OFFSET = 12.0
 
 type ColliderProfile = {
