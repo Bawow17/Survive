@@ -10,9 +10,10 @@ return {
 	modelPath = "ReplicatedStorage.ContentDrawer.Enemies.Mobs.Zombie",
 	
 	-- Base stats (before multipliers and scaling)
-	baseHealth = 85,
-	baseDamage = 25,
-	baseSpeed = 12,
+	-- RoR2-like baseline (Lemurian/Beetle-range):
+	baseHealth = 80,
+	baseDamage = 12,
+	baseSpeed = 11,
 	
 	-- AI behavior
 	behavior = "Melee",

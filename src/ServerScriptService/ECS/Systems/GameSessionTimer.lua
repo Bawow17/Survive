@@ -1,48 +1,57 @@
 --!strict
--- GameSessionTimer - Tracks session time (not server uptime)
+-- GameSessionTimer - Tracks session time using os.clock baseline + additive offset.
 
 local GameSessionTimer = {}
 
-local sessionStartTime = 0
+local sessionStartClock: number? = nil
+local sessionTimeOffset = 0
 local sessionPaused = false
-local pausedTime = 0
-local totalPausedDuration = 0
+local pausedAtClock: number? = nil
 
 function GameSessionTimer.startSession()
-	sessionStartTime = tick()
+	sessionStartClock = os.clock()
+	sessionTimeOffset = 0
 	sessionPaused = false
-	pausedTime = 0
-	totalPausedDuration = 0
+	pausedAtClock = nil
 end
 
 function GameSessionTimer.pauseSession()
-	if not sessionPaused then
-		sessionPaused = true
-		pausedTime = tick()
+	if sessionPaused then
+		return
 	end
+	local startClock = sessionStartClock
+	if not startClock then
+		return
+	end
+	sessionPaused = true
+	pausedAtClock = os.clock()
 end
 
 function GameSessionTimer.resumeSession()
-	if sessionPaused then
-		local pauseDuration = tick() - pausedTime
-		totalPausedDuration = totalPausedDuration + pauseDuration
-		sessionPaused = false
+	if not sessionPaused then
+		return
 	end
+	local startClock = sessionStartClock
+	local pausedAt = pausedAtClock
+	if startClock and pausedAt then
+		-- Shift baseline forward by pause duration so elapsed time remains frozen while paused.
+		sessionStartClock = startClock + (os.clock() - pausedAt)
+	end
+	sessionPaused = false
+	pausedAtClock = nil
 end
 
 function GameSessionTimer.getSessionTime(): number
-	if sessionStartTime == 0 then
+	local startClock = sessionStartClock
+	if not startClock then
 		return 0
 	end
-	
-	local currentTime = tick()
-	local elapsed = currentTime - sessionStartTime - totalPausedDuration
-	
-	-- Only account for wipe pauses (pauseSession), NOT level-up pauses
-	if sessionPaused then
-		elapsed = elapsed - (currentTime - pausedTime)
+
+	local nowClock = os.clock()
+	if sessionPaused and pausedAtClock then
+		nowClock = pausedAtClock
 	end
-	
+	local elapsed = (nowClock - startClock) + sessionTimeOffset
 	return math.max(0, elapsed)
 end
 
@@ -50,17 +59,17 @@ function GameSessionTimer.addTime(seconds: number)
 	if typeof(seconds) ~= "number" or seconds <= 0 then
 		return
 	end
-	if sessionStartTime == 0 then
-		sessionStartTime = tick()
+	if not sessionStartClock then
+		sessionStartClock = os.clock()
 	end
-	sessionStartTime -= seconds
+	sessionTimeOffset += seconds
 end
 
 function GameSessionTimer.resetSession()
-	sessionStartTime = 0
+	sessionStartClock = nil
+	sessionTimeOffset = 0
 	sessionPaused = false
-	pausedTime = 0
-	totalPausedDuration = 0
+	pausedAtClock = nil
 end
 
 return GameSessionTimer

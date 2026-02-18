@@ -8,14 +8,11 @@ local Workspace = game:GetService("Workspace")
 local GameStateManager = require(game.ServerScriptService.ECS.Systems.GameStateManager)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
-local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
 
 local LoopGameService = {}
 
 local world: any = nil
 local Components: any = nil
-local ExpSystem: any = nil
-local playerStatsQuery: any = nil
 
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local loopRemotes = remotesFolder:FindFirstChild("LoopGame")
@@ -90,39 +87,12 @@ local spawnRadius = 50
 local minSpawnRadius = 15
 local lastSpawnTime = 0
 local lastInGame = false
-local LOOP_REWARD_BASE_EXP = 60
-local LOOP_REWARD_PER_REQUIRED_COMPLETION = 20
-local LOOP_REWARD_PER_GRID_SIZE_STEP = 10
 
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 raycastParams.IgnoreWater = true
 
 local rng = Random.new()
-
-local function resolvePlayerEntity(player: Player): number?
-	if not playerStatsQuery or not world then
-		return nil
-	end
-	for entity, stats in playerStatsQuery do
-		if stats and stats.player == player then
-			return entity
-		end
-	end
-	return nil
-end
-
-local function calculateObjectiveRewardExp(objective: {
-	gridSize: number,
-	requiredCompletions: number,
-}): number
-	local required = math.max(1, math.floor(objective.requiredCompletions))
-	local gridSize = math.max(3, math.floor(objective.gridSize))
-	local expAmount = LOOP_REWARD_BASE_EXP
-	expAmount += (required - 1) * LOOP_REWARD_PER_REQUIRED_COMPLETION
-	expAmount += (gridSize - 3) * LOOP_REWARD_PER_GRID_SIZE_STEP
-	return math.max(1, math.floor(expAmount))
-end
 
 local function getActivePlayers(): {Player}
 	if GameStateManager.getCurrentState() ~= "InGame" then
@@ -314,15 +284,6 @@ completeRemote.OnServerEvent:Connect(function(player: Player, objectiveId: numbe
 		return
 	end
 
-	-- Full objective completion reward.
-	if ExpSystem then
-		local playerEntity = resolvePlayerEntity(player)
-		if playerEntity then
-			local rewardExp = calculateObjectiveRewardExp(activeObjective)
-			ExpSystem.addExperience(playerEntity, rewardExp)
-		end
-	end
-
 	closeAllRemote:FireAllClients({
 		objectiveId = activeObjective.id,
 		fullComplete = true,
@@ -349,26 +310,9 @@ Players.PlayerAdded:Connect(function(player: Player)
 	end
 end)
 
-function LoopGameService.init(worldRef: any?, componentsRef: any?, expSystemRef: any?)
+function LoopGameService.init(worldRef: any?, componentsRef: any?, _expSystemRef: any?)
 	world = worldRef
 	Components = componentsRef
-	ExpSystem = expSystemRef
-	if world and Components and Components.PlayerStats then
-		playerStatsQuery = world:query(Components.PlayerStats):cached()
-	end
-
-	if ItemBalance and typeof(ItemBalance.LoopPuzzleRewards) == "table" then
-		local rewards = ItemBalance.LoopPuzzleRewards
-		if typeof(rewards.BaseExp) == "number" then
-			LOOP_REWARD_BASE_EXP = math.max(1, math.floor(rewards.BaseExp))
-		end
-		if typeof(rewards.PerRequiredCompletion) == "number" then
-			LOOP_REWARD_PER_REQUIRED_COMPLETION = math.max(0, math.floor(rewards.PerRequiredCompletion))
-		end
-		if typeof(rewards.PerGridSizeStep) == "number" then
-			LOOP_REWARD_PER_GRID_SIZE_STEP = math.max(0, math.floor(rewards.PerGridSizeStep))
-		end
-	end
 
 	lastSpawnTime = GameTimeSystem.getGameTime() - spawnInterval
 	lastInGame = GameStateManager.getCurrentState() == "InGame"

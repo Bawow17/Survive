@@ -12,15 +12,25 @@ EnemyBalance.MaxEnemies = 190 -- Global cap
 -- Global difficulty coefficient (RoR2-style, Normal)
 EnemyBalance.DifficultyCoeff = {
 	EnemyDifficulty = 1.0,
-	RateMult = 1.8,
+	RateMult = 1.0,
 }
 
--- Difficulty coefficient -> enemy scaling exponents (modest)
+-- RoR2-style enemy stat scaling:
+-- 1) Convert coefficient into ambient level (deltaCoeff / 0.33)
+-- 2) Apply per-level growth (HP +30%, damage +20%, speed +0%)
 EnemyBalance.DifficultyScaling = {
+	Mode = "RoR2Ambient",
+	AmbientLevelStep = 0.33,
+	HealthPerLevel = 0.30,
+	DamagePerLevel = 0.20,
+	SpeedPerLevel = 0.00,
+	LevelCap = 99,
+
+	-- Legacy fallback mode tuning (used only when Mode = "LegacyExponent")
 	SpawnExponent = 1.8,
-	HealthExponent = 4.0,
-	DamageExponent = 0.65,
-	SpeedExponent = 0.65,
+	HealthExponent = 0.9,
+	DamageExponent = 0.6,
+	SpeedExponent = 0.4,
 }
 
 -- Dynamic scaling correction clamp (player stats vs expected power by time).
@@ -54,8 +64,11 @@ EnemyBalance.SuperElite = {
 
 	SpawnScale = 1.0,
 
-	SuperMult = { health = 6.1, damage = 1.25, speed = 1.15, size = 4.0 },
-	EliteMult = { health = 11.4, damage = 1.6, speed = 0.9, size = 7.5 },
+	-- RoR2-like elite baseline: higher effective HP and damage, minor/no speed gain.
+	SuperMult = { health = 4.0, damage = 2.0, speed = 1.0, size = 1.25 },
+	EliteMult = { health = 6.0, damage = 2.5, speed = 1.05, size = 1.45 },
+	SuperCreditCostMult = 6.0,
+	EliteCreditCostMult = 18.0,
 
 	SuperExpMult = 2.0,
 	EliteExpMult = 3.0,
@@ -65,8 +78,24 @@ EnemyBalance.SuperElite = {
 	EliteOrbType = "Purple",
 }
 
+-- RoR2-style spawn director settings (credit economy)
+-- Credits/sec baseline follows the Combat Director pattern:
+-- creditsPerSecond ~= creditMultiplier * (1 + 0.4 * coeff) * ((players + 1) / 2)
+-- This game tracks one per-player director, so income is split across active players.
+EnemyBalance.SpawnDirector = {
+	Enabled = true,
+	CreditMultiplier = 1.5, -- Approximate Fast + Slow directors combined
+	TooCheapMultiplier = 6.0, -- Prefer more expensive cards when banked credits are high
+	MaxMonstersBase = 40, -- RoR2-like baseline cap
+	AdditionalMonstersPerPlayer = 0, -- Keep cap close to RoR2 by default
+	MonsterCosts = {
+		Zombie = 11,
+		Charger = 32,
+	},
+}
+
 EnemyBalance.SpawnBudget = {
-	MaxSpawnsPerSecond = 14, -- Global spawn budget (all players)
+	MaxCreditsPerSecond = 18, -- Global income clamp (all players combined)
 	MaxSpawnsPerTick = 16, -- Safety cap per step
 }
 
@@ -93,7 +122,7 @@ EnemyBalance.SpawnWeights = {
 	Charger = 0.25
 }
 
--- Base spawn rate per player (scaled by global difficulty coefficient)
+-- Legacy spawn-rate mode tuning (used only when SpawnDirector.Enabled = false)
 EnemyBalance.BaseSpawnRatePerPlayer = 1.4
 
 EnemyBalance.InitialSpawnDelay = 3	 -- Seconds to wait before first enemy spawn

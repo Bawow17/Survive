@@ -10,7 +10,7 @@ return {
 	color = Color3.fromRGB(0, 60, 150), -- Dark blue
 	
 	-- Progression settings
-	StartWith = true, -- Player starts with this ability
+	StartWith = false, -- Replaced by weapon-primary flow
 	Unlockable = false, -- Can appear in random upgrade options (false since player already has it)
 	
 	-- Model path in ReplicatedStorage

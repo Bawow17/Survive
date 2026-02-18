@@ -10,6 +10,8 @@ local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local sprintStateRemote = remotesFolder:WaitForChild("SprintState")
+local weaponRemotesFolder = remotesFolder:WaitForChild("Weapons")
+local sprintForceOffRemote = weaponRemotesFolder:WaitForChild("SprintForceOff")
 local playerGui = player:WaitForChild("PlayerGui")
 
 local ATTR_TOGGLE_SPRINT_MODE = "Setting_controls_toggleSprintMode"
@@ -17,6 +19,7 @@ local SHIFTLOCK_ROOT_NAME = "ShiftLock"
 local DEFAULT_CROSSHAIR_FRAME_NAME = "ShiftLockFrame"
 local SPRINT_FRAME_NAME = "SprintFrame"
 local SPRINT_RUN_ANIMATION_ID = "rbxassetid://113934996865672"
+local LOCAL_WEAPON_M1_ACTIVE_ATTRIBUTE = "WeaponM1ActiveLocal"
 local RUN_ANIMATION_BASE_WALKSPEED = 24
 local SPRINT_MULTIPLIER = 1.45
 local MOVEMENT_SPEED_BONUS_TO_HIT_CAP = 0.75
@@ -38,6 +41,8 @@ local character: Model? = nil
 local humanoid: Humanoid? = nil
 local animator: Animator? = nil
 local runAnimationConnection: RBXScriptConnection? = nil
+local weaponEndlagConnection: RBXScriptConnection? = nil
+local pushSprintIntent: () -> () = function() end
 local getSprintIntent: () -> boolean = function(): boolean
 	return false
 end
@@ -46,6 +51,13 @@ local function disconnectRunAnimationConnection()
 	if runAnimationConnection then
 		runAnimationConnection:Disconnect()
 		runAnimationConnection = nil
+	end
+end
+
+local function disconnectWeaponEndlagConnection()
+	if weaponEndlagConnection then
+		weaponEndlagConnection:Disconnect()
+		weaponEndlagConnection = nil
 	end
 end
 
@@ -74,7 +86,7 @@ local function ensureRunTrack()
 		runAnimation = animation
 	end
 	local track = animator:LoadAnimation(runAnimation)
-	track.Priority = Enum.AnimationPriority.Action
+	track.Priority = Enum.AnimationPriority.Action2
 	track.Looped = true
 	runTrack = track
 	return runTrack
@@ -147,6 +159,7 @@ local function bindCharacter(newCharacter: Model?)
 	animator = nil
 	clearRunTrack()
 	disconnectRunAnimationConnection()
+	disconnectWeaponEndlagConnection()
 
 	if not newCharacter then
 		return
@@ -173,6 +186,9 @@ local function bindCharacter(newCharacter: Model?)
 	end
 
 	updateRunAnimation()
+	weaponEndlagConnection = newCharacter:GetAttributeChangedSignal(LOCAL_WEAPON_M1_ACTIVE_ATTRIBUTE):Connect(function()
+		pushSprintIntent()
+	end)
 	runAnimationConnection = RunService.RenderStepped:Connect(function()
 		updateRunAnimation()
 	end)
@@ -186,7 +202,19 @@ local function isToggleMode(): boolean
 	return true
 end
 
+local function isWeaponEndlagActive(): boolean
+	local characterModel = character
+	if not characterModel then
+		return false
+	end
+	local value = characterModel:GetAttribute(LOCAL_WEAPON_M1_ACTIVE_ATTRIBUTE)
+	return typeof(value) == "boolean" and value
+end
+
 getSprintIntent = function(): boolean
+	if isWeaponEndlagActive() then
+		return false
+	end
 	if isToggleMode() then
 		return toggleActive and wHeld
 	end
@@ -312,7 +340,7 @@ local function resolveSprintUi()
 	end
 end
 
-local function pushSprintIntent()
+pushSprintIntent = function()
 	local intent = getSprintIntent()
 	if not shiftLockFrame or not sprintFrame then
 		resolveSprintUi()
@@ -332,6 +360,13 @@ local function resetLocalSprintState()
 	toggleActive = false
 	shiftHeld = false
 	wHeld = false
+	pushSprintIntent()
+end
+
+local function forceStopSprint()
+	-- Keep movement key state; only clear sprint intent so player must re-press sprint.
+	toggleActive = false
+	shiftHeld = false
 	pushSprintIntent()
 end
 
@@ -410,3 +445,7 @@ end)
 resolveSprintUi()
 bindCharacter(player.Character)
 resetLocalSprintState()
+
+sprintForceOffRemote.OnClientEvent:Connect(function()
+	forceStopSprint()
+end)

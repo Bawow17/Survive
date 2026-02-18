@@ -5,6 +5,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GameSessionTimer = require(game.ServerScriptService.ECS.Systems.GameSessionTimer)
+local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff)
 
 local GameStateManager = {}
 
@@ -24,6 +25,8 @@ local wipeData: {[Player]: {level: number, exp: number}}? = nil
 local continueExpiration: number? = nil
 local lastWipeCheck = 0
 local WIPE_CHECK_INTERVAL = 0.33  -- ~3fps
+local warnedMissingExpOrbSpawner = false
+local warnedMissingEnemySpawner = false
 
 -- System references (set via init)
 local world: any
@@ -119,6 +122,29 @@ local function clearAllAbilityAttributes(playerEntity: number)
 		if abilityChanged then
 			DirtyService.setIfChanged(world, playerEntity, Components.AbilityData, {abilities = abilityData.abilities}, "AbilityData")
 		end
+	end
+end
+
+local function setSpawnerEnabled(enabled: boolean)
+	local enemySpawnerOk, enemySpawner = pcall(function()
+		return require(game.ServerScriptService.ECS.Systems.EnemySpawner)
+	end)
+	if enemySpawnerOk and enemySpawner and enemySpawner.setEnabled then
+		enemySpawner.setEnabled(enabled)
+	elseif not warnedMissingEnemySpawner then
+		warnedMissingEnemySpawner = true
+		warn("[GameStateManager] EnemySpawner missing or invalid during setEnabled")
+	end
+
+	local expOrbSpawnerOk, expOrbSpawner = pcall(function()
+		return require(game.ServerScriptService.ECS.Systems.ExpOrbSpawner)
+	end)
+	if expOrbSpawnerOk and expOrbSpawner and expOrbSpawner.setEnabled then
+		expOrbSpawner.setEnabled(enabled)
+	elseif not warnedMissingExpOrbSpawner then
+		-- Exp orb spawning is optional in stripped-down modes.
+		warnedMissingExpOrbSpawner = true
+		warn("[GameStateManager] ExpOrbSpawner missing or invalid (optional)")
 	end
 end
 
@@ -243,6 +269,7 @@ function handleStartGame(player: Player)
 		currentState = GameState.IN_GAME
 		gameStartTime = tick()
 		GameSessionTimer.startSession()
+		DifficultyCoeff.reset()
 		GameStateManager.addPlayerToGame(player)
 	elseif currentState == GameState.IN_GAME then
 		-- Game active, join in progress
@@ -300,11 +327,9 @@ function GameStateManager.addPlayerToGame(player: Player)
 		return
 	end
 	
-	-- Re-enable ambient spawning now that player is in game
-	local ExpOrbSpawner = require(game.ServerScriptService.ECS.Systems.ExpOrbSpawner)
-	local EnemySpawner = require(game.ServerScriptService.ECS.Systems.EnemySpawner)
-	ExpOrbSpawner.setEnabled(true)
-	EnemySpawner.setEnabled(true)
+	-- Re-enable ambient spawning now that player is in game.
+	-- Exp orb spawner is optional in simplified game modes.
+	setSpawnerEnabled(true)
 	
 	-- Initialize session stats tracking for this player
 	local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
@@ -325,19 +350,6 @@ function GameStateManager.addPlayerToGame(player: Player)
 		local PassiveEffectSystem = require(game.ServerScriptService.ECS.Systems.PassiveEffectSystem)
 		PassiveEffectSystem.applyToPlayer(playerEntity)
 	end
-	
-	-- Spawn starter exp (use configured delay)
-	local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
-	local spawnDelay = (ItemBalance.SpawnExps and ItemBalance.SpawnExps.SpawnDelay) or 0.5
-	
-	task.delay(spawnDelay, function()
-		if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-			local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-			if ItemBalance.SpawnExps.Enabled then
-				ECSWorldService.SpawnStarterExps(player, hrp.Position, playerEntity)
-			end
-		end
-	end)
 	
 	-- Track player in game
 	playersInGame[player] = {
@@ -479,9 +491,10 @@ function handleContinuePurchased(player: Player)
 					end
 					
 					if data.exp > 0 then
+						local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
 						world:set(playerEntity, Components.Experience, {
 							current = data.exp,
-							required = 100,  -- Will be recalculated by ExpSystem
+							required = ItemBalance.BaseExpRequired,
 							total = data.exp,
 						})
 						DirtyService.mark(playerEntity, "Experience")
@@ -554,6 +567,9 @@ end
 -- Reset game to lobby state
 function GameStateManager.resetGame()
 	print("[GameStateManager] Resetting game to LOBBY state")
+
+	-- Ensure ambient spawners are disabled before tearing down run state.
+	setSpawnerEnabled(false)
 	
 	-- Despawn all entities (enemies, projectiles, items)
 	-- This would need to be implemented more thoroughly
@@ -573,6 +589,14 @@ function GameStateManager.resetGame()
 	wipeData = nil
 	continueExpiration = nil
 	gameStartTime = 0
+
+	-- Full run-state reset for non-wipe transitions too.
+	local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
+	SessionStatsTracker.reset()
+	local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
+	GameTimeSystem.reset()
+	GameSessionTimer.resetSession()
+	DifficultyCoeff.reset()
 	
 	print("[GameStateManager] Game reset complete")
 end
@@ -581,10 +605,7 @@ end
 function handleStartCleanup(player: Player)
 	
 	-- CRITICAL: Disable ALL ambient spawning immediately
-	local ExpOrbSpawner = require(game.ServerScriptService.ECS.Systems.ExpOrbSpawner)
-	local EnemySpawner = require(game.ServerScriptService.ECS.Systems.EnemySpawner)
-	ExpOrbSpawner.setEnabled(false)
-	EnemySpawner.setEnabled(false)
+	setSpawnerEnabled(false)
 	
 	-- Set state to LOBBY
 	currentState = GameState.LOBBY
@@ -721,6 +742,7 @@ function handleStartCleanup(player: Player)
 	local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 	GameTimeSystem.reset()
 	GameSessionTimer.resetSession()
+	DifficultyCoeff.reset()
 	
 	-- Force respawn all players to alive state at lobby spawn
 	local DeathSystem = require(game.ServerScriptService.ECS.Systems.DeathSystem)

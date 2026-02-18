@@ -78,8 +78,14 @@ if hpCorner then
 	overhealCorner.Parent = overhealFill
 end
 
-local bottomBarFrame = mainHud:WaitForChild("BottomBarFrame")
-local expBarFrame = bottomBarFrame:WaitForChild("ExpBarFrame")
+local expBarFrame = topBarFrame:FindFirstChild("ExpBarFrame")
+if not expBarFrame then
+	local bottomBarFrame = mainHud:FindFirstChild("BottomBarFrame")
+	expBarFrame = if bottomBarFrame then bottomBarFrame:FindFirstChild("ExpBarFrame") else nil
+end
+if not expBarFrame then
+	expBarFrame = topBarFrame:WaitForChild("ExpBarFrame")
+end
 local expFill = expBarFrame:WaitForChild("ExpFill") :: Frame
 local levelLabel = expBarFrame:FindFirstChild("LevelLabel") :: TextLabel?
 

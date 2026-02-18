@@ -235,7 +235,6 @@ local function onAddSessionTime(player: Player, data: any)
 		return
 	end
 
-	GameTimeSystem.addTime(seconds)
 	DifficultyCoeff.addTime(seconds)
 	GameSessionTimer.addTime(seconds)
 

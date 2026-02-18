@@ -6,7 +6,6 @@ local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local StatusEffectSystem = require(game.ServerScriptService.ECS.Systems.StatusEffectSystem)
-local UpgradeCounter = require(game.ServerScriptService.Balance.UpgradeCounter)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
@@ -40,6 +39,7 @@ local expChunksQuery: any
 local levelHistory: {[number]: {times: {number}}} = {}
 
 local LEVEL_WINDOW_SECONDS = 120
+local MAX_SAFE_EXP_REQUIRED = 2000000000
 
 local function recordLevelTime(playerEntity: number, playerName: string?)
 	if not playerName then
@@ -130,79 +130,25 @@ function ExpSystem.setBankedHandsService(service: any)
 	BankedHandsService = service
 end
 
-local function getPhaseBreakpoints(): (number, number)
-	local phase1End, phase2End = UpgradeCounter.getPhaseBreakpoints()
-	local curve = ItemBalance.ExpCurve
-	if curve then
-		if typeof(curve.Phase1End) == "number" then
-			phase1End = math.max(1, math.floor(curve.Phase1End))
-		end
-		if typeof(curve.Phase2End) == "number" then
-			phase2End = math.max(phase1End, math.floor(curve.Phase2End))
-		end
-	end
-	return phase1End, phase2End
+local function getRoR2CurveConfig(): (number, number)
+	local cfg = ItemBalance.RoR2Exp or {}
+	local base = typeof(cfg.BaseLevelExp) == "number" and cfg.BaseLevelExp or 20
+	local growth = typeof(cfg.LevelGrowth) == "number" and cfg.LevelGrowth or 1.55
+	base = math.max(1, base)
+	growth = math.max(1.0001, growth)
+	return base, growth
 end
 
--- Calculate exp required for a level (dynamic three-phase system)
+-- Calculate exp required for a level (RoR2-style geometric progression)
 local function calculateExpRequired(level: number): number
-	local phases = ItemBalance.ProgressionPhases
-	local curve = ItemBalance.ExpCurve or {}
-	local phase1End, phase2End = getPhaseBreakpoints()
-	local globalScale = curve.GlobalScale or 1.0
-	local phase2Scaling = curve.Phase2Scaling or (phases.Phase2 and phases.Phase2.scaling) or 1.0
-	local phase3Base = curve.Phase3BaseMultiplier or (phases.Phase3 and phases.Phase3.baseMultiplier) or 1.0
-	local phase3LinearFactor = curve.Phase3LinearFactor or (phases.Phase3 and phases.Phase3.linearFactor) or 0.0
-	local maxGrowthPerLevel = curve.maxGrowthPerLevel or (phases.Phase3 and phases.Phase3.maxGrowthPerLevel)
-	local dampingStart = curve.dampingStart or (phases.Phase3 and phases.Phase3.dampingStart)
-	local dampingEnd = curve.dampingEnd or (phases.Phase3 and phases.Phase3.dampingEnd)
-	local dampingScale = curve.dampingScale or (phases.Phase3 and phases.Phase3.dampingScale) or 1.0
-	
-	-- Phase 1: Linear progression (fast leveling)
-	if level <= phase1End then
-		return math.floor(
-			(ItemBalance.BaseExpRequired + (level - 1) * phases.Phase1.expPerLevel) * globalScale
-		)
+	local normalizedLevel = math.max(1, math.floor(level))
+	local base, growth = getRoR2CurveConfig()
+	local raw = base * (growth ^ (normalizedLevel - 1))
+	if typeof(raw) ~= "number" or raw ~= raw or raw == math.huge or raw == -math.huge then
+		return MAX_SAFE_EXP_REQUIRED
 	end
-	
-	-- Phase 2: Gentle exponential (medium grind)
-	if level <= phase2End then
-		local phase2StartLevel = phase1End + 1
-		local phase2Index = level - phase2StartLevel
-		local phase1EndExp = ItemBalance.BaseExpRequired + (phase1End - 1) * phases.Phase1.expPerLevel
-		
-		return math.floor(
-			phase1EndExp * (phase2Scaling ^ phase2Index) * globalScale
-		)
-	end
-	
-	-- Phase 3: Quadratic (steep grind)
-	local phase3StartLevel = phase2End + 1
-	local phase3Index = level - phase3StartLevel
-	local phase2LastLevel = phase2End - phase1End
-	local phase2EndExp = (ItemBalance.BaseExpRequired + (phase1End - 1) * phases.Phase1.expPerLevel) 
-						* (phase2Scaling ^ phase2LastLevel)
-	
-	local base = phase2EndExp * (phase3Base ^ phase3Index) * (1 + phase3Index * phase3LinearFactor)
-	if dampingStart and dampingEnd and dampingEnd > dampingStart and level >= dampingStart then
-		local t = math.clamp((level - dampingStart) / (dampingEnd - dampingStart), 0, 1)
-		local damp = 1 - (1 - dampingScale) * t
-		base = base * damp
-	end
-	if maxGrowthPerLevel and phase3Index > 0 then
-		local prevIndex = phase3Index - 1
-		local prevBase = phase2EndExp * (phase3Base ^ prevIndex) * (1 + prevIndex * phase3LinearFactor)
-		if dampingStart and dampingEnd and dampingEnd > dampingStart and (level - 1) >= dampingStart then
-			local tPrev = math.clamp(((level - 1) - dampingStart) / (dampingEnd - dampingStart), 0, 1)
-			local dampPrev = 1 - (1 - dampingScale) * tPrev
-			prevBase = prevBase * dampPrev
-		end
-		local cap = prevBase * (1 + maxGrowthPerLevel)
-		if base > cap then
-			base = cap
-		end
-	end
-	return math.floor(base * globalScale)
+	raw = math.clamp(raw, 1, MAX_SAFE_EXP_REQUIRED)
+	return math.floor(raw)
 end
 
 function ExpSystem.getExpRequired(level: number): number
@@ -616,16 +562,11 @@ end
 
 -- Debug: Print progression curve preview
 function ExpSystem.printProgressionCurve()
-	local phase1, phase2 = getPhaseBreakpoints()
-	
+	local base, growth = getRoR2CurveConfig()
 	print("=== PROGRESSION CURVE PREVIEW ===")
-	print(string.format("Total Upgrades: %d", UpgradeCounter.getTotalUpgrades()))
-	print(string.format("Phase 1 (Fast Linear): Levels 1-%d", phase1))
-	print(string.format("Phase 2 (Medium Exp): Levels %d-%d", phase1+1, phase2))
-	print(string.format("Phase 3 (Grindy Quad): Levels %d+", phase2+1))
+	print(string.format("RoR2 curve: %.2f * %.4f^(level-1)", base, growth))
 	print("\nSample EXP Requirements:")
-	
-	for _, level in ipairs({1, 5, 10, phase1, phase1+5, phase2, phase2+5, phase3, phase3+10}) do
+	for _, level in ipairs({1, 2, 5, 10, 20, 30, 40, 50, 75, 100}) do
 		print(string.format("  Level %d: %d exp", level, calculateExpRequired(level)))
 	end
 end

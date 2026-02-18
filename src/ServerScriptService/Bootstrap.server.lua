@@ -4,6 +4,7 @@
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -75,6 +76,7 @@ local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSyst
 local PickupService = require(game.ServerScriptService.Services.PickupService)
 local BankedHandsService = require(game.ServerScriptService.Services.BankedHandsService)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
+local WeaponService = require(game.ServerScriptService.Services.WeaponService)
 local LoopGameService = require(game.ServerScriptService.Services.LoopGameService)
 local DebugModMenuService = require(game.ServerScriptService.Services.DebugModMenuService)
 local PlayerSettingsService = require(game.ServerScriptService.Services.PlayerSettingsService)
@@ -89,11 +91,8 @@ local PassiveEffectSystem = require(game.ServerScriptService.ECS.Systems.Passive
 -- Status Effect System
 local StatusEffectSystem = require(game.ServerScriptService.ECS.Systems.StatusEffectSystem)
 
--- Powerup Systems
 local OverhealSystem = require(game.ServerScriptService.ECS.Systems.OverhealSystem)
 local BuffSystem = require(game.ServerScriptService.ECS.Systems.BuffSystem)
-local PowerupEffectSystem = require(game.ServerScriptService.ECS.Systems.PowerupEffectSystem)
-local PowerupCollectionSystem = require(game.ServerScriptService.ECS.Systems.PowerupCollectionSystem)
 local HealthRegenSystem = require(game.ServerScriptService.ECS.Systems.HealthRegenSystem)
 local MagnetPullSystem = require(game.ServerScriptService.ECS.Systems.MagnetPullSystem)
 
@@ -106,6 +105,7 @@ local AfterimageCloneSystem = require(game.ServerScriptService.ECS.Systems.After
 -- Game State Manager
 local GameStateManager = require(game.ServerScriptService.ECS.Systems.GameStateManager)
 local FriendsListSystem = require(game.ServerScriptService.ECS.Systems.FriendsListSystem)
+local Oathkeeper = require(game.ServerScriptService.Balance.Weapons.Oathkeeper)
 
 -- Ability system throttle (PERFORMANCE FIX - don't run every frame!)
 local ABILITY_SYSTEM_INTERVAL = 0.033  -- CRITICAL FIX: 30 FPS (was 20) - better responsiveness for abilities
@@ -164,6 +164,17 @@ local projectileEntityQuery = world:query(Components.Projectile):cached()
 local playerEntities: {[Player]: number} = {}
 local entityToPlayer: {[number]: Player} = {}
 
+local STARTER_WEAPON_ID_ATTRIBUTE = "StarterWeaponId"
+local STARTER_WEAPON_IDLE_ATTRIBUTE = "StarterWeaponIdleAnimationId"
+local STARTER_WEAPON_WALK_ATTRIBUTE = "StarterWeaponWalkAnimationId"
+local STARTER_WEAPON_M1_ATTRIBUTE = "StarterWeaponM1AnimationId"
+local STARTER_WEAPON_ACTIVE_WALK_WINDOW_ATTRIBUTE = "StarterWeaponActiveWalkWindow"
+local STARTER_WEAPON_PATH = Oathkeeper.assetPaths.weaponFolder
+local STARTER_WEAPON_MODEL_NAME = Oathkeeper.assetPaths.model
+local STARTER_WEAPON_GRIP_C0_NAME = Oathkeeper.assetPaths.gripC0
+local STARTER_WEAPON_GRIP_C1_NAME = Oathkeeper.assetPaths.gripC1
+local STARTER_WEAPON_MOTOR_NAME = "WeaponGrip"
+
 local function ensureRemoteEvent(parent: Instance, name: string): RemoteEvent
 	local existing = parent:FindFirstChild(name)
 	if existing and existing:IsA("RemoteEvent") then
@@ -176,6 +187,171 @@ local function ensureRemoteEvent(parent: Instance, name: string): RemoteEvent
 	remote.Name = name
 	remote.Parent = parent
 	return remote
+end
+
+local function ensureFolder(parent: Instance, name: string): Folder
+	local existing = parent:FindFirstChild(name)
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = name
+	folder.Parent = parent
+	return folder
+end
+
+local function findByPath(root: Instance, path: string): Instance?
+	local current: Instance = root
+	for _, part in ipairs(string.split(path, ".")) do
+		local child = current:FindFirstChild(part)
+		if not child then
+			return nil
+		end
+		current = child
+	end
+	return current
+end
+
+local function normalizeAnimationId(rawId: string?): string?
+	if not rawId or rawId == "" then
+		return nil
+	end
+	if string.sub(rawId, 1, 13) == "rbxassetid://" then
+		return rawId
+	end
+	if string.match(rawId, "^%d+$") then
+		return "rbxassetid://" .. rawId
+	end
+	return nil
+end
+
+local function resolveAnimationIdFromInstance(source: Instance?): string?
+	if not source then
+		return nil
+	end
+	if source:IsA("Animation") then
+		return normalizeAnimationId(source.AnimationId)
+	end
+	if source:IsA("StringValue") then
+		return normalizeAnimationId(source.Value)
+	end
+	if source:IsA("NumberValue") then
+		return normalizeAnimationId(tostring(math.floor(source.Value)))
+	end
+	return nil
+end
+
+local function resolveAnimationIdByPath(root: Instance, relativePath: string): string?
+	local source = findByPath(root, relativePath)
+	return resolveAnimationIdFromInstance(source)
+end
+
+local function clearStarterWeaponAttributes(character: Model)
+	character:SetAttribute(STARTER_WEAPON_ID_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_IDLE_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_WALK_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_M1_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_ACTIVE_WALK_WINDOW_ATTRIBUTE, nil)
+end
+
+local function attachStarterWeapon(character: Model)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		warn("[Bootstrap] Starter weapon attach skipped: missing Humanoid")
+		clearStarterWeaponAttributes(character)
+		return
+	end
+
+	local rightArmInstance = character:FindFirstChild("Right Arm") or character:WaitForChild("Right Arm", 5)
+	if not rightArmInstance or not rightArmInstance:IsA("BasePart") then
+		warn(string.format("[Bootstrap] Starter weapon attach skipped for %s: missing R6 Right Arm", character.Name))
+		clearStarterWeaponAttributes(character)
+		return
+	end
+	local rightArm = rightArmInstance
+
+	local weaponFolder = findByPath(ServerStorage, STARTER_WEAPON_PATH)
+	if not weaponFolder then
+		warn(string.format("[Bootstrap] Starter weapon folder missing at ServerStorage.%s", STARTER_WEAPON_PATH))
+		clearStarterWeaponAttributes(character)
+		return
+	end
+
+	local modelTemplate = weaponFolder:FindFirstChild(STARTER_WEAPON_MODEL_NAME)
+	if not modelTemplate or not modelTemplate:IsA("Model") then
+		warn("[Bootstrap] Starter weapon attach skipped: missing OathkeeperModel")
+		clearStarterWeaponAttributes(character)
+		return
+	end
+
+	local gripC0Value = weaponFolder:FindFirstChild(STARTER_WEAPON_GRIP_C0_NAME)
+	local gripC1Value = weaponFolder:FindFirstChild(STARTER_WEAPON_GRIP_C1_NAME)
+	if not gripC0Value or not gripC0Value:IsA("CFrameValue") or not gripC1Value or not gripC1Value:IsA("CFrameValue") then
+		warn("[Bootstrap] Starter weapon attach skipped: GripC0/GripC1 missing or invalid")
+		clearStarterWeaponAttributes(character)
+		return
+	end
+
+	for _, child in ipairs(character:GetChildren()) do
+		if child:IsA("Model") and child.Name == STARTER_WEAPON_MODEL_NAME then
+			child:Destroy()
+		end
+	end
+	local existingMotor = rightArm:FindFirstChild(STARTER_WEAPON_MOTOR_NAME)
+	if existingMotor and existingMotor:IsA("Motor6D") then
+		existingMotor:Destroy()
+	end
+
+	local equippedModel = modelTemplate:Clone()
+	equippedModel.Name = STARTER_WEAPON_MODEL_NAME
+	equippedModel.Parent = character
+
+	local handle = equippedModel:FindFirstChild("Handle", true)
+	if not handle or not handle:IsA("BasePart") then
+		equippedModel:Destroy()
+		warn("[Bootstrap] Starter weapon attach skipped: OathkeeperModel missing Handle")
+		clearStarterWeaponAttributes(character)
+		return
+	end
+
+	for _, descendant in ipairs(equippedModel:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+			descendant.Massless = true
+			descendant.Anchored = false
+		end
+	end
+
+	if not equippedModel.PrimaryPart then
+		equippedModel.PrimaryPart = handle
+	end
+
+	local motor = Instance.new("Motor6D")
+	motor.Name = STARTER_WEAPON_MOTOR_NAME
+	motor.Part0 = rightArm
+	motor.Part1 = handle
+	motor.C0 = gripC0Value.Value
+	motor.C1 = gripC1Value.Value
+	motor.Parent = rightArm
+
+	local idleAnimationId = resolveAnimationIdByPath(weaponFolder, Oathkeeper.assetPaths.animations.idle)
+	local walkAnimationId = resolveAnimationIdByPath(weaponFolder, Oathkeeper.assetPaths.animations.walk)
+	local m1AnimationId = resolveAnimationIdByPath(weaponFolder, Oathkeeper.assetPaths.animations.m1)
+
+	character:SetAttribute(STARTER_WEAPON_ID_ATTRIBUTE, Oathkeeper.id)
+	character:SetAttribute(STARTER_WEAPON_IDLE_ATTRIBUTE, idleAnimationId)
+	character:SetAttribute(STARTER_WEAPON_WALK_ATTRIBUTE, walkAnimationId)
+	character:SetAttribute(STARTER_WEAPON_M1_ATTRIBUTE, m1AnimationId)
+	local configuredActiveWalkWindow = Oathkeeper.activeWalkWindow
+	if typeof(configuredActiveWalkWindow) ~= "number" or configuredActiveWalkWindow < 0 then
+		configuredActiveWalkWindow = 5.0
+	end
+	character:SetAttribute(STARTER_WEAPON_ACTIVE_WALK_WINDOW_ATTRIBUTE, configuredActiveWalkWindow)
 end
 
 local function setComponent(entity: number, component: any, value: any, componentName: string)
@@ -204,6 +380,11 @@ function ECSWorldService.Initialize()
 	ensureRemoteEvent(remotesFolder, "PlayerBodyRestore")
 	ensureRemoteEvent(remotesFolder, "PlayerHitMarker")
 	ensureRemoteEvent(remotesFolder, "SprintState")
+
+	local weaponsRemotesFolder = ensureFolder(remotesFolder, "Weapons")
+	local primaryFireRequestRemote = ensureRemoteEvent(weaponsRemotesFolder, "PrimaryFireRequest")
+	local primaryShotRemote = ensureRemoteEvent(weaponsRemotesFolder, "PrimaryShot")
+	local sprintForceOffRemote = ensureRemoteEvent(weaponsRemotesFolder, "SprintForceOff")
 
 	local debugFlags = ReplicatedStorage:FindFirstChild("DebugFlags")
 	if not debugFlags then
@@ -262,6 +443,10 @@ function ECSWorldService.Initialize()
 	-- Initialize model replication first (clones models from ServerStorage to ReplicatedStorage)
 	ModelReplicationService.init()
 	ModelReplicationService.replicateExpOrb()
+	ModelReplicationService.replicateModel(
+		Oathkeeper.assetPaths.weaponFolder .. ".VFX",
+		"ContentDrawer.WeaponModels.HandCannons.Oathkeeper"
+	)
 	EnemyColliderService.init(world, Components)
 	EnemyColliderOverlayService.init(world, Components)
 	
@@ -349,18 +534,10 @@ function ECSWorldService.Initialize()
 	-- Initialize Friends List System
 	FriendsListSystem.init()
 	
-	-- Initialize Powerup systems
+	-- Initialize shared buff/overheal systems
 	OverhealSystem.init(world, Components, DirtyService)
 	BuffSystem.init(world, Components, DirtyService)
 	BuffSystem.setPassiveEffectSystem(PassiveEffectSystem)
-	PowerupEffectSystem.init(world, Components, DirtyService, ECSWorldService)
-	PowerupEffectSystem.setDamageSystem(DamageSystem)
-	PowerupEffectSystem.setOverhealSystem(OverhealSystem)
-	PowerupEffectSystem.setStatusEffectSystem(StatusEffectSystem)
-	PowerupEffectSystem.setBuffSystem(BuffSystem)
-	PowerupEffectSystem.setEnemySpawner(EnemySpawner)
-	PowerupCollectionSystem.init(world, Components, DirtyService, ECSWorldService)
-	PowerupCollectionSystem.setPowerupEffectSystem(PowerupEffectSystem)
 	
 	-- Initialize Health Regen system
 	HealthRegenSystem.init(world, Components, DirtyService)
@@ -397,7 +574,19 @@ function ECSWorldService.Initialize()
 	ProjectileService.init(world, Components, function(entityId)
 		return entityToPlayer[entityId]
 	end)
-		LoopGameService.init(world, Components, ExpSystem)
+	WeaponService.init({
+		world = world,
+		Components = Components,
+		PassiveEffectSystem = PassiveEffectSystem,
+		DamageSystem = DamageSystem,
+		getPlayerEntity = function(player: Player): number?
+			return playerEntities[player]
+		end,
+		PrimaryFireRequest = primaryFireRequestRemote,
+		PrimaryShot = primaryShotRemote,
+		SprintForceOff = sprintForceOffRemote,
+	})
+	LoopGameService.init(world, Components, ExpSystem)
 	DebugModMenuService.init(world, Components, UpgradeSystem, GameTimeSystem, DifficultyCoeff, GameSessionTimer)
 	PlayerSettingsService.init()
 	HitFlashSystem.init(world, Components)
@@ -787,74 +976,6 @@ function ECSWorldService.SpawnStarterExps(player: Player, playerPosition: Vector
 			end
 		end
 	end
-end
-
-function ECSWorldService.CreatePowerup(powerupType: string, position: Vector3, ownerId: number?): any?
-	local entity = ECSWorldService.CreateEntity("Powerup", position, nil)
-	if not entity then
-		return nil
-	end
-	
-	-- CRITICAL: Replicate powerup model BEFORE setting visual component
-	-- This ensures the model exists in ReplicatedStorage before clients try to render it
-	local replicationSuccess = ModelReplicationService.replicatePowerup(powerupType)
-	if not replicationSuccess then
-		warn(string.format("[ECSWorldService] Failed to replicate powerup model '%s', destroying entity", powerupType))
-		ECSWorldService.DestroyEntity(entity)
-		return nil
-	end
-	
-	local PowerupBalance = require(game.ServerScriptService.Balance.PowerupBalance)
-	local powerupConfig = PowerupBalance.PowerupTypes[powerupType]
-	if not powerupConfig then
-		warn(string.format("[ECSWorldService] Unknown powerup type '%s', using Nuke as fallback", powerupType))
-		powerupConfig = PowerupBalance.PowerupTypes.Nuke  -- Fallback
-		powerupType = "Nuke"
-	end
-	
-	-- Use the replicated path - model is guaranteed to exist now
-	local visualPath = "ReplicatedStorage.ContentDrawer.ItemModels.Powerups." .. powerupType
-	
-	setComponent(entity, EntityType, {
-		type = "Powerup",
-		subtype = powerupType,
-	}, "EntityType")
-	
-	setComponent(entity, Velocity, { x = 0, y = 0, z = 0 }, "Velocity")
-	
-	setComponent(entity, Components.PowerupData, {
-		powerupType = powerupType,
-		collected = false,
-		ownerId = ownerId,  -- MULTIPLAYER: Per-player powerup ownership (Health only)
-	}, "PowerupData")
-	
-	-- Start invisible to prevent visual issues before all data loads on client
-	setComponent(entity, Visual, {
-		modelPath = visualPath,
-		visible = false,  -- Start invisible
-		scale = PowerupBalance.PowerupScale or 1.0,  -- Use configured scale
-	}, "Visual")
-	
-	setComponent(entity, Lifetime, {
-		remaining = PowerupBalance.PowerupLifetime or 45.0,
-		max = PowerupBalance.PowerupLifetime or 45.0,
-	}, "Lifetime")
-	
-	markNewEntity(entity)
-	
-	-- Make visible after client has time to process all component data
-	task.defer(function()
-		if world:contains(entity) then
-			local visual = world:get(entity, Visual)
-			if visual then
-				visual.visible = true
-				world:set(entity, Visual, visual)
-				DirtyService.mark(entity, "Visual")
-			end
-		end
-	end)
-
-	return entity
 end
 
 function ECSWorldService.CreateProjectile(projectileType: string, position: Vector3, velocity: Vector3, owner: any?, customStats: any?): any
@@ -1422,10 +1543,6 @@ local function stepWorld(dt: number)
 	debug.profileend()
 	
 	-- EXP/Leveling systems
-	debug.profilebegin("ExpOrbSpawner")
-	ExpOrbSpawner.step(dt)
-	debug.profileend()
-	
 	debug.profilebegin("ExpSystem")
 	ExpSystem.step(dt)
 	debug.profileend()
@@ -1486,11 +1603,6 @@ local function stepWorld(dt: number)
 	-- Death body fade system (server-side transparency changes replicate to all clients)
 	debug.profilebegin("DeathBodyFade")
 	DeathBodyFadeSystem.step(dt)
-	debug.profileend()
-	
-	-- Powerup systems
-	debug.profilebegin("PowerupCollection")
-	PowerupCollectionSystem.step(dt)
 	debug.profileend()
 	
 	debug.profilebegin("OverhealSystem")
@@ -1664,9 +1776,7 @@ Players.PlayerAdded:Connect(function(player)
 	-- Notify GameStateManager of player join
 	GameStateManager.onPlayerJoin(player)
 	
-	-- Wait for character to load
-	player.CharacterAdded:Connect(function(character)
-		
+	local function onCharacterAdded(character: Model)
 		-- Spawn player at lobby position (GameStateManager will teleport to game when they press Play)
 		local humanoidRootPart = character:WaitForChild("HumanoidRootPart", 5)
 		if humanoidRootPart then
@@ -1676,10 +1786,19 @@ Players.PlayerAdded:Connect(function(player)
 			-- DON'T create ECS entity here
 			-- Wait for GameStateManager.addPlayerToGame() to create it after "Play" button
 		end
+
+		-- Always equip starter weapon on spawn (lobby + in-game + respawns).
+		attachStarterWeapon(character)
 		
 		-- Death is now handled by DeathSystem (triggered from DamageSystem)
 		-- No need for humanoid.Died event - custom death system prevents Roblox death
-	end)
+	end
+
+	-- Wait for character to load
+	player.CharacterAdded:Connect(onCharacterAdded)
+	if player.Character then
+		task.defer(onCharacterAdded, player.Character)
+	end
 
 	-- Send initial ECS snapshot to client (AFTER they join game)
 	-- Increased delay from 2s to 2.5s to ensure all initial components are set

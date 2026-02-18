@@ -14,7 +14,7 @@ local PickupsDespawnBatch = pickupRemotesFolder:WaitForChild("PickupsDespawnBatc
 local PickupsValueUpdate = pickupRemotesFolder:WaitForChild("PickupsValueUpdate") :: RemoteEvent
 local PickupRequest = pickupRemotesFolder:WaitForChild("PickupRequest") :: RemoteEvent
 
-local PowerupEffectUpdate = remotesFolder:WaitForChild("PowerupEffectUpdate") :: RemoteEvent
+local PowerupEffectUpdate = remotesFolder:FindFirstChild("PowerupEffectUpdate")
 
 local pickupsFolder: Instance = workspace:FindFirstChild("Pickups") or Instance.new("Folder")
 pickupsFolder.Name = "Pickups"
@@ -27,6 +27,8 @@ local SEEK_SPEED = 120
 local CHECK_INTERVAL = 0.1
 local REQUEST_RETRY_DELAY = 0.4
 local SEEK_TIMEOUT = 1.5
+local CONTACT_DESPAWN_DISTANCE = 2.0
+local CONTACT_DESPAWN_DISTANCE_SQ = CONTACT_DESPAWN_DISTANCE * CONTACT_DESPAWN_DISTANCE
 local MAGNET_RADIUS_MULTIPLIER = 6
 local GLOBAL_MAGNET_RADIUS = 1000
 local ORB_TEMPLATE_PATH = {"ContentDrawer", "ItemModels", "OrbTemplate"}
@@ -55,6 +57,9 @@ type PickupRecord = {
 	lastRequestAt: number?,
 	seeking: boolean?,
 	seekStartAt: number?,
+	collectible: boolean?,
+	seekOnSpawn: boolean?,
+	visualOnly: boolean?,
 }
 
 local activePickups: {[number]: PickupRecord} = {}
@@ -205,12 +210,14 @@ local function isMagnetActive(now: number): boolean
 	return now < magnetActiveUntil
 end
 
-PowerupEffectUpdate.OnClientEvent:Connect(function(data: any)
-	if data and data.powerupType == "Magnet" then
-		local duration = data.duration or 0
-		magnetActiveUntil = math.max(magnetActiveUntil, tick() + duration)
-	end
-end)
+if PowerupEffectUpdate and PowerupEffectUpdate:IsA("RemoteEvent") then
+	PowerupEffectUpdate.OnClientEvent:Connect(function(data: any)
+		if data and data.powerupType == "Magnet" then
+			local duration = data.duration or 0
+			magnetActiveUntil = math.max(magnetActiveUntil, tick() + duration)
+		end
+	end)
+end
 
 PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 	if typeof(payloads) ~= "table" then
@@ -236,6 +243,12 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			existing.currentPos = pos
 			existing.value = data.value or existing.value
 			existing.kind = data.kind or existing.kind
+			existing.collectible = data.collectible ~= false
+			existing.seekOnSpawn = data.seekOnSpawn == true
+			existing.visualOnly = data.visualOnly == true
+			if existing.seekOnSpawn then
+				existing.seeking = true
+			end
 			applyVisual(existing)
 			existing.primary.CFrame = CFrame.new(pos)
 			continue
@@ -258,7 +271,13 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			primary = primary,
 			parts = parts,
 			seed = (id % 100) * 0.13,
+			collectible = data.collectible ~= false,
+			seekOnSpawn = data.seekOnSpawn == true,
+			visualOnly = data.visualOnly == true,
 		}
+		if record.seekOnSpawn then
+			record.seeking = true
+		end
 		activePickups[id] = record
 		applyVisual(record)
 	end
@@ -348,6 +367,8 @@ RunService.Heartbeat:Connect(function(dt: number)
 		doCheck = true
 	end
 
+	local instantDespawnIds = {}
+
 	for _, record in pairs(activePickups) do
 		if record.seeking then
 			local dir = playerPos - record.currentPos
@@ -370,11 +391,26 @@ RunService.Heartbeat:Connect(function(dt: number)
 			record.primary.CFrame = CFrame.new(record.currentPos + Vector3.new(0, bob, 0))
 		end
 
+		-- Despawn locally as soon as a seeking orb reaches the player.
+		local contactDelta = record.currentPos - playerPos
+		local contactDistSq = contactDelta.X * contactDelta.X + contactDelta.Y * contactDelta.Y + contactDelta.Z * contactDelta.Z
+		if record.seeking and contactDistSq <= CONTACT_DESPAWN_DISTANCE_SQ then
+			if record.collectible ~= false then
+				if not record.lastRequestAt or (now - record.lastRequestAt) >= REQUEST_RETRY_DELAY then
+					record.lastRequestAt = now
+					record.seekStartAt = now
+					PickupRequest:FireServer(record.id)
+				end
+			end
+			table.insert(instantDespawnIds, record.id)
+			continue
+		end
+
 		if doCheck then
 			local delta = record.currentPos - playerPos
 			local distSq = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
 
-			if distSq <= pickupRadiusSq then
+			if record.collectible ~= false and distSq <= pickupRadiusSq then
 				if not record.lastRequestAt or (now - record.lastRequestAt) >= REQUEST_RETRY_DELAY then
 					record.lastRequestAt = now
 					record.seeking = true
@@ -382,6 +418,8 @@ RunService.Heartbeat:Connect(function(dt: number)
 					PickupRequest:FireServer(record.id)
 				end
 			elseif magnetActive and distSq <= magnetRadiusSq and record.kind ~= "expRed" then
+				record.seeking = true
+			elseif record.seekOnSpawn then
 				record.seeking = true
 			elseif not record.lastRequestAt then
 				record.seeking = false
@@ -395,6 +433,14 @@ RunService.Heartbeat:Connect(function(dt: number)
 				record.seekStartAt = nil
 				record.currentPos = record.position
 			end
+		end
+	end
+
+	for _, pickupId in ipairs(instantDespawnIds) do
+		local record = activePickups[pickupId]
+		if record then
+			releaseVisual(record.instance)
+			activePickups[pickupId] = nil
 		end
 	end
 end)

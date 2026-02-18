@@ -21,6 +21,9 @@ type PickupRecord = {
 	expiresAt: number,
 	ownerEntity: number?,
 	isSink: boolean?,
+	collectible: boolean?,
+	seekOnSpawn: boolean?,
+	visualOnly: boolean?,
 	claimed: boolean?,
 	recipients: {[Player]: boolean},
 }
@@ -115,6 +118,9 @@ local function buildSpawnPayload(record: PickupRecord): {[string]: any}
 		value = record.value,
 		expiresAt = record.expiresAt,
 		isSink = record.isSink == true,
+		collectible = record.collectible ~= false,
+		seekOnSpawn = record.seekOnSpawn == true,
+		visualOnly = record.visualOnly == true,
 	}
 end
 
@@ -387,6 +393,9 @@ function PickupService.init(worldRef: any, components: any, expSystemRef: any, g
 		if record.ownerEntity and record.ownerEntity ~= playerEntity then
 			return
 		end
+		if record.collectible == false or record.visualOnly == true then
+			return
+		end
 
 		local playerPos = getPlayerPosition(playerEntity)
 		if not playerPos then
@@ -437,6 +446,9 @@ function PickupService.spawnPickup(position: Vector3, value: number, kind: strin
 	local now = GameTimeSystem.getGameTime()
 	local expireAt = now + (lifetime or ItemBalance.OrbLifetime)
 	local isSink = opts and opts.isSink
+	local collectible = not (opts and opts.collectible == false)
+	local seekOnSpawn = opts and opts.seekOnSpawn == true or false
+	local visualOnly = opts and opts.visualOnly == true or false
 	local allowMerge = not isSink and (opts and opts.allowMerge ~= false or opts == nil)
 
 	if allowMerge then
@@ -460,6 +472,9 @@ function PickupService.spawnPickup(position: Vector3, value: number, kind: strin
 		expiresAt = expireAt,
 		ownerEntity = ownerEntity,
 		isSink = isSink == true,
+		collectible = collectible,
+		seekOnSpawn = seekOnSpawn,
+		visualOnly = visualOnly,
 		recipients = {},
 	}
 	pickups[pickupId] = record
@@ -490,15 +505,20 @@ function PickupService.spawnPickup(position: Vector3, value: number, kind: strin
 	return pickupId
 end
 
-function PickupService.spawnExpPickup(orbType: string, position: Vector3, ownerEntity: number?, overrideValue: number?): number?
+function PickupService.spawnExpPickup(orbType: string, position: Vector3, ownerEntity: number?, overrideValue: number?, opts: {[string]: any}?): number?
 	local orbConfig = ItemBalance.OrbTypes[orbType]
 	if not orbConfig then
 		orbConfig = ItemBalance.OrbTypes.Blue
 	end
 	local value = overrideValue or orbConfig.expAmount
 	local kind = "exp" .. orbType
-	return PickupService.spawnPickup(position, value, kind, ownerEntity, ItemBalance.OrbLifetime, {
+	local pickupLifetime = if opts and typeof(opts.lifetime) == "number" then opts.lifetime else ItemBalance.OrbLifetime
+	return PickupService.spawnPickup(position, value, kind, ownerEntity, pickupLifetime, {
 		isSink = orbType == "Red",
+		collectible = if opts then opts.collectible else nil,
+		seekOnSpawn = if opts then opts.seekOnSpawn else nil,
+		visualOnly = if opts then opts.visualOnly else nil,
+		allowMerge = if opts then opts.allowMerge else nil,
 	})
 end
 

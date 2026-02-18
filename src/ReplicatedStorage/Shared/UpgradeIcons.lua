@@ -52,6 +52,7 @@ local UpgradeIcons = {
 	["mobility:DoubleJump"] = "118165830384003",
 	["mobility:Blink"] = "103856385303705",
 	["mobility:ManaGrapple"] = "135518071156835",
+	["weapon:Oathkeeper"] = "137338447639770",
 
 	-- Attributes
 	["attr:MagicBolt:ChainCasting"] = "",

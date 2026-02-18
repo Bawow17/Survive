@@ -1,6 +1,6 @@
 --!strict
 -- Charger enemy balance configuration
--- Glass cannon enemy with high-speed dash attacks
+-- Heavy striker enemy with high-speed dash attacks
 
 local ChargerBalance = {}
 
@@ -9,9 +9,10 @@ ChargerBalance.Name = "Charger"
 ChargerBalance.modelPath = "game.ServerStorage.ContentDrawer.Enemies.Mobs.Charger"
 
 -- Base stats (affected by global scaling)
-ChargerBalance.baseHealth = 65 -- Glass cannon: lower than Zombie
-ChargerBalance.baseDamage = 35 -- Only dealt during dash
-ChargerBalance.baseSpeed = 20 -- High base movement speed
+-- Tuned toward a tougher RoR2-style uncommon threat.
+ChargerBalance.baseHealth = 240
+ChargerBalance.baseDamage = 16 -- Primary threat comes from dash connect
+ChargerBalance.baseSpeed = 18
 
 -- AI behavior identifier
 ChargerBalance.behavior = "Charger"

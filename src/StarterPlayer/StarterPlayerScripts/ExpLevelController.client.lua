@@ -23,13 +23,12 @@ if not mainHUD then
 	return
 end
 
-local bottomBarFrame = mainHUD:WaitForChild("BottomBarFrame", 10)
-if not bottomBarFrame then
-	warn("[ExpLevelController] BottomBarFrame not found!")
-	return
+local topBarFrame = mainHUD:FindFirstChild("TopBarFrame")
+local expBarFrame = if topBarFrame then topBarFrame:FindFirstChild("ExpBarFrame") else nil
+if not expBarFrame then
+	local bottomBarFrame = mainHUD:FindFirstChild("BottomBarFrame")
+	expBarFrame = if bottomBarFrame then bottomBarFrame:FindFirstChild("ExpBarFrame") else nil
 end
-
-local expBarFrame = bottomBarFrame:WaitForChild("ExpBarFrame", 10)
 if not expBarFrame then
 	warn("[ExpLevelController] ExpBarFrame not found!")
 	return

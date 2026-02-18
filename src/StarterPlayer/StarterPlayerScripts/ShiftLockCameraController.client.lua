@@ -17,6 +17,8 @@ local CAMERA_OFFSET_SMOOTH_SPEED = 14.0
 local SHIFT_LOCK_ACTION = "CustomShiftLockToggle"
 local SHIFT_LOCK_ACTION_PRIORITY = Enum.ContextActionPriority.High.Value + 100
 local ATTR_SETTINGS_OPEN = "UI_SettingsOpen"
+local ATTR_WEAPON_ACTIVE_LOCAL = "WeaponPrimaryActiveLocal"
+local FACING_LOCK_RENDERSTEP = "ShiftLockActiveFacingLock"
 local TOGGLE_BUTTON_NAME_HINTS: {[string]: boolean} = {
 	ShiftLockButton = true,
 	ShiftLockToggle = true,
@@ -34,6 +36,12 @@ local mainMenuOpen = false
 local restoreShiftLockAfterMainMenu = false
 local mainMenuFrame: GuiObject? = nil
 local mainMenuFrameConnection: RBXScriptConnection? = nil
+
+local function isMouseLocked(): boolean
+	local behavior = UserInputService.MouseBehavior
+	return behavior == Enum.MouseBehavior.LockCenter
+		or behavior == Enum.MouseBehavior.LockCurrentPosition
+end
 
 local function applyNamedStateVisuals(frame: GuiObject, enabled: boolean)
 	local function setIfGuiObject(name: string, visible: boolean)
@@ -354,6 +362,73 @@ local function updateCameraOffset(dt: number?)
 	humanoid.CameraOffset = currentOffset:Lerp(targetOffset, alpha)
 end
 
+local function shouldForceActiveFacing(): boolean
+	local humanoid = currentHumanoid
+	if not humanoid or not humanoid.Parent or humanoid.Health <= 0 then
+		return false
+	end
+	if not shiftLockEnabled then
+		return false
+	end
+	if not isMouseLocked() then
+		return false
+	end
+
+	local character = humanoid.Parent
+	if not character or not character:IsA("Model") then
+		return false
+	end
+
+	local weaponActive = character:GetAttribute(ATTR_WEAPON_ACTIVE_LOCAL)
+	if typeof(weaponActive) ~= "boolean" or weaponActive == false then
+		return false
+	end
+
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return false
+	end
+
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not rootPart or not rootPart:IsA("BasePart") then
+		return false
+	end
+
+	return true
+end
+
+local function updateActiveFacing()
+	if not shouldForceActiveFacing() then
+		return
+	end
+
+	local humanoid = currentHumanoid
+	if not humanoid or not humanoid.Parent then
+		return
+	end
+	local character = humanoid.Parent
+	if not character or not character:IsA("Model") then
+		return
+	end
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not rootPart or not rootPart:IsA("BasePart") then
+		return
+	end
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+
+	local lookFlat = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
+	if lookFlat.Magnitude <= 1e-4 then
+		return
+	end
+	lookFlat = lookFlat.Unit
+
+	local rootPosition = rootPart.Position
+	rootPart.CFrame = CFrame.lookAt(rootPosition, rootPosition + lookFlat)
+end
+
 local function bindCharacter(character: Model)
 	restoreOffsetIfNeeded()
 
@@ -411,6 +486,10 @@ end)
 
 RunService:BindToRenderStep("ShiftLockCameraOffset", Enum.RenderPriority.Camera.Value - 1, function(dt: number)
 	updateCameraOffset(dt)
+end)
+
+RunService:BindToRenderStep(FACING_LOCK_RENDERSTEP, Enum.RenderPriority.Camera.Value + 1, function()
+	updateActiveFacing()
 end)
 
 if localPlayer.Character then

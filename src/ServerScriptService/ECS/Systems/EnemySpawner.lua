@@ -45,19 +45,12 @@ local Position: any
 local PassiveEffects: any
 local AbilityData: any
 
-local playerSpawnAccumulators: {[number]: number} = {}
+local playerSpawnCredits: {[number]: number} = {}
 local scalingCorrectionState: {[number]: {spawn: number, health: number, damage: number, speed: number}} = {}
 local initialDelayAccumulator = 0
 local hasInitialDelayPassed = false
 local zombieSpawnCounter = 0 -- Track total zombie spawns for debug messages
 local spawnEnabled = true
-
--- Nuke powerup state
-local nukeActive = false
-local nukeEndTime = 0
-local nukeRestoreEndTime = 0  -- NEW: When restoration completes
-local PowerupBalance = require(game.ServerScriptService.Balance.PowerupBalance)
-local NUKE_RESTORE_DURATION = PowerupBalance.PowerupTypes.Nuke.restoreDuration or 15  -- 15 seconds to fully restore spawn rate
 
 -- Spawn check throttle (PERFORMANCE FIX - don't run spawn logic every frame!)
 local SPAWN_CHECK_INTERVAL = 0.5  -- Only check/spawn every 0.5 seconds
@@ -86,14 +79,43 @@ local tierRNG = Random.new()
 
 -- Cache for enemy types and weights
 local enemyTypes = {}
-local cumulativeWeights = {}
-local totalWeight = 0
+local enemyWeights = {}
+local enemyCosts: {[string]: number} = {}
+local minEnemyCost = 1.0
+
+local function normalizePositiveNumber(value: any, defaultValue: number): number
+	if typeof(value) ~= "number" then
+		return defaultValue
+	end
+	if value ~= value or value == math.huge or value == -math.huge then
+		return defaultValue
+	end
+	if value <= 0 then
+		return defaultValue
+	end
+	return value
+end
+
+local function resolveEnemySpawnCost(enemyType: string, enemyConfig: any): number
+	local directorCfg = EnemyBalance.SpawnDirector or {}
+	local configuredCosts = directorCfg.MonsterCosts or {}
+	local directCost = configuredCosts[enemyType]
+	if typeof(directCost) == "number" and directCost > 0 then
+		return directCost
+	end
+
+	local baseHealth = normalizePositiveNumber(enemyConfig and enemyConfig.baseHealth, 80)
+	local baseDamage = normalizePositiveNumber(enemyConfig and enemyConfig.baseDamage, 20)
+	local inferred = math.floor((baseHealth * 0.09) + (baseDamage * 0.55) + 0.5)
+	return math.max(1, inferred)
+end
 
 -- Build weighted selection tables
 local function rebuildEnemyWeights()
 	table.clear(enemyTypes)
-	table.clear(cumulativeWeights)
-	totalWeight = 0
+	table.clear(enemyWeights)
+	table.clear(enemyCosts)
+	minEnemyCost = math.huge
 	
 	local weights = EnemyBalance.SpawnWeights or {}
 	
@@ -103,33 +125,86 @@ local function rebuildEnemyWeights()
 		if config then
 			local weight = weights[enemyType] or 0
 			if weight > 0 then
-				totalWeight = totalWeight + weight
+				local cost = resolveEnemySpawnCost(enemyType, config)
 				table.insert(enemyTypes, enemyType)
-				table.insert(cumulativeWeights, totalWeight)
+				table.insert(enemyWeights, weight)
+				enemyCosts[enemyType] = cost
+				if cost < minEnemyCost then
+					minEnemyCost = cost
+				end
 			end
 		end
 	end
+
+	if minEnemyCost == math.huge then
+		minEnemyCost = 1.0
+	end
 end
 
--- Select a random enemy type based on weights
-local function selectRandomEnemyType(): string
+local function selectEnemyTypeForCredits(availableCredits: number, tooCheapMultiplier: number): (string?, number?)
 	if #enemyTypes == 0 then
-		return "Zombie" -- Fallback
+		return nil, nil
 	end
-	
-	if #enemyTypes == 1 then
-		return enemyTypes[1]
-	end
-	
-	local roll = enemyTypeRNG:NextNumber(0, totalWeight)
-	
-	for i, cumulativeWeight in ipairs(cumulativeWeights) do
-		if roll <= cumulativeWeight then
-			return enemyTypes[i]
+
+	local candidateIndices = table.create(#enemyTypes)
+	local affordableWeight = 0
+
+	for i, enemyType in ipairs(enemyTypes) do
+		local cost = enemyCosts[enemyType] or 1
+		if cost <= availableCredits then
+			local weight = enemyWeights[i] or 0
+			if weight > 0 then
+				affordableWeight += weight
+				candidateIndices[#candidateIndices + 1] = i
+			end
 		end
 	end
-	
-	return enemyTypes[#enemyTypes] -- Fallback to last type
+
+	if #candidateIndices == 0 or affordableWeight <= 0 then
+		return nil, nil
+	end
+
+	if tooCheapMultiplier > 1 then
+		local minDesiredCost = availableCredits / tooCheapMultiplier
+		if minDesiredCost > 0 then
+			local expensiveIndices = table.create(#candidateIndices)
+			local expensiveWeight = 0
+			for _, idx in ipairs(candidateIndices) do
+				local enemyType = enemyTypes[idx]
+				local cost = enemyCosts[enemyType] or 1
+				if cost >= minDesiredCost then
+					local weight = enemyWeights[idx] or 0
+					if weight > 0 then
+						expensiveIndices[#expensiveIndices + 1] = idx
+						expensiveWeight += weight
+					end
+				end
+			end
+			if #expensiveIndices > 0 and expensiveWeight > 0 then
+				candidateIndices = expensiveIndices
+				affordableWeight = expensiveWeight
+			end
+		end
+	end
+
+	local roll = enemyTypeRNG:NextNumber(0, affordableWeight)
+	local running = 0
+	for _, idx in ipairs(candidateIndices) do
+		local weight = enemyWeights[idx] or 0
+		running += weight
+		if roll <= running then
+			local enemyType = enemyTypes[idx]
+			return enemyType, enemyCosts[enemyType] or 1
+		end
+	end
+
+	local fallbackIdx = candidateIndices[#candidateIndices]
+	if fallbackIdx then
+		local enemyType = enemyTypes[fallbackIdx]
+		return enemyType, enemyCosts[enemyType] or 1
+	end
+
+	return nil, nil
 end
 
 -- Cache for player parts to avoid recreating tables every frame
@@ -558,15 +633,37 @@ local function getPlayerScaling(_playerEntity: number, coeffData: any): any
 	end
 
 	local scaleCfg = EnemyBalance.DifficultyScaling or {}
-	local spawnExp = scaleCfg.SpawnExponent or 1.0
-	local healthExp = scaleCfg.HealthExponent or 0.9
-	local damageExp = scaleCfg.DamageExponent or 0.6
-	local speedExp = scaleCfg.SpeedExponent or 0.4
+	local playerCount = math.max(1, math.floor(safeNumber((coeffData and coeffData.playerCount) or 1, 1)))
+	local playerFactor = safeNumber((coeffData and coeffData.playerFactor), 0.7 + 0.3 * playerCount)
+	local scalingMode = scaleCfg.Mode
+	local coeffHealth = 1.0
+	local coeffDamage = 1.0
+	local coeffSpeed = 1.0
+	local ambientLevel = 1.0
 
-	local coeffSpawn = coeff ^ spawnExp
-	local coeffHealth = coeff ^ healthExp
-	local coeffDamage = coeff ^ damageExp
-	local coeffSpeed = coeff ^ speedExp
+	if scalingMode == "LegacyExponent" then
+		local healthExp = scaleCfg.HealthExponent or 0.9
+		local damageExp = scaleCfg.DamageExponent or 0.6
+		local speedExp = scaleCfg.SpeedExponent or 0.4
+		coeffHealth = coeff ^ healthExp
+		coeffDamage = coeff ^ damageExp
+		coeffSpeed = coeff ^ speedExp
+	else
+		-- RoR2-like scaling: ambient level is derived from coefficient delta over player baseline.
+		-- Each ambient level grants +30% HP and +20% damage (speed mostly static).
+		local ambientStep = math.max(1e-3, safeNumber(scaleCfg.AmbientLevelStep, 0.33))
+		local healthPerLevel = safeNumber(scaleCfg.HealthPerLevel, 0.30)
+		local damagePerLevel = safeNumber(scaleCfg.DamagePerLevel, 0.20)
+		local speedPerLevel = safeNumber(scaleCfg.SpeedPerLevel, 0.00)
+		local levelCap = math.max(1, safeNumber(scaleCfg.LevelCap, 99))
+
+		local levelDelta = math.max(0, (coeff - playerFactor) / ambientStep)
+		ambientLevel = math.clamp(1 + levelDelta, 1, levelCap)
+		local ambientGrowth = ambientLevel - 1
+		coeffHealth = math.max(0.05, 1 + healthPerLevel * ambientGrowth)
+		coeffDamage = math.max(0.05, 1 + damagePerLevel * ambientGrowth)
+		coeffSpeed = math.max(0.05, 1 + speedPerLevel * ambientGrowth)
+	end
 
 	local spawnCorrection = 1
 	local healthCorrection = 1
@@ -631,10 +728,27 @@ local function getPlayerScaling(_playerEntity: number, coeffData: any): any
 		speedCorrection = math.clamp(state.speed, 1 - statClamp, 1 + statClamp)
 	end
 
-	local baseSpawn = EnemyBalance.BaseSpawnRatePerPlayer or 2.5
-	local spawnRate = baseSpawn * coeffSpawn * spawnCorrection
-	if typeof(spawnRate) ~= "number" or spawnRate ~= spawnRate or spawnRate <= 0 then
-		spawnRate = baseSpawn
+	local spawnDirector = EnemyBalance.SpawnDirector or {}
+	local spawnCreditsPerSecond = 0
+	local spawnRate = 0
+
+	if spawnDirector.Enabled ~= false then
+		-- RoR2-inspired credit income:
+		-- totalIncome ~= creditMultiplier * (1 + 0.4 * coeff) * ((players + 1) / 2)
+		local creditMultiplier = math.max(0.01, safeNumber(spawnDirector.CreditMultiplier, 1.5))
+		local totalIncome = creditMultiplier * (1 + 0.4 * coeff) * ((playerCount + 1) * 0.5)
+		local perPlayerIncome = totalIncome / playerCount
+		spawnCreditsPerSecond = math.max(0.01, perPlayerIncome * spawnCorrection)
+		spawnRate = spawnCreditsPerSecond
+	else
+		local spawnExp = scaleCfg.SpawnExponent or 1.0
+		local coeffSpawn = coeff ^ spawnExp
+		local baseSpawn = EnemyBalance.BaseSpawnRatePerPlayer or 2.5
+		spawnRate = baseSpawn * coeffSpawn * spawnCorrection
+		if typeof(spawnRate) ~= "number" or spawnRate ~= spawnRate or spawnRate <= 0 then
+			spawnRate = baseSpawn
+		end
+		spawnCreditsPerSecond = spawnRate
 	end
 
 	return {
@@ -642,6 +756,7 @@ local function getPlayerScaling(_playerEntity: number, coeffData: any): any
 		damageMult = coeffDamage * damageCorrection,
 		speedMult = coeffSpeed * speedCorrection,
 		spawnRate = spawnRate,
+		spawnCreditsPerSecond = spawnCreditsPerSecond,
 		corrections = {
 			spawn = spawnCorrection,
 			health = healthCorrection,
@@ -652,6 +767,7 @@ local function getPlayerScaling(_playerEntity: number, coeffData: any): any
 		expectedPower = expectedPower,
 		powerGap = powerGap,
 		coeff = coeff,
+		ambientLevel = ambientLevel,
 	}
 end
 
@@ -908,48 +1024,11 @@ local function getDensityAwareSpawnPosition(playerPos: {x: number, y: number, z:
 	return bestPosition, bestDensity, sectorInfo
 end
 
--- Calculate spawn rate multiplier based on nuke restoration progress
-local function getNukeSpawnMultiplier(): number
-	if not nukeActive then
-		return 1.0  -- Full spawn rate
-	end
-	
-	local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
-	local currentTime = GameTimeSystem.getGameTime()
-	
-	-- Phase 1: Anti-spawn period (0% spawn rate)
-	if currentTime < nukeEndTime then
-		return 0.0  -- No spawning during nuke
-	end
-	
-	-- Phase 2: Gradual restoration (0% → 100% over 15 seconds)
-	if currentTime < nukeRestoreEndTime then
-		local elapsed = currentTime - nukeEndTime
-		local progress = elapsed / NUKE_RESTORE_DURATION
-		return math.clamp(progress, 0, 1)  -- Linear restoration 0 → 1
-	end
-	
-	-- Phase 3: Fully restored
-	nukeActive = false  -- Clear nuke state
-	return 1.0
-end
-
--- PUBLIC API: Set nuke active state (called by PowerupEffectSystem)
-function EnemySpawner.setNukeActive(duration: number)
-	local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
-	nukeActive = true
-	nukeEndTime = GameTimeSystem.getGameTime() + duration
-	nukeRestoreEndTime = nukeEndTime + NUKE_RESTORE_DURATION  -- NEW: 15s after nuke ends
-end
-
 function EnemySpawner.setEnabled(enabled: boolean)
 	spawnEnabled = enabled
 	if enabled then
-		-- Reset any stuck nuke state so spawns resume after wipes/restarts.
-		nukeActive = false
-		nukeEndTime = 0
-		nukeRestoreEndTime = 0
-		DifficultyCoeff.reset()
+		table.clear(playerSpawnCredits)
+		table.clear(scalingCorrectionState)
 	end
 end
 
@@ -957,10 +1036,6 @@ function EnemySpawner.step(dt: number)
 	if not world or not spawnEnabled then
 		return
 	end
-	
-	-- Calculate spawn rate multiplier from nuke (0 during nuke, gradually restores)
-	local nukeMultiplier = getNukeSpawnMultiplier()
-
 	-- Handle initial delay
 	if not hasInitialDelayPassed then
 		initialDelayAccumulator += dt
@@ -998,6 +1073,7 @@ function EnemySpawner.step(dt: number)
 	end
 
 	-- Get player positions using cached query
+	local eligiblePlayers = {}
 	local playerPositions = {}
 	local activePlayers: {[number]: boolean} = {}
 	for entity, position, playerStats in playerPositionQuery do
@@ -1019,38 +1095,45 @@ function EnemySpawner.step(dt: number)
 				-- If a stale CooldownsFrozen flag exists without a pause state, don't block spawns.
 			end
 			
-			local scaling = getPlayerScaling(entity, {
-				coeff = coeff,
-				timeMinutes = coeffDetails.timeMinutes or 0,
-			})
-			local posVec = Vector3.new(position.x, position.y, position.z)
-			if PROFILING_ENABLED and playerStats.player then
-				local playerName = playerStats.player.Name
-				profGauge("SpawnRate." .. playerName, math.floor((scaling.spawnRate or 0) * 100 + 0.5))
-				local corr = scaling.corrections or {}
-				profGauge("ScalingCorr.Spawn." .. playerName, math.floor((corr.spawn or 1) * 1000 + 0.5))
-				profGauge("ScalingCorr.HP." .. playerName, math.floor((corr.health or 1) * 1000 + 0.5))
-				profGauge("ScalingCorr.Dmg." .. playerName, math.floor((corr.damage or 1) * 1000 + 0.5))
-				profGauge("ScalingCorr.Spd." .. playerName, math.floor((corr.speed or 1) * 1000 + 0.5))
-				profGauge("ScalingPower." .. playerName, math.floor((scaling.powerScore or 1) * 1000 + 0.5))
-				profGauge("ScalingExpectedPower." .. playerName, math.floor((scaling.expectedPower or 1) * 1000 + 0.5))
-			end
-
-			table.insert(playerPositions, {
+			table.insert(eligiblePlayers, {
 				entity = entity,
 				position = position,
-				positionVec = posVec,
+				positionVec = Vector3.new(position.x, position.y, position.z),
 				stats = playerStats,
-				scaling = scaling,
 				playerName = playerStats.player.Name,
 			})
 			activePlayers[entity] = true
 		end
 	end
 
+	local activePlayerCount = math.max(1, #eligiblePlayers)
+	for _, playerData in ipairs(eligiblePlayers) do
+		local scaling = getPlayerScaling(playerData.entity, {
+			coeff = coeff,
+			timeMinutes = coeffDetails.timeMinutes or 0,
+			playerCount = activePlayerCount,
+			playerFactor = coeffDetails.playerFactor,
+		})
+		playerData.scaling = scaling
+		if PROFILING_ENABLED then
+			local playerName = playerData.playerName
+			profGauge("SpawnRate." .. playerName, math.floor((scaling.spawnRate or 0) * 100 + 0.5))
+			profGauge("SpawnCredits." .. playerName, math.floor((scaling.spawnCreditsPerSecond or scaling.spawnRate or 0) * 100 + 0.5))
+			profGauge("AmbientLevel." .. playerName, math.floor((scaling.ambientLevel or 1) * 100 + 0.5))
+			local corr = scaling.corrections or {}
+			profGauge("ScalingCorr.Spawn." .. playerName, math.floor((corr.spawn or 1) * 1000 + 0.5))
+			profGauge("ScalingCorr.HP." .. playerName, math.floor((corr.health or 1) * 1000 + 0.5))
+			profGauge("ScalingCorr.Dmg." .. playerName, math.floor((corr.damage or 1) * 1000 + 0.5))
+			profGauge("ScalingCorr.Spd." .. playerName, math.floor((corr.speed or 1) * 1000 + 0.5))
+			profGauge("ScalingPower." .. playerName, math.floor((scaling.powerScore or 1) * 1000 + 0.5))
+			profGauge("ScalingExpectedPower." .. playerName, math.floor((scaling.expectedPower or 1) * 1000 + 0.5))
+		end
+		table.insert(playerPositions, playerData)
+	end
+
 	if #playerPositions == 0 then
 		-- No players, reset accumulators to prevent spawning when players join
-		table.clear(playerSpawnAccumulators)
+		table.clear(playerSpawnCredits)
 		table.clear(scalingCorrectionState)
 		return
 	end
@@ -1086,9 +1169,9 @@ function EnemySpawner.step(dt: number)
 	end
 
 	-- Clear accumulators for players who left
-	for entity in pairs(playerSpawnAccumulators) do
+	for entity in pairs(playerSpawnCredits) do
 		if not activePlayers[entity] then
-			playerSpawnAccumulators[entity] = nil
+			playerSpawnCredits[entity] = nil
 			scalingCorrectionState[entity] = nil
 		end
 	end
@@ -1104,47 +1187,77 @@ function EnemySpawner.step(dt: number)
 		playerData.otherPositions = others
 	end
 
-	-- Global spawn budget (prevents player count explosion)
-	local totalSpawnRate = 0
+	-- Global credit budget (RoR2-like director income clamp)
+	local totalCreditsPerSecond = 0
 	for _, playerData in ipairs(playerPositions) do
-		totalSpawnRate += (playerData.scaling.spawnRate or 0)
+		totalCreditsPerSecond += (playerData.scaling.spawnCreditsPerSecond or playerData.scaling.spawnRate or 0)
 	end
 
-	local maxSpawnsPerSecond = EnemyBalance.SpawnBudget.MaxSpawnsPerSecond or totalSpawnRate
+	local spawnBudget = EnemyBalance.SpawnBudget or {}
+	local maxCreditsPerSecond = spawnBudget.MaxCreditsPerSecond or spawnBudget.MaxSpawnsPerSecond or totalCreditsPerSecond
 	local globalSpawnScale = 1.0
-	if totalSpawnRate > 0 and totalSpawnRate > maxSpawnsPerSecond then
-		globalSpawnScale = maxSpawnsPerSecond / totalSpawnRate
+	if totalCreditsPerSecond > 0 and totalCreditsPerSecond > maxCreditsPerSecond then
+		globalSpawnScale = maxCreditsPerSecond / totalCreditsPerSecond
 	end
 
 
 	for _, playerData in ipairs(playerPositions) do
-		local acc = playerSpawnAccumulators[playerData.entity] or 0
-		acc += (playerData.scaling.spawnRate or 0) * nukeMultiplier * globalSpawnScale * SPAWN_CHECK_INTERVAL
-		playerSpawnAccumulators[playerData.entity] = acc
+		local acc = playerSpawnCredits[playerData.entity] or 0
+		acc += (playerData.scaling.spawnCreditsPerSecond or playerData.scaling.spawnRate or 0) * globalSpawnScale * SPAWN_CHECK_INTERVAL
+		playerSpawnCredits[playerData.entity] = acc
 	end
 
 	-- Spawn enemies per player, respecting global caps
 	local maxSpawnThisTick = EnemyBalance.SpawnBudget.MaxSpawnsPerTick or 12
 	local spawnedThisTick = 0
 	local maxEnemies = EnemyBalance.MaxEnemies or 275
+	local directorCfg = EnemyBalance.SpawnDirector or {}
+	if directorCfg.Enabled ~= false then
+		local baseCap = math.max(1, math.floor(safeNumber(directorCfg.MaxMonstersBase, 40)))
+		local additionalPerPlayer = math.max(0, safeNumber(directorCfg.AdditionalMonstersPerPlayer, 0))
+		local directorCap = math.floor(baseCap + math.max(0, #playerPositions - 1) * additionalPerPlayer + 0.5)
+		maxEnemies = math.min(maxEnemies, math.max(1, directorCap))
+	end
+	local tooCheapMultiplier = math.max(1.01, safeNumber(directorCfg.TooCheapMultiplier, 6.0))
 
 	for _, playerData in ipairs(playerPositions) do
 		if enemyCount >= maxEnemies or spawnedThisTick >= maxSpawnThisTick then
 			break
 		end
 
-		local acc = playerSpawnAccumulators[playerData.entity] or 0
-		while acc >= 1 and enemyCount < maxEnemies and spawnedThisTick < maxSpawnThisTick do
-			acc -= 1
+		local acc = playerSpawnCredits[playerData.entity] or 0
+		while acc >= minEnemyCost and enemyCount < maxEnemies and spawnedThisTick < maxSpawnThisTick do
+			-- Select an affordable spawn card (enemy type + base credit cost)
+			local enemyType, enemyCost = selectEnemyTypeForCredits(acc, tooCheapMultiplier)
+			if not enemyType or not enemyCost then
+				break
+			end
 
-			-- Select enemy type based on weights
-			local enemyType = selectRandomEnemyType()
+			local tier = rollTier(superOdds, eliteOdds)
+			local tierMult = { health = 1.0, damage = 1.0, speed = 1.0, size = 1.0 }
+			local tierCostMultiplier = 1.0
+			if tier == "Super" then
+				tierMult = tierCfg.SuperMult or tierMult
+				tierCostMultiplier = math.max(1.0, safeNumber(tierCfg.SuperCreditCostMult, 4.0))
+				profInc("SuperSpawned", 1)
+			elseif tier == "Elite" then
+				tierMult = tierCfg.EliteMult or tierMult
+				tierCostMultiplier = math.max(1.0, safeNumber(tierCfg.EliteCreditCostMult, 6.0))
+				profInc("EliteSpawned", 1)
+			end
+
+			local spendCost = enemyCost * tierCostMultiplier
+			if spendCost > acc then
+				tier = "Normal"
+				tierMult = { health = 1.0, damage = 1.0, speed = 1.0, size = 1.0 }
+				spendCost = enemyCost
+			end
+			acc -= spendCost
 
 			-- Ensure enemy model is replicated before spawning to prevent invisible enemies
 			local replicationSuccess = ModelReplicationService.replicateEnemy(enemyType)
 			if not replicationSuccess then
 				warn(string.format("[EnemySpawner] Failed to replicate %s model, skipping spawn this frame", enemyType))
-				acc += 1
 				break
 			end
 
@@ -1152,16 +1265,6 @@ function EnemySpawner.step(dt: number)
 			local groundedPos = getSpawnPositionForPlayer(playerData.position, playerData.otherPositions or {})
 			if not groundedPos then
 				continue
-			end
-
-			local tier = rollTier(superOdds, eliteOdds)
-			local tierMult = { health = 1.0, damage = 1.0, speed = 1.0, size = 1.0 }
-			if tier == "Super" then
-				tierMult = tierCfg.SuperMult or tierMult
-				profInc("SuperSpawned", 1)
-			elseif tier == "Elite" then
-				tierMult = tierCfg.EliteMult or tierMult
-				profInc("EliteSpawned", 1)
 			end
 
 			local finalSpawnPos = adjustSpawnHeightForEnemy(groundedPos, enemyType, tierMult.size or 1.0)
@@ -1172,6 +1275,7 @@ function EnemySpawner.step(dt: number)
 				damageMult = (baseScaling.damageMult or 1) * (tierMult.damage or 1),
 				speedMult = (baseScaling.speedMult or 1) * (tierMult.speed or 1),
 				spawnRate = baseScaling.spawnRate,
+				spawnCreditsPerSecond = baseScaling.spawnCreditsPerSecond,
 				corrections = baseScaling.corrections,
 				coeff = baseScaling.coeff,
 				tier = tier,
@@ -1187,8 +1291,9 @@ function EnemySpawner.step(dt: number)
 			end
 		end
 
-		playerSpawnAccumulators[playerData.entity] = acc
+		playerSpawnCredits[playerData.entity] = acc
 	end
 end
 
 return EnemySpawner
+

@@ -3,8 +3,8 @@
 
 return {
 	-- Spawn Settings
-	SpawnEnabled = true,
-	PowerupSpawnEnabled = true,  -- Enable powerup spawning
+	SpawnEnabled = false,
+	PowerupSpawnEnabled = false,  -- Powerups disabled (kill-only XP flow)
 	
 	-- Ambient exp spawn rate scaling (over game time)
 	ExpPerSecondScaling = {
@@ -62,6 +62,16 @@ return {
 			Purple = 10,  -- 10%
 		},
 	},
+
+	-- RoR2-inspired kill XP and level curve tuning
+	RoR2Exp = {
+		RewardMultiplier = 0.2,
+		TeamXpExtraPerPlayer = 0.3,
+		BaseLevelExp = 20,
+		LevelGrowth = 1.55,
+		VisualOrbLifetime = 1.25,
+		VisualOrbSeekOnSpawn = true,
+	},
 	
 	-- Exp-Sink (Red Orb) Settings
 	ExpSink = {
@@ -77,7 +87,7 @@ return {
 	},
 	
 	-- Leveling (Dynamic three-phase system)
-	BaseExpRequired = 100,  -- Exp needed for level 2
+	BaseExpRequired = 20,  -- Exp needed for level 2
 	MaxLevel = 1000,
 
 	-- Optional EXP curve overrides (tuning knobs)
@@ -138,7 +148,7 @@ return {
 	
 	-- Spawn EXP Settings (orbs spawned around player on initial spawn)
 	SpawnExps = {
-		Enabled = true,
+		Enabled = false,
 		
 		-- Delay before spawning starter orbs (prevents white flash)
 		SpawnDelay = 2,  -- Wait 0.5s after player joins before spawning orbs

@@ -22,6 +22,7 @@ local gamePaused = remotesFolder:WaitForChild("GamePaused")
 local gameUnpaused = remotesFolder:WaitForChild("GameUnpaused")
 
 local PRIMARY_ABILITY_ID = "MagicBolt"
+local PRIMARY_WEAPON_ICON_KEY = "weapon:Oathkeeper"
 local COOLDOWN_EPSILON = 1e-4
 local DEBUG_COOLDOWN_HUD = false
 
@@ -34,6 +35,7 @@ type SlotRef = {
 	image: ImageGui?,
 	cooldown: Frame?,
 	timerLabel: TextLabel?,
+	stroke: UIStroke?,
 }
 
 type ServerCooldownSample = {
@@ -102,11 +104,11 @@ local playerComponentState: {[string]: any} = {}
 local isPaused = false
 
 local slotRefs: {[string]: SlotRef} = {
-	Primary = { root = nil, image = nil, cooldown = nil, timerLabel = nil },
-	Utility = { root = nil, image = nil, cooldown = nil, timerLabel = nil },
-	Secondary = { root = nil, image = nil, cooldown = nil, timerLabel = nil },
-	Special = { root = nil, image = nil, cooldown = nil, timerLabel = nil },
-	Equipment = { root = nil, image = nil, cooldown = nil, timerLabel = nil },
+	Primary = { root = nil, image = nil, cooldown = nil, timerLabel = nil, stroke = nil },
+	Utility = { root = nil, image = nil, cooldown = nil, timerLabel = nil, stroke = nil },
+	Secondary = { root = nil, image = nil, cooldown = nil, timerLabel = nil, stroke = nil },
+	Special = { root = nil, image = nil, cooldown = nil, timerLabel = nil, stroke = nil },
+	Equipment = { root = nil, image = nil, cooldown = nil, timerLabel = nil, stroke = nil },
 }
 
 local CASTABLE_SLOTS: {SlotName} = { "Primary", "Utility", "Secondary", "Special", "Equipment" }
@@ -124,6 +126,7 @@ local lastAppliedIconBySlot: {[string]: string?} = {}
 local lastAppliedHiddenBySlot: {[string]: boolean?} = {}
 local lastAppliedTimerTextBySlot: {[string]: string?} = {}
 local lastAppliedTimerVisibleBySlot: {[string]: boolean?} = {}
+local lastAppliedStrokeEnabledBySlot: {[string]: boolean?} = {}
 local cooldownBaseYByFrame: {[Frame]: CooldownBaseY} = {}
 local sanitizedCooldownFrames: {[Frame]: boolean} = {}
 
@@ -175,7 +178,7 @@ end
 
 local abilitySlotByAbilityId: {[string]: SlotName} = {}
 local assignedAbilityBySlot: {[string]: string?} = {
-	Primary = PRIMARY_ABILITY_ID,
+	Primary = nil,
 	Utility = nil,
 	Secondary = nil,
 	Special = nil,
@@ -356,6 +359,11 @@ local function resolveUIReferences()
 		ref.cooldown = if cooldown and cooldown:IsA("Frame") then cooldown else nil
 		local timerLabel = ref.root and ref.root:FindFirstChild("CooldownTimerLabel")
 		ref.timerLabel = if timerLabel and timerLabel:IsA("TextLabel") then timerLabel else nil
+		local stroke = ref.root and ref.root:FindFirstChild("UIStroke")
+		if not stroke and ref.root then
+			stroke = ref.root:FindFirstChildWhichIsA("UIStroke", true)
+		end
+		ref.stroke = if stroke and stroke:IsA("UIStroke") then stroke else nil
 		if ref.cooldown then
 			sanitizeCooldownFrame(ref.cooldown)
 			getCooldownBaseY(ref.cooldown)
@@ -368,6 +376,9 @@ local function resolveUIReferences()
 		end
 		if ref.timerLabel == nil then
 			warnOnce("MissingCooldownTimerLabel_" .. slotName, string.format("[AbilitySlotHUDController] CooldownTimerLabel missing for slot: %s", slotName))
+		end
+		if ref.stroke == nil then
+			warnOnce("MissingUIStroke_" .. slotName, string.format("[AbilitySlotHUDController] UIStroke missing for slot: %s", slotName))
 		end
 	end
 
@@ -720,7 +731,7 @@ end
 
 local function renderAllCooldownTimerLabels()
 	local slotEnabledByName: {[string]: boolean} = {
-		Primary = true,
+		Primary = false,
 		Utility = true,
 		Secondary = assignedAbilityBySlot.Secondary ~= nil,
 		Special = assignedAbilityBySlot.Special ~= nil,
@@ -737,11 +748,30 @@ local function renderAllCooldownTimerLabels()
 	end
 end
 
+local function renderSlotStroke(slotName: SlotName)
+	local ref = slotRefs[slotName]
+	local state = getSlotCooldownState(slotName)
+	if not ref or not ref.stroke or not state then
+		return
+	end
+
+	local shouldEnable = not (state.state == "active" and state.remaining > COOLDOWN_EPSILON)
+	if lastAppliedStrokeEnabledBySlot[slotName] == shouldEnable and ref.stroke.Enabled == shouldEnable then
+		return
+	end
+	ref.stroke.Enabled = shouldEnable
+	lastAppliedStrokeEnabledBySlot[slotName] = shouldEnable
+end
+
+local function renderAllSlotStrokes()
+	for _, slotName in ipairs(CASTABLE_SLOTS) do
+		renderSlotStroke(slotName)
+	end
+end
+
 local function rebuildAbilitySlotAssignments()
-	abilitySlotByAbilityId = {
-		[PRIMARY_ABILITY_ID] = "Primary",
-	}
-	assignedAbilityBySlot.Primary = PRIMARY_ABILITY_ID
+	abilitySlotByAbilityId = {}
+	assignedAbilityBySlot.Primary = nil
 
 	for _, slotName in ipairs(ABILITY_SLOTS) do
 		assignedAbilityBySlot[slotName] = nil
@@ -787,7 +817,7 @@ end
 
 local function resolveCastSlot(abilityId: string): SlotName?
 	if abilityId == PRIMARY_ABILITY_ID then
-		return "Primary"
+		return nil
 	end
 	if string.sub(abilityId, 1, 9) == "Mobility_" then
 		return "Utility"
@@ -797,7 +827,7 @@ local function resolveCastSlot(abilityId: string): SlotName?
 end
 
 local function renderAbilitySlotIcons()
-	setSlotIcon("Primary", PRIMARY_ABILITY_ID)
+	setSlotIcon("Primary", PRIMARY_WEAPON_ICON_KEY)
 
 	local mobilityData = playerComponentState.MobilityData
 	local equippedMobility: string? = nil
@@ -826,14 +856,6 @@ local function hydrateIdleCooldownsFromComponents()
 		else nil
 
 	if cooldowns then
-		local primaryRecord = cooldowns[PRIMARY_ABILITY_ID]
-		if typeof(primaryRecord) == "table" then
-			local primaryState = getSlotCooldownState("Primary")
-			if primaryState and primaryState.state == "idle" then
-				hydrateSlotCooldownFromServer("Primary", primaryRecord.remaining, primaryRecord.max, "AbilityCooldown.Primary")
-			end
-		end
-
 		for _, slotName in ipairs(ABILITY_SLOTS) do
 			local abilityId = assignedAbilityBySlot[slotName]
 			if abilityId then
@@ -851,24 +873,7 @@ local function hydrateIdleCooldownsFromComponents()
 end
 
 local function getPrimaryChargeCounts(): (number, number)
-	local abilityData = playerComponentState.AbilityData
-	local totalCharges = 1
-	if typeof(abilityData) == "table" and typeof(abilityData.abilities) == "table" then
-		local record = abilityData.abilities[PRIMARY_ABILITY_ID]
-		if typeof(record) == "table" and typeof(record.projectileCount) == "number" then
-			totalCharges = math.max(1, math.floor(record.projectileCount + 0.0001))
-		end
-	end
-
-	local currentCharges = totalCharges
-	local primaryState = getSlotCooldownState("Primary")
-	if primaryState and primaryState.state == "active" and totalCharges > 1 and primaryState.duration > 0 then
-		local elapsed = math.clamp(primaryState.duration - primaryState.remaining, 0, primaryState.duration)
-		local recovered = math.floor((elapsed / primaryState.duration) * totalCharges + 1e-6)
-		currentCharges = math.clamp(recovered, 0, totalCharges)
-	end
-
-	return currentCharges, totalCharges
+	return 0, 1
 end
 
 local function renderChargeLabels()
@@ -882,6 +887,7 @@ local function renderChargeLabels()
 			primaryLabel.TextTransparency = 1
 		end
 	end
+	setLabelHidden(primaryLabel)
 
 	setLabelHidden(chargeLabels.Utility)
 	setLabelHidden(chargeLabels.Secondary)
@@ -902,7 +908,7 @@ local function refreshUI()
 	renderChargeLabels()
 
 	local ratiosBySlot: {[string]: number} = {
-		Primary = getSlotCooldownRatio("Primary"),
+		Primary = 0,
 		Utility = getSlotCooldownRatio("Utility"),
 		Secondary = getSlotCooldownRatio("Secondary"),
 		Special = getSlotCooldownRatio("Special"),
@@ -918,6 +924,7 @@ local function refreshUI()
 
 	renderAllCooldownFrames(ratiosBySlot)
 	renderAllCooldownTimerLabels()
+	renderAllSlotStrokes()
 end
 
 local function resetAllCooldownStates()
@@ -942,7 +949,7 @@ local function clearPlayerState()
 	playerComponentState = {}
 	abilitySlotByAbilityId = {}
 	assignedAbilityBySlot = {
-		Primary = PRIMARY_ABILITY_ID,
+		Primary = nil,
 		Utility = nil,
 		Secondary = nil,
 		Special = nil,
@@ -952,6 +959,7 @@ local function clearPlayerState()
 	lastAppliedIconBySlot.Utility = nil
 	lastAppliedTimerTextBySlot = {}
 	lastAppliedTimerVisibleBySlot = {}
+	lastAppliedStrokeEnabledBySlot = {}
 	setLabelHidden(chargeLabels.Primary)
 	setLabelHidden(chargeLabels.Utility)
 	setLabelHidden(chargeLabels.Secondary)
@@ -1131,6 +1139,9 @@ abilityCastRemote.OnClientEvent:Connect(function(abilityId: string, cooldownDura
 
 	local slotName = resolveCastSlot(abilityId)
 	if not slotName then
+		return
+	end
+	if slotName == "Primary" then
 		return
 	end
 
