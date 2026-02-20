@@ -1,5 +1,5 @@
 --!strict
--- WeaponVFXController - renders replicated primary weapon muzzle/tracer/impact VFX.
+-- WeaponVFXController - renders replicated Oathkeeper weapon muzzle/tracer/impact VFX.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -11,15 +11,19 @@ local localPlayer = Players.LocalPlayer
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local weaponRemotesFolder = remotesFolder:WaitForChild("Weapons")
 local primaryShotRemote = weaponRemotesFolder:WaitForChild("PrimaryShot")
+local secondaryShotRemote = weaponRemotesFolder:WaitForChild("SecondaryShot")
 
 local WEAPON_ID = "Oathkeeper"
 local DEFAULT_TRACER_LIFETIME = 2.0
 local DEFAULT_TRACER_FADE_DURATION = 0.5
-local WEAPON_MUZZLE_PART_PATH = "OathkeeperModel.Barrel.BarrelEnd"
+local WEAPON_MUZZLE_PART_PATH = "OathkeeperModel.Barrel"
 local MUZZLE_FLASH_PATH = WEAPON_MUZZLE_PART_PATH .. ".MuzzleFlash"
+local M1_HIT_EFFECT_PATH = "HitEnd.HitEffect"
+local M2_HIT_EFFECT_PATH = "HitEndM2"
 
 local warned: {[string]: boolean} = {}
-local predictedShotIds: {[number]: number} = {}
+local predictedPrimaryShotIds: {[number]: number} = {}
+local predictedSecondaryShotIds: {[number]: number} = {}
 local PREDICTED_SHOT_ID_TTL = 4.0
 
 local function warnOnce(key: string, message: string)
@@ -42,16 +46,16 @@ local function findByPath(root: Instance, path: string): Instance?
 	return current
 end
 
-local function getOrCreatePrimaryShotLocalEvent(): BindableEvent
-	local existing = weaponRemotesFolder:FindFirstChild("PrimaryShotLocal")
+local function getOrCreateLocalEvent(name: string): BindableEvent
+	local existing = weaponRemotesFolder:FindFirstChild(name)
 	if existing and existing:IsA("BindableEvent") then
 		return existing
 	end
 	local created = Instance.new("BindableEvent")
-	created.Name = "PrimaryShotLocal"
+	created.Name = name
 	created.Parent = weaponRemotesFolder
 
-	local resolved = weaponRemotesFolder:FindFirstChild("PrimaryShotLocal")
+	local resolved = weaponRemotesFolder:FindFirstChild(name)
 	if resolved and resolved:IsA("BindableEvent") then
 		if resolved ~= created then
 			created:Destroy()
@@ -61,7 +65,8 @@ local function getOrCreatePrimaryShotLocalEvent(): BindableEvent
 	return created
 end
 
-local primaryShotLocalEvent = getOrCreatePrimaryShotLocalEvent()
+local primaryShotLocalEvent = getOrCreateLocalEvent("PrimaryShotLocal")
+local secondaryShotLocalEvent = getOrCreateLocalEvent("SecondaryShotLocal")
 
 local function getWeaponFolder(): Instance?
 	return findByPath(ReplicatedStorage, "ContentDrawer.WeaponModels.HandCannons.Oathkeeper")
@@ -228,7 +233,7 @@ local function spawnTracer(origin: Vector3, impactPosition: Vector3, tracerTempl
 	end)
 end
 
-local function spawnImpactEffect(impactPosition: Vector3, impactNormal: Vector3, endpointTemplate: Instance?)
+local function spawnImpactEffect(impactPosition: Vector3, impactNormal: Vector3, endpointTemplate: Instance?, hitEffectPath: string)
 	if not endpointTemplate then
 		return
 	end
@@ -244,7 +249,7 @@ local function spawnImpactEffect(impactPosition: Vector3, impactNormal: Vector3,
 	end
 	endpointClone.Parent = Workspace
 
-	local hitEffect = findByPath(endpointClone, "HitEnd.HitEffect")
+	local hitEffect = findByPath(endpointClone, hitEffectPath)
 	emitParticles(hitEffect or endpointClone, 1)
 
 	task.delay(2, function()
@@ -283,29 +288,29 @@ local function resolveLiveMuzzleOrigin(shooterUserId: number, fallbackOrigin: Ve
 	return fallbackOrigin
 end
 
-local function isPredictedShotId(clientShotId: number): boolean
-	local expiresAt = predictedShotIds[clientShotId]
+local function consumePredictedShotId(predictedMap: {[number]: number}, clientShotId: number): boolean
+	local expiresAt = predictedMap[clientShotId]
 	if not expiresAt then
 		return false
 	end
-	predictedShotIds[clientShotId] = nil
+	predictedMap[clientShotId] = nil
 	return expiresAt >= tick()
 end
 
-local function rememberPredictedShotId(clientShotId: number)
-	predictedShotIds[clientShotId] = tick() + PREDICTED_SHOT_ID_TTL
+local function rememberPredictedShotId(predictedMap: {[number]: number}, clientShotId: number)
+	predictedMap[clientShotId] = tick() + PREDICTED_SHOT_ID_TTL
 end
 
-local function cleanupExpiredPredictedShotIds()
+local function cleanupExpiredPredictedShotIds(predictedMap: {[number]: number})
 	local now = tick()
-	for shotId, expiresAt in pairs(predictedShotIds) do
+	for shotId, expiresAt in pairs(predictedMap) do
 		if expiresAt <= now then
-			predictedShotIds[shotId] = nil
+			predictedMap[shotId] = nil
 		end
 	end
 end
 
-local function renderShotVfx(payload: any)
+local function renderPrimaryShotVfx(payload: any, suppressCore: boolean)
 	if typeof(payload) ~= "table" then
 		return
 	end
@@ -319,16 +324,7 @@ local function renderShotVfx(payload: any)
 		return
 	end
 
-	cleanupExpiredPredictedShotIds()
-
 	local shooterUserId = payload.shooterUserId
-	local clientShotId = payload.clientShotId
-	if shooterUserId == localPlayer.UserId and typeof(clientShotId) == "number" then
-		if isPredictedShotId(math.floor(clientShotId + 0.5)) then
-			return
-		end
-	end
-
 	local fallbackOrigin = if typeof(payload.origin) == "Vector3" then payload.origin else nil
 	local liveOrigin = resolveLiveMuzzleOrigin(shooterUserId, fallbackOrigin)
 	if not liveOrigin then
@@ -351,9 +347,67 @@ local function renderShotVfx(payload: any)
 	local lifetime = typeof(payload.tracerLifetime) == "number" and payload.tracerLifetime or DEFAULT_TRACER_LIFETIME
 	local fadeDuration = typeof(payload.tracerFadeDuration) == "number" and payload.tracerFadeDuration or DEFAULT_TRACER_FADE_DURATION
 
+	if suppressCore then
+		return
+	end
+
 	emitMuzzleFlashForShot(shooterUserId)
 	spawnTracer(liveOrigin, payload.impactPosition, tracerTemplate, lifetime, fadeDuration)
-	spawnImpactEffect(payload.impactPosition, impactNormal, endpointTemplate)
+	spawnImpactEffect(payload.impactPosition, impactNormal, endpointTemplate, M1_HIT_EFFECT_PATH)
+end
+
+local function renderSecondaryShotVfx(payload: any, suppressCore: boolean)
+	if typeof(payload) ~= "table" then
+		return
+	end
+	if payload.weaponId ~= WEAPON_ID then
+		return
+	end
+	if typeof(payload.shooterUserId) ~= "number" then
+		return
+	end
+	if typeof(payload.impactPosition) ~= "Vector3" then
+		return
+	end
+
+	local shooterUserId = payload.shooterUserId
+	local fallbackOrigin = if typeof(payload.origin) == "Vector3" then payload.origin else nil
+	local liveOrigin = resolveLiveMuzzleOrigin(shooterUserId, fallbackOrigin)
+	if not liveOrigin then
+		return
+	end
+
+	local impactNormal = payload.impactNormal
+	if typeof(impactNormal) ~= "Vector3" then
+		impactNormal = Vector3.new(0, 1, 0)
+	end
+
+	local weaponFolder = getWeaponFolder()
+	if not weaponFolder then
+		warnOnce("MissingWeaponFolder", "[WeaponVFXController] Replicated Oathkeeper folder missing.")
+		return
+	end
+
+	local tracerTemplate = findByPath(weaponFolder, "VFX.M2Tracer")
+	local endpointTemplate = findByPath(weaponFolder, "VFX.Endpoint")
+	local lifetime = typeof(payload.tracerLifetime) == "number" and payload.tracerLifetime or DEFAULT_TRACER_LIFETIME
+	local fadeDuration = typeof(payload.tracerFadeDuration) == "number" and payload.tracerFadeDuration or DEFAULT_TRACER_FADE_DURATION
+
+	if not suppressCore then
+		emitMuzzleFlashForShot(shooterUserId)
+		spawnTracer(liveOrigin, payload.impactPosition, tracerTemplate, lifetime, fadeDuration)
+		spawnImpactEffect(payload.impactPosition, impactNormal, endpointTemplate, M2_HIT_EFFECT_PATH)
+	end
+
+	local enemyHits = payload.enemyHits
+	if typeof(enemyHits) == "table" then
+		for _, hit in ipairs(enemyHits) do
+			if typeof(hit) == "table" and typeof(hit.position) == "Vector3" then
+				local hitNormal = if typeof(hit.normal) == "Vector3" then hit.normal else Vector3.new(0, 1, 0)
+				spawnImpactEffect(hit.position, hitNormal, endpointTemplate, M2_HIT_EFFECT_PATH)
+			end
+		end
+	end
 end
 
 primaryShotLocalEvent.Event:Connect(function(payload: any)
@@ -364,11 +418,42 @@ primaryShotLocalEvent.Event:Connect(function(payload: any)
 		return
 	end
 	if typeof(payload.clientShotId) == "number" then
-		rememberPredictedShotId(math.floor(payload.clientShotId + 0.5))
+		rememberPredictedShotId(predictedPrimaryShotIds, math.floor(payload.clientShotId + 0.5))
 	end
-	renderShotVfx(payload)
+	renderPrimaryShotVfx(payload, false)
 end)
 
 primaryShotRemote.OnClientEvent:Connect(function(payload: any)
-	renderShotVfx(payload)
+	if typeof(payload) == "table" and payload.weaponId == WEAPON_ID and payload.shooterUserId == localPlayer.UserId
+		and typeof(payload.clientShotId) == "number" then
+		cleanupExpiredPredictedShotIds(predictedPrimaryShotIds)
+		local suppressCore = consumePredictedShotId(predictedPrimaryShotIds, math.floor(payload.clientShotId + 0.5))
+		renderPrimaryShotVfx(payload, suppressCore)
+		return
+	end
+	renderPrimaryShotVfx(payload, false)
+end)
+
+secondaryShotLocalEvent.Event:Connect(function(payload: any)
+	if typeof(payload) ~= "table" then
+		return
+	end
+	if payload.weaponId ~= WEAPON_ID or payload.shotKind ~= "M2" or payload.shooterUserId ~= localPlayer.UserId then
+		return
+	end
+	if typeof(payload.clientShotId) == "number" then
+		rememberPredictedShotId(predictedSecondaryShotIds, math.floor(payload.clientShotId + 0.5))
+	end
+	renderSecondaryShotVfx(payload, false)
+end)
+
+secondaryShotRemote.OnClientEvent:Connect(function(payload: any)
+	if typeof(payload) == "table" and payload.weaponId == WEAPON_ID and payload.shotKind == "M2"
+		and payload.shooterUserId == localPlayer.UserId and typeof(payload.clientShotId) == "number" then
+		cleanupExpiredPredictedShotIds(predictedSecondaryShotIds)
+		local suppressCore = consumePredictedShotId(predictedSecondaryShotIds, math.floor(payload.clientShotId + 0.5))
+		renderSecondaryShotVfx(payload, suppressCore)
+		return
+	end
+	renderSecondaryShotVfx(payload, false)
 end)

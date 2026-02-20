@@ -18,6 +18,7 @@ local SHIFT_LOCK_ACTION = "CustomShiftLockToggle"
 local SHIFT_LOCK_ACTION_PRIORITY = Enum.ContextActionPriority.High.Value + 100
 local ATTR_SETTINGS_OPEN = "UI_SettingsOpen"
 local ATTR_WEAPON_ACTIVE_LOCAL = "WeaponPrimaryActiveLocal"
+local ATTR_LOCAL_UTILITY_FACING_LOCK = "UtilityFacingLockActiveLocal"
 local FACING_LOCK_RENDERSTEP = "ShiftLockActiveFacingLock"
 local TOGGLE_BUTTON_NAME_HINTS: {[string]: boolean} = {
 	ShiftLockButton = true,
@@ -376,6 +377,9 @@ local function shouldForceActiveFacing(): boolean
 
 	local character = humanoid.Parent
 	if not character or not character:IsA("Model") then
+		return false
+	end
+	if character:GetAttribute(ATTR_LOCAL_UTILITY_FACING_LOCK) == true then
 		return false
 	end
 

@@ -1,5 +1,5 @@
 --!strict
--- WeaponIdleController - weapon idle/walk/M1 animation state machine for no-tool primaries.
+-- WeaponIdleController - Oathkeeper idle/walk/M1/M2/reload animation state machine.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,14 +12,25 @@ local ATTR_WEAPON_ID = "StarterWeaponId"
 local ATTR_IDLE_ANIM = "StarterWeaponIdleAnimationId"
 local ATTR_WALK_ANIM = "StarterWeaponWalkAnimationId"
 local ATTR_M1_ANIM = "StarterWeaponM1AnimationId"
+local ATTR_M2_ANIM = "StarterWeaponM2AnimationId"
+local ATTR_RELOAD_ANIM = "StarterWeaponReloadAnimationId"
 local ATTR_ACTIVE_WALK_WINDOW = "StarterWeaponActiveWalkWindow"
 local ATTR_LOCAL_M1_ACTIVE = "WeaponM1ActiveLocal"
+local ATTR_LOCAL_M2_CAST_ACTIVE = "WeaponM2CastActiveLocal"
+local ATTR_LOCAL_M2_CAST_SERIAL = "WeaponM2CastSerialLocal"
+local ATTR_LOCAL_SHARED_LOCKOUT_END = "WeaponSharedLockoutEndLocal"
+local ATTR_LOCAL_M2_AIM_DIRECTION = "WeaponM2AimDirectionLocal"
+local ATTR_LOCAL_ATTACK_LOCK = "WeaponAttackLockLocal"
 local ATTR_LOCAL_WEAPON_ACTIVE = "WeaponPrimaryActiveLocal"
+local ATTR_LOCAL_UTILITY_FACING_LOCK = "UtilityFacingLockActiveLocal"
+local ATTR_LOCAL_MOUSE_AIM_DIRECTION = "WeaponMouseAimDirectionLocal"
+local ATTR_LOCAL_MOUSE_AIM_EXPIRES_AT = "WeaponMouseAimExpiresAtLocal"
 
 local WEAPON_ID = "Oathkeeper"
 local WEAPON_MODEL_NAME = "OathkeeperModel"
 local SPRINT_OVERRIDE_ANIMATION_NAME = "SprintOverride"
 local DEFAULT_ACTIVE_WALK_WINDOW = 5.0
+local DEFAULT_MOUSE_AIM_DURATION = 1.0
 local AIM_TURN_SHARPNESS = 36.0
 local AIM_TURN_HARD_LOCK_DOT = 0.9995
 
@@ -35,18 +46,44 @@ local updateConnection: RBXScriptConnection? = nil
 local idleAnimation: Animation? = nil
 local walkAnimation: Animation? = nil
 local m1Animation: Animation? = nil
+local m2Animation: Animation? = nil
+local reloadAnimation: Animation? = nil
 local idleTrack: AnimationTrack? = nil
 local walkTrack: AnimationTrack? = nil
 local m1Track: AnimationTrack? = nil
+local m2Track: AnimationTrack? = nil
+local reloadTrack: AnimationTrack? = nil
 
 local lastShotTime: number? = nil
 local characterBoundAt = 0
 local m1PlaybackToken = 0
+local lastM2CastSerialPlayed: number? = nil
 local shotFacingLockDirection: Vector3? = nil
 local shotFacingLockToken = 0
 local shotFacingCurrentDirection: Vector3? = nil
 local shotFacingAutoRotateOverridden = false
 local shotFacingAutoRotatePrevious: boolean? = nil
+local m2FacingLockActive = false
+
+local function clearMouseAimDirectionOverride(characterModel: Model?)
+	if not characterModel then
+		return
+	end
+	characterModel:SetAttribute(ATTR_LOCAL_MOUSE_AIM_DIRECTION, nil)
+	characterModel:SetAttribute(ATTR_LOCAL_MOUSE_AIM_EXPIRES_AT, nil)
+end
+
+local function setMouseAimDirectionOverride(characterModel: Model?, direction: Vector3?)
+	if not characterModel then
+		return
+	end
+	if typeof(direction) ~= "Vector3" or direction.Magnitude <= 1e-4 then
+		clearMouseAimDirectionOverride(characterModel)
+		return
+	end
+	characterModel:SetAttribute(ATTR_LOCAL_MOUSE_AIM_DIRECTION, direction.Unit)
+	characterModel:SetAttribute(ATTR_LOCAL_MOUSE_AIM_EXPIRES_AT, tick() + DEFAULT_MOUSE_AIM_DURATION)
+end
 
 local function normalizeAnimationId(rawId: any): string?
 	if typeof(rawId) == "number" then
@@ -139,22 +176,38 @@ local function setShotFacingHardLockEnabled(enabled: boolean)
 	shotFacingAutoRotatePrevious = nil
 end
 
+local function setLocalAttackLock(enabled: boolean)
+	local characterModel = character
+	if not characterModel then
+		return
+	end
+	characterModel:SetAttribute(ATTR_LOCAL_ATTACK_LOCK, enabled)
+end
+
 local function clearTracks()
 	stopTrack(idleTrack)
 	stopTrack(walkTrack)
 	stopTrack(m1Track)
+	stopTrack(m2Track)
+	stopTrack(reloadTrack)
 	idleTrack = nil
 	walkTrack = nil
 	m1Track = nil
+	m2Track = nil
+	reloadTrack = nil
 	local characterModel = character
 	if characterModel then
 		characterModel:SetAttribute(ATTR_LOCAL_M1_ACTIVE, false)
 		characterModel:SetAttribute(ATTR_LOCAL_WEAPON_ACTIVE, false)
+		characterModel:SetAttribute(ATTR_LOCAL_ATTACK_LOCK, false)
+		clearMouseAimDirectionOverride(characterModel)
 	end
 	setShotFacingHardLockEnabled(false)
 	shotFacingLockDirection = nil
 	shotFacingLockToken = 0
 	shotFacingCurrentDirection = nil
+	m2FacingLockActive = false
+	lastM2CastSerialPlayed = nil
 end
 
 local function disconnectUpdate()
@@ -165,7 +218,7 @@ local function disconnectUpdate()
 end
 
 local function ensureTrack(
-	trackType: "Idle" | "Walk" | "M1",
+	trackType: "Idle" | "Walk" | "M1" | "M2" | "Reload",
 	animationId: string?,
 	priority: Enum.AnimationPriority,
 	looped: boolean
@@ -174,8 +227,24 @@ local function ensureTrack(
 		return nil
 	end
 
-	local animRef = if trackType == "Idle" then idleAnimation elseif trackType == "Walk" then walkAnimation else m1Animation
-	local trackRef = if trackType == "Idle" then idleTrack elseif trackType == "Walk" then walkTrack else m1Track
+	local animRef = if trackType == "Idle"
+		then idleAnimation
+		elseif trackType == "Walk"
+		then walkAnimation
+		elseif trackType == "M1"
+		then m1Animation
+		elseif trackType == "M2"
+		then m2Animation
+		else reloadAnimation
+	local trackRef = if trackType == "Idle"
+		then idleTrack
+		elseif trackType == "Walk"
+		then walkTrack
+		elseif trackType == "M1"
+		then m1Track
+		elseif trackType == "M2"
+		then m2Track
+		else reloadTrack
 
 	if not animRef then
 		animRef = Instance.new("Animation")
@@ -184,8 +253,12 @@ local function ensureTrack(
 			idleAnimation = animRef
 		elseif trackType == "Walk" then
 			walkAnimation = animRef
-		else
+		elseif trackType == "M1" then
 			m1Animation = animRef
+		elseif trackType == "M2" then
+			m2Animation = animRef
+		else
+			reloadAnimation = animRef
 		end
 	end
 
@@ -203,8 +276,12 @@ local function ensureTrack(
 			idleTrack = trackRef
 		elseif trackType == "Walk" then
 			walkTrack = trackRef
-		else
+		elseif trackType == "M1" then
 			m1Track = trackRef
+		elseif trackType == "M2" then
+			m2Track = trackRef
+		else
+			reloadTrack = trackRef
 		end
 	end
 
@@ -248,6 +325,14 @@ local function isMouseLocked(): boolean
 end
 
 local function applyUnshiftShotFacingLock(dt: number?)
+	local characterModel = character
+	if characterModel and characterModel:GetAttribute(ATTR_LOCAL_UTILITY_FACING_LOCK) == true then
+		-- Utility facing lock has higher priority than primary shot facing lock.
+		setShotFacingHardLockEnabled(false)
+		shotFacingCurrentDirection = nil
+		return
+	end
+
 	local lockDirection = shotFacingLockDirection
 	if not lockDirection then
 		setShotFacingHardLockEnabled(false)
@@ -260,7 +345,6 @@ local function applyUnshiftShotFacingLock(dt: number?)
 		return
 	end
 
-	local characterModel = character
 	local humanoidRef = humanoid
 	if not characterModel or not humanoidRef or humanoidRef.Health <= 0 then
 		setShotFacingHardLockEnabled(false)
@@ -317,25 +401,110 @@ local function updateWeaponAnimationState(dt: number?)
 	local idleId = resolveAnimationId(characterModel, ATTR_IDLE_ANIM, "HandCannonIdle")
 	local walkId = resolveAnimationId(characterModel, ATTR_WALK_ANIM, "HandCannonWalk")
 	local m1Id = resolveAnimationId(characterModel, ATTR_M1_ANIM, "HandCannonM1")
+	local m2Id = resolveAnimationId(characterModel, ATTR_M2_ANIM, "HandCannonChargedM2")
+	local reloadId = resolveAnimationId(characterModel, ATTR_RELOAD_ANIM, "HandCannonChargedReloadingLoop")
 
 	local idle = ensureTrack("Idle", idleId, Enum.AnimationPriority.Action, true)
 	local walk = ensureTrack("Walk", walkId, Enum.AnimationPriority.Action, true)
-	ensureTrack("M1", m1Id, Enum.AnimationPriority.Action2, false)
+	local m1 = ensureTrack("M1", m1Id, Enum.AnimationPriority.Action2, false)
+	local m2 = ensureTrack("M2", m2Id, Enum.AnimationPriority.Action4, false)
+	local reload = ensureTrack("Reload", reloadId, Enum.AnimationPriority.Action3, true)
 
+	local m2Casting = characterModel:GetAttribute(ATTR_LOCAL_M2_CAST_ACTIVE) == true
+	local m2CastSerialValue = characterModel:GetAttribute(ATTR_LOCAL_M2_CAST_SERIAL)
+	local m2CastSerial = if typeof(m2CastSerialValue) == "number" then m2CastSerialValue else nil
+	local lockoutEndValue = characterModel:GetAttribute(ATTR_LOCAL_SHARED_LOCKOUT_END)
+	local lockoutEnd = if typeof(lockoutEndValue) == "number" then lockoutEndValue else nil
+	local lockoutActive = lockoutEnd ~= nil and lockoutEnd > tick()
 	local sprinting = isSprintTrackPlaying()
 	if sprinting and lastShotTime ~= nil then
 		-- Entering sprint cancels the weapon-active animation window.
 		lastShotTime = nil
 	end
-	local moving = humanoidRef.MoveDirection.Magnitude > 0.05
-	local shotTime = lastShotTime
+	if m2Casting and m2CastSerial and m2CastSerial ~= lastM2CastSerialPlayed then
+		-- M2 use should enter the same active-state window as M1.
+		lastShotTime = tick()
+	end
 	local activeWalkWindow = resolveActiveWalkWindow(characterModel)
+	local shotTime = lastShotTime
 	local withinWalkWindow = shotTime ~= nil and (tick() - shotTime) <= activeWalkWindow
 	characterModel:SetAttribute(ATTR_LOCAL_WEAPON_ACTIVE, withinWalkWindow)
+
+	if m2Casting then
+		stopTrack(idle)
+		stopTrack(walk)
+		stopTrack(reload)
+		stopTrack(m1)
+		if m2 and m2CastSerial and m2CastSerial ~= lastM2CastSerialPlayed then
+			if m2.IsPlaying then
+				m2:Stop(0.03)
+			end
+			m2:Play(0.03, 1, 1)
+			lastM2CastSerialPlayed = m2CastSerial
+
+			local rawAimDirection = characterModel:GetAttribute(ATTR_LOCAL_M2_AIM_DIRECTION)
+			if typeof(rawAimDirection) == "Vector3" then
+				local flatDirection = Vector3.new(rawAimDirection.X, 0, rawAimDirection.Z)
+				if flatDirection.Magnitude > 1e-4 then
+					shotFacingLockDirection = flatDirection.Unit
+					shotFacingCurrentDirection = nil
+					m2FacingLockActive = true
+				else
+					setShotFacingHardLockEnabled(false)
+					shotFacingLockDirection = nil
+					shotFacingLockToken = 0
+					shotFacingCurrentDirection = nil
+					m2FacingLockActive = false
+				end
+			else
+				setShotFacingHardLockEnabled(false)
+				shotFacingLockDirection = nil
+				shotFacingLockToken = 0
+				shotFacingCurrentDirection = nil
+				m2FacingLockActive = false
+			end
+		end
+		setLocalAttackLock(true)
+		applyUnshiftShotFacingLock(dt)
+		return
+	end
+
+	if m2 and m2.IsPlaying then
+		stopTrack(idle)
+		stopTrack(walk)
+		stopTrack(reload)
+		stopTrack(m1)
+		setLocalAttackLock(true)
+		applyUnshiftShotFacingLock(dt)
+		return
+	end
+	if m2FacingLockActive then
+		setShotFacingHardLockEnabled(false)
+		shotFacingLockDirection = nil
+		shotFacingLockToken = 0
+		shotFacingCurrentDirection = nil
+		m2FacingLockActive = false
+	end
+
+	if lockoutActive then
+		stopTrack(idle)
+		stopTrack(walk)
+		stopTrack(m1)
+		playLooped(reload)
+		setLocalAttackLock(false)
+		applyUnshiftShotFacingLock(dt)
+		return
+	end
+
+	stopTrack(reload)
+
+	local moving = humanoidRef.MoveDirection.Magnitude > 0.05
 
 	if isAirborneState(humanoidRef) then
 		stopTrack(idle)
 		stopTrack(walk)
+		local m1Active = characterModel:GetAttribute(ATTR_LOCAL_M1_ACTIVE) == true
+		setLocalAttackLock(m1Active)
 		applyUnshiftShotFacingLock(dt)
 		return
 	end
@@ -343,6 +512,8 @@ local function updateWeaponAnimationState(dt: number?)
 	if sprinting then
 		stopTrack(idle)
 		stopTrack(walk)
+		local m1Active = characterModel:GetAttribute(ATTR_LOCAL_M1_ACTIVE) == true
+		setLocalAttackLock(m1Active)
 		applyUnshiftShotFacingLock(dt)
 		return
 	end
@@ -363,6 +534,8 @@ local function updateWeaponAnimationState(dt: number?)
 		end
 	end
 
+	local m1Active = characterModel:GetAttribute(ATTR_LOCAL_M1_ACTIVE) == true
+	setLocalAttackLock(m1Active)
 	applyUnshiftShotFacingLock(dt)
 end
 
@@ -385,16 +558,22 @@ local function onShot(payload: any)
 
 	local characterModel = character
 	local pendingLockDirection: Vector3? = nil
+	local pendingMouseAimDirection: Vector3? = nil
 	if characterModel and not isMouseLocked() then
 		local origin = payload.origin
 		local impact = payload.impactPosition
 		if typeof(origin) == "Vector3" and typeof(impact) == "Vector3" then
 			local shotDirection = impact - origin
+			if shotDirection.Magnitude > 1e-4 then
+				pendingMouseAimDirection = shotDirection.Unit
+			end
 			local flatDirection = Vector3.new(shotDirection.X, 0, shotDirection.Z)
 			if flatDirection.Magnitude > 1e-4 then
 				pendingLockDirection = flatDirection.Unit
 			end
 		end
+	elseif characterModel then
+		clearMouseAimDirectionOverride(characterModel)
 	end
 
 	local track = m1Track
@@ -415,6 +594,8 @@ local function onShot(payload: any)
 		local token = m1PlaybackToken
 		if characterModel then
 			characterModel:SetAttribute(ATTR_LOCAL_M1_ACTIVE, true)
+			setLocalAttackLock(true)
+			setMouseAimDirectionOverride(characterModel, pendingMouseAimDirection)
 		end
 		if pendingLockDirection then
 			shotFacingLockDirection = pendingLockDirection
@@ -435,6 +616,8 @@ local function onShot(payload: any)
 			local currentCharacter = character
 			if token == m1PlaybackToken and currentCharacter then
 				currentCharacter:SetAttribute(ATTR_LOCAL_M1_ACTIVE, false)
+				local m2Casting = currentCharacter:GetAttribute(ATTR_LOCAL_M2_CAST_ACTIVE) == true
+				setLocalAttackLock(m2Casting)
 			end
 			if token == shotFacingLockToken then
 				setShotFacingHardLockEnabled(false)
@@ -447,6 +630,8 @@ local function onShot(payload: any)
 	else
 		if characterModel then
 			characterModel:SetAttribute(ATTR_LOCAL_M1_ACTIVE, false)
+			local m2Casting = characterModel:GetAttribute(ATTR_LOCAL_M2_CAST_ACTIVE) == true
+			setLocalAttackLock(m2Casting)
 		end
 		setShotFacingHardLockEnabled(false)
 		shotFacingLockDirection = nil
@@ -461,6 +646,8 @@ local function bindCharacter(nextCharacter: Model?)
 	local previousCharacter = character
 	if previousCharacter then
 		previousCharacter:SetAttribute(ATTR_LOCAL_WEAPON_ACTIVE, false)
+		previousCharacter:SetAttribute(ATTR_LOCAL_ATTACK_LOCK, false)
+		clearMouseAimDirectionOverride(previousCharacter)
 	end
 	character = nextCharacter
 	humanoid = nil
@@ -478,7 +665,9 @@ local function bindCharacter(nextCharacter: Model?)
 	end
 
 	nextCharacter:SetAttribute(ATTR_LOCAL_M1_ACTIVE, false)
+	nextCharacter:SetAttribute(ATTR_LOCAL_ATTACK_LOCK, false)
 	nextCharacter:SetAttribute(ATTR_LOCAL_WEAPON_ACTIVE, false)
+	clearMouseAimDirectionOverride(nextCharacter)
 
 	local foundHumanoid = nextCharacter:FindFirstChildOfClass("Humanoid")
 	if not foundHumanoid then

@@ -17,9 +17,13 @@ local getPlayerEntity: ((Player) -> number?)? = nil
 
 local primaryFireRequestRemote: RemoteEvent? = nil
 local primaryShotRemote: RemoteEvent? = nil
+local secondaryFireRequestRemote: RemoteEvent? = nil
+local secondaryShotRemote: RemoteEvent? = nil
 local sprintForceOffRemote: RemoteEvent? = nil
 
 local nextFireAtByPlayer: {[Player]: number} = {}
+local sharedLockoutUntilByPlayer: {[Player]: number} = {}
+local secondaryCastStateByPlayer: {[Player]: {[string]: any}} = {}
 local warned: {[string]: boolean} = {}
 local ENEMY_CANDIDATE_BASE_BUFFER = 30.0
 local ENEMY_CANDIDATE_HORIZONTAL_BUFFER = 18.0
@@ -99,6 +103,63 @@ local function getEffectiveDamage(playerEntity: number): number
 		end
 	end
 	return math.max(0, damage)
+end
+
+local function getEffectiveSharedLockout(playerEntity: number): number
+	local lockout = Oathkeeper.m2SharedLockout
+	if Oathkeeper.usesCooldownMultiplier and PassiveEffectSystem and PassiveEffectSystem.getCooldownMultiplier then
+		local mult = PassiveEffectSystem.getCooldownMultiplier(playerEntity)
+		if typeof(mult) == "number" and mult > 0 then
+			lockout *= mult
+		end
+	end
+	return math.max(0.05, lockout)
+end
+
+local function parseFireRequestPayload(requestPayload: any): (Vector3?, number?)
+	local targetPoint: Vector3? = nil
+	local clientShotId: number? = nil
+
+	if typeof(requestPayload) == "Vector3" then
+		targetPoint = requestPayload
+	elseif typeof(requestPayload) == "table" then
+		if typeof(requestPayload.targetPoint) == "Vector3" then
+			targetPoint = requestPayload.targetPoint
+		end
+		if typeof(requestPayload.clientShotId) == "number" then
+			local normalized = math.floor(requestPayload.clientShotId + 0.5)
+			if normalized >= 0 then
+				clientShotId = normalized
+			end
+		end
+	end
+
+	return targetPoint, clientShotId
+end
+
+local function isSharedLockedOut(player: Player, now: number): boolean
+	local lockoutUntil = sharedLockoutUntilByPlayer[player]
+	if not lockoutUntil then
+		return false
+	end
+	if now >= lockoutUntil then
+		sharedLockoutUntilByPlayer[player] = nil
+		return false
+	end
+	return true
+end
+
+local function isSecondaryCastActive(player: Player, now: number): boolean
+	local castState = secondaryCastStateByPlayer[player]
+	if not castState then
+		return false
+	end
+	local castEndsAt = castState.castEndsAt
+	if typeof(castEndsAt) ~= "number" then
+		secondaryCastStateByPlayer[player] = nil
+		return false
+	end
+	return now < castEndsAt
 end
 
 local function resolveMuzzleOrigin(character: Model): Vector3?
@@ -324,6 +385,89 @@ local function buildShotResult(player: Player, targetPoint: Vector3): {[string]:
 	}
 end
 
+local function buildPiercingShotResult(player: Player, targetPoint: Vector3): {[string]: any}?
+	local character = player.Character
+	if not character then
+		return nil
+	end
+	if character:GetAttribute("StarterWeaponId") ~= Oathkeeper.id then
+		return nil
+	end
+
+	local origin = resolveMuzzleOrigin(character)
+	if not origin then
+		warnOnce("MissingMuzzle_" .. tostring(player.UserId), "[WeaponService] Oathkeeper muzzle missing; cannot fire.")
+		return nil
+	end
+
+	local direction = targetPoint - origin
+	if direction.Magnitude <= 1e-4 then
+		local hrp = character:FindFirstChild("HumanoidRootPart")
+		if hrp and hrp:IsA("BasePart") then
+			direction = hrp.CFrame.LookVector
+		else
+			direction = Vector3.new(0, 0, -1)
+		end
+	end
+	direction = direction.Unit
+
+	local maxRange = math.max(1, Oathkeeper.range)
+	local segmentEnd = origin + (direction * maxRange)
+	local impactNormal = -direction
+
+	RAYCAST_PARAMS.FilterDescendantsInstances = { character }
+	local blocker = Workspace:Raycast(origin, direction * maxRange, RAYCAST_PARAMS)
+	if blocker then
+		segmentEnd = blocker.Position
+		impactNormal = blocker.Normal
+	end
+
+	local includeHorizontalFallback = math.abs(segmentEnd.Y - origin.Y) >= DIAGONAL_VERTICAL_DELTA_THRESHOLD
+	local candidates = gatherEnemyCandidates(origin, segmentEnd, includeHorizontalFallback)
+	local hits: {{enemyEntity: number, hitPoint: Vector3, hitNormal: Vector3, hitT: number}} = {}
+
+	for _, enemyEntity in ipairs(candidates) do
+		local hitbox = EnemyColliderService.getWorldHitbox(enemyEntity)
+		if hitbox and typeof(hitbox.boxCFrame) == "CFrame" and typeof(hitbox.halfExtents) == "Vector3" then
+			local intersects, hitPoint, hitT = segmentIntersectsOrientedBox(
+				origin,
+				segmentEnd,
+				hitbox.boxCFrame,
+				hitbox.halfExtents,
+				0.75
+			)
+			if intersects and hitPoint and hitT then
+				local hitNormal = -direction
+				local center = hitbox.center
+				if typeof(center) == "Vector3" then
+					local normal = hitPoint - center
+					if normal.Magnitude > 1e-4 then
+						hitNormal = normal.Unit
+					end
+				end
+				table.insert(hits, {
+					enemyEntity = enemyEntity,
+					hitPoint = hitPoint,
+					hitNormal = hitNormal,
+					hitT = hitT,
+				})
+			end
+		end
+	end
+
+	table.sort(hits, function(a, b)
+		return a.hitT < b.hitT
+	end)
+
+	return {
+		origin = origin,
+		impactPosition = segmentEnd,
+		impactNormal = impactNormal,
+		enemyHits = hits,
+		didHitEnemy = #hits > 0,
+	}
+end
+
 local function canFire(player: Player, playerEntity: number): boolean
 	if not world or not Components then
 		return false
@@ -344,21 +488,7 @@ local function canFire(player: Player, playerEntity: number): boolean
 end
 
 local function handlePrimaryFireRequest(player: Player, requestPayload: any)
-	local targetPoint: Vector3? = nil
-	local clientShotId: number? = nil
-	if typeof(requestPayload) == "Vector3" then
-		targetPoint = requestPayload
-	elseif typeof(requestPayload) == "table" then
-		if typeof(requestPayload.targetPoint) == "Vector3" then
-			targetPoint = requestPayload.targetPoint
-		end
-		if typeof(requestPayload.clientShotId) == "number" then
-			local normalized = math.floor(requestPayload.clientShotId + 0.5)
-			if normalized >= 0 then
-				clientShotId = normalized
-			end
-		end
-	end
+	local targetPoint, clientShotId = parseFireRequestPayload(requestPayload)
 	if not targetPoint then
 		return
 	end
@@ -373,13 +503,16 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 	if not canFire(player, playerEntity) then
 		return
 	end
+	local now = tick()
+	if isSharedLockedOut(player, now) or isSecondaryCastActive(player, now) then
+		return
+	end
 
 	local shot = buildShotResult(player, targetPoint)
 	if not shot then
 		return
 	end
 
-	local now = tick()
 	local nextFireAt = nextFireAtByPlayer[player] or 0
 	if now < nextFireAt then
 		return
@@ -424,6 +557,122 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 	})
 end
 
+local function handleSecondaryFireRequest(player: Player, requestPayload: any)
+	local targetPoint, clientShotId = parseFireRequestPayload(requestPayload)
+	if not targetPoint then
+		return
+	end
+	if not getPlayerEntity or not secondaryShotRemote then
+		return
+	end
+
+	local playerEntity = getPlayerEntity(player)
+	if not playerEntity then
+		return
+	end
+	if not canFire(player, playerEntity) then
+		return
+	end
+
+	local now = tick()
+	if isSharedLockedOut(player, now) or isSecondaryCastActive(player, now) then
+		return
+	end
+
+	local fireDelay = Oathkeeper.m2FireDelay
+	if typeof(fireDelay) ~= "number" or fireDelay < 0 then
+		fireDelay = 8 / 60
+	end
+	local castDuration = Oathkeeper.m2CastDuration
+	if typeof(castDuration) ~= "number" or castDuration <= 0 then
+		castDuration = 0.60
+	end
+	local effectiveSharedLockout = getEffectiveSharedLockout(playerEntity)
+
+	local castState = {
+		startedAt = now,
+		castEndsAt = now + castDuration,
+		fireAt = now + fireDelay,
+		targetPoint = targetPoint,
+		clientShotId = clientShotId,
+		effectiveSharedLockout = effectiveSharedLockout,
+	}
+	secondaryCastStateByPlayer[player] = castState
+
+	if PassiveEffectSystem and PassiveEffectSystem.setSprintIntent then
+		PassiveEffectSystem.setSprintIntent(playerEntity, false)
+	end
+	if sprintForceOffRemote then
+		sprintForceOffRemote:FireClient(player)
+	end
+
+	task.delay(fireDelay, function()
+		local latestState = secondaryCastStateByPlayer[player]
+		if latestState ~= castState then
+			return
+		end
+		if not player.Parent then
+			return
+		end
+		if not getPlayerEntity then
+			return
+		end
+		local livePlayerEntity = getPlayerEntity(player)
+		if not livePlayerEntity or not canFire(player, livePlayerEntity) then
+			return
+		end
+
+		local shot = buildPiercingShotResult(player, castState.targetPoint)
+		if not shot then
+			return
+		end
+
+		local damageAmount = getEffectiveDamage(livePlayerEntity) * math.max(0, Oathkeeper.m2DamageMultiplier or 1)
+		local enemyHitPayload: {any} = {}
+		for _, hit in ipairs(shot.enemyHits) do
+			local _, applied = DamageSystem.applyDamage(
+				hit.enemyEntity,
+				damageAmount,
+				"weapon",
+				livePlayerEntity,
+				"OathkeeperSecondary"
+			)
+			table.insert(enemyHitPayload, {
+				position = hit.hitPoint,
+				normal = hit.hitNormal,
+				didApplyDamage = applied == true,
+			})
+		end
+
+		secondaryShotRemote:FireAllClients({
+			shooterUserId = player.UserId,
+			weaponId = Oathkeeper.id,
+			shotKind = "M2",
+			clientShotId = castState.clientShotId,
+			origin = shot.origin,
+			impactPosition = shot.impactPosition,
+			impactNormal = shot.impactNormal,
+			enemyHits = enemyHitPayload,
+			didHitEnemy = shot.didHitEnemy,
+			tracerLifetime = Oathkeeper.tracerLifetime,
+			tracerFadeDuration = Oathkeeper.tracerFadeDuration,
+			castDuration = castDuration,
+			fireDelay = fireDelay,
+			effectiveSharedLockout = castState.effectiveSharedLockout,
+			firedAt = tick(),
+		})
+	end)
+
+	task.delay(castDuration, function()
+		local latestState = secondaryCastStateByPlayer[player]
+		if latestState ~= castState then
+			return
+		end
+		secondaryCastStateByPlayer[player] = nil
+		sharedLockoutUntilByPlayer[player] = tick() + castState.effectiveSharedLockout
+	end)
+end
+
 function WeaponService.init(options: {[string]: any})
 	if primaryFireRequestRemote then
 		return
@@ -437,15 +686,24 @@ function WeaponService.init(options: {[string]: any})
 
 	primaryFireRequestRemote = options.PrimaryFireRequest
 	primaryShotRemote = options.PrimaryShot
+	secondaryFireRequestRemote = options.SecondaryFireRequest
+	secondaryShotRemote = options.SecondaryShot
 	sprintForceOffRemote = options.SprintForceOff
 
-	if not primaryFireRequestRemote or not primaryShotRemote or not sprintForceOffRemote then
+	if not primaryFireRequestRemote
+		or not primaryShotRemote
+		or not secondaryFireRequestRemote
+		or not secondaryShotRemote
+		or not sprintForceOffRemote then
 		error("[WeaponService] Missing weapon remotes during initialization.")
 	end
 
 	primaryFireRequestRemote.OnServerEvent:Connect(handlePrimaryFireRequest)
+	secondaryFireRequestRemote.OnServerEvent:Connect(handleSecondaryFireRequest)
 	Players.PlayerRemoving:Connect(function(player)
 		nextFireAtByPlayer[player] = nil
+		sharedLockoutUntilByPlayer[player] = nil
+		secondaryCastStateByPlayer[player] = nil
 	end)
 end
 

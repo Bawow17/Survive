@@ -10,6 +10,7 @@ local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local UpgradeDefs = require(game.ServerScriptService.Balance.Upgrades.UpgradeDefs)
 local DashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Dash)
+local IceTracerConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.IceTracer)
 local ShieldBashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.ShieldBash)
 local DoubleJumpConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.DoubleJump)
 local BlinkConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Blink)
@@ -41,6 +42,7 @@ local RARITY_ORDER = {
 local playerQuery: any
 local REBUILD_INTERVAL = 1.0
 local rebuildAccumulator = 0
+local applyMobilityUpgrade: ((number, string) -> boolean)?
 
 local function clamp01(value: number): number
 	return math.clamp(value, 0, 1)
@@ -61,22 +63,30 @@ function UpgradeSystem.init(worldRef: any, components: any, dirtyService: any)
 	playerQuery = world:query(Components.PlayerStats):cached()
 end
 
--- Auto-equip basic Dash for new players (called on player spawn)
+-- Auto-equip starter mobility for new players (called on player spawn)
 local function equipStarterDash(playerEntity: number)
-	local mobilityData = {
-		equippedMobility = "Dash",
-		distance = DashConfig.distance,
-		cooldown = DashConfig.cooldown,
-		duration = DashConfig.duration,
-		verticalHeight = nil,
-		platformModelPath = nil,
+	if applyMobilityUpgrade and applyMobilityUpgrade(playerEntity, "IceTracer") then
+		return
+	end
+
+	-- Fallback if starter mobility fails to apply.
+	local fallbackData = {
+		equippedMobility = "IceTracer",
+		distance = IceTracerConfig.distance,
+		cooldown = IceTracerConfig.cooldown,
+		duration = IceTracerConfig.duration,
+		iceTracerPathPath = IceTracerConfig.iceTracerPathModelPath and ("ReplicatedStorage." .. IceTracerConfig.iceTracerPathModelPath) or nil,
+		iceTracerBeam1Path = IceTracerConfig.iceTracerBeam1ModelPath and ("ReplicatedStorage." .. IceTracerConfig.iceTracerBeam1ModelPath) or nil,
+		iceTracerBeam2Path = IceTracerConfig.iceTracerBeam2ModelPath and ("ReplicatedStorage." .. IceTracerConfig.iceTracerBeam2ModelPath) or nil,
+		iceTracerAnimationPath = IceTracerConfig.iceTracerAnimationModelPath and ("ReplicatedStorage." .. IceTracerConfig.iceTracerAnimationModelPath) or nil,
+		iceTracerPathSpacing = IceTracerConfig.pathSpacing,
+		iceTracerRampFrames = IceTracerConfig.rampFrames,
+		iceTracerTotalFrames = IceTracerConfig.totalFrames,
+		iceTracerLookAheadDistance = IceTracerConfig.lookAheadDistance,
+		iceTracerPartLifetime = IceTracerConfig.pathPartLifetime,
 	}
-
-	DirtyService.setIfChanged(world, playerEntity, Components.MobilityData, mobilityData, "MobilityData")
-
-	-- Initialize cooldown
-	local cooldownData = { lastUsedTime = 0 }
-	DirtyService.setIfChanged(world, playerEntity, Components.MobilityCooldown, cooldownData, "MobilityCooldown")
+	DirtyService.setIfChanged(world, playerEntity, Components.MobilityData, fallbackData, "MobilityData")
+	DirtyService.setIfChanged(world, playerEntity, Components.MobilityCooldown, { lastUsedTime = 0 }, "MobilityCooldown")
 end
 
 UpgradeSystem.equipStarterDash = equipStarterDash
@@ -1045,13 +1055,25 @@ end
 local function buildMobilityChoices(playerEntity: number): {any}
 	local choices = {}
 	local mobilityData = world:get(playerEntity, Components.MobilityData)
-	local hasMobilityUpgrade = mobilityData and mobilityData.equippedMobility ~= nil and mobilityData.equippedMobility ~= "Dash"
+	local hasMobilityUpgrade = mobilityData and mobilityData.equippedMobility ~= nil and mobilityData.equippedMobility ~= "IceTracer"
 	if hasMobilityUpgrade then
 		return choices
 	end
 
 	local levelComponent = world:get(playerEntity, Components.Level)
 	local playerLevel = levelComponent and levelComponent.current or 1
+	local mobilityUnlockLevel = ShieldBashConfig.minLevel or 15
+
+	if playerLevel >= mobilityUnlockLevel then
+		table.insert(choices, {
+			id = "mobility_Dash",
+			category = "mobility",
+			mobilityId = "Dash",
+			name = DashConfig.displayName,
+			desc = DashConfig.description,
+			color = DashConfig.color,
+		})
+	end
 
 	if playerLevel >= ShieldBashConfig.minLevel then
 		table.insert(choices, {
@@ -1511,6 +1533,7 @@ function UpgradeSystem.getDebugCatalog(playerEntity: number): {any}
 	end
 
 	local mobilityDefs = {
+		{ id = "IceTracer", name = IceTracerConfig.displayName },
 		{ id = "Dash", name = DashConfig.displayName },
 		{ id = "ShieldBash", name = ShieldBashConfig.displayName },
 		{ id = "DoubleJump", name = DoubleJumpConfig.displayName },
@@ -1987,10 +2010,12 @@ local function applyAttributeUpgrade(playerEntity: number, upgradeId: string): b
 	return true
 end
 
-local function applyMobilityUpgrade(playerEntity: number, mobilityId: string): boolean
+applyMobilityUpgrade = function(playerEntity: number, mobilityId: string): boolean
 	local mobilityConfig = nil
 	if mobilityId == "Dash" then
 		mobilityConfig = DashConfig
+	elseif mobilityId == "IceTracer" then
+		mobilityConfig = IceTracerConfig
 	elseif mobilityId == "ShieldBash" then
 		mobilityConfig = ShieldBashConfig
 	elseif mobilityId == "DoubleJump" then
@@ -2055,6 +2080,24 @@ local function applyMobilityUpgrade(playerEntity: number, mobilityId: string): b
 		end
 	end
 
+	if mobilityId == "IceTracer" then
+		local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+		local paths = {
+			mobilityConfig.iceTracerPathModelPath,
+			mobilityConfig.iceTracerBeam1ModelPath,
+			mobilityConfig.iceTracerBeam2ModelPath,
+			mobilityConfig.iceTracerAnimationModelPath,
+		}
+		for _, serverPath in ipairs(paths) do
+			if type(serverPath) == "string" and serverPath ~= "" then
+				local success = ModelReplicationService.replicateMobilityModel(serverPath)
+				if not success then
+					warn("[UpgradeSystem] Could not find IceTracer asset in ServerStorage (expected at: ServerStorage." .. serverPath .. ").")
+				end
+			end
+		end
+	end
+
 	local mobilityData = {
 		equippedMobility = mobilityId,
 		distance = mobilityConfig.distance or (mobilityConfig.horizontalDistance and mobilityConfig.horizontalDistance or 25),
@@ -2088,6 +2131,15 @@ local function applyMobilityUpgrade(playerEntity: number, mobilityId: string): b
 		grappleManaPointPath = mobilityConfig.grappleManaPointModelPath and ("ReplicatedStorage." .. mobilityConfig.grappleManaPointModelPath) or nil,
 		grappleEndPath = mobilityConfig.grappleEndModelPath and ("ReplicatedStorage." .. mobilityConfig.grappleEndModelPath) or nil,
 		grappleBeamPath = mobilityConfig.grappleBeamModelPath and ("ReplicatedStorage." .. mobilityConfig.grappleBeamModelPath) or nil,
+		iceTracerPathPath = mobilityConfig.iceTracerPathModelPath and ("ReplicatedStorage." .. mobilityConfig.iceTracerPathModelPath) or nil,
+		iceTracerBeam1Path = mobilityConfig.iceTracerBeam1ModelPath and ("ReplicatedStorage." .. mobilityConfig.iceTracerBeam1ModelPath) or nil,
+		iceTracerBeam2Path = mobilityConfig.iceTracerBeam2ModelPath and ("ReplicatedStorage." .. mobilityConfig.iceTracerBeam2ModelPath) or nil,
+		iceTracerAnimationPath = mobilityConfig.iceTracerAnimationModelPath and ("ReplicatedStorage." .. mobilityConfig.iceTracerAnimationModelPath) or nil,
+		iceTracerPathSpacing = mobilityConfig.pathSpacing,
+		iceTracerRampFrames = mobilityConfig.rampFrames,
+		iceTracerTotalFrames = mobilityConfig.totalFrames,
+		iceTracerLookAheadDistance = mobilityConfig.lookAheadDistance,
+		iceTracerPartLifetime = mobilityConfig.pathPartLifetime,
 	}
 
 	DirtyService.setIfChanged(world, playerEntity, Components.MobilityData, mobilityData, "MobilityData")

@@ -17,12 +17,15 @@ local entitySync = ecsRemotes:WaitForChild("EntitySync")
 local entityUpdate = ecsRemotes:WaitForChild("EntityUpdate")
 local requestInitialSync = ecsRemotes:WaitForChild("RequestInitialSync")
 local abilityCastRemote = remotesFolder:WaitForChild("AbilityCast")
+local weaponRemotesFolder = remotesFolder:WaitForChild("Weapons")
 
 local gamePaused = remotesFolder:WaitForChild("GamePaused")
 local gameUnpaused = remotesFolder:WaitForChild("GameUnpaused")
 
 local PRIMARY_ABILITY_ID = "MagicBolt"
+local WEAPON_ID = "Oathkeeper"
 local PRIMARY_WEAPON_ICON_KEY = "weapon:Oathkeeper"
+local SECONDARY_WEAPON_ICON_KEY = "MagicBolt"
 local COOLDOWN_EPSILON = 1e-4
 local DEBUG_COOLDOWN_HUD = false
 
@@ -70,6 +73,27 @@ local function warnOnce(key: string, message: string)
 	warn(message)
 end
 
+local function getOrCreateLocalEvent(name: string): BindableEvent
+	local existing = weaponRemotesFolder:FindFirstChild(name)
+	if existing and existing:IsA("BindableEvent") then
+		return existing
+	end
+	local created = Instance.new("BindableEvent")
+	created.Name = name
+	created.Parent = weaponRemotesFolder
+
+	local resolved = weaponRemotesFolder:FindFirstChild(name)
+	if resolved and resolved:IsA("BindableEvent") then
+		if resolved ~= created then
+			created:Destroy()
+		end
+		return resolved
+	end
+	return created
+end
+
+local weaponSharedLockoutLocalEvent = getOrCreateLocalEvent("WeaponSharedLockoutLocal")
+
 local function debugLog(message: string)
 	if not DEBUG_COOLDOWN_HUD then
 		return
@@ -113,6 +137,7 @@ local slotRefs: {[string]: SlotRef} = {
 
 local CASTABLE_SLOTS: {SlotName} = { "Primary", "Utility", "Secondary", "Special", "Equipment" }
 local ABILITY_SLOTS: {SlotName} = { "Secondary", "Special", "Equipment" }
+local NON_SECONDARY_ABILITY_SLOTS: {SlotName} = { "Special", "Equipment" }
 local ABILITY_PRIORITY = { "FireBall", "IceShard", "Refractions" }
 
 local chargeLabels: {[string]: TextLabel?} = {
@@ -161,6 +186,46 @@ local function sanitizeCooldownFrame(frame: Frame)
 	end
 end
 
+local function forceTransparent(instance: Instance)
+	if instance:IsA("UIStroke") then
+		instance.Transparency = 1
+		return
+	end
+	if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+		instance.ImageTransparency = 1
+		instance.BackgroundTransparency = 1
+		return
+	end
+	if instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox") then
+		instance.TextTransparency = 1
+		instance.BackgroundTransparency = 1
+		return
+	end
+	if instance:IsA("Frame") then
+		instance.BackgroundTransparency = 1
+	end
+end
+
+local function hidePrimaryCooldownLine(cooldownFrame: Frame?)
+	if not cooldownFrame then
+		return
+	end
+	local cooldownLine = cooldownFrame:FindFirstChild("CooldownLine", true)
+	if not cooldownLine then
+		return
+	end
+	forceTransparent(cooldownLine)
+	if cooldownLine:IsA("GuiObject") then
+		cooldownLine.Visible = false
+	end
+	for _, descendant in ipairs(cooldownLine:GetDescendants()) do
+		forceTransparent(descendant)
+		if descendant:IsA("GuiObject") then
+			descendant.Visible = false
+		end
+	end
+end
+
 local slotCooldownStates: {[string]: SlotCooldownState} = {}
 for _, slotName in ipairs(CASTABLE_SLOTS) do
 	slotCooldownStates[slotName] = {
@@ -184,6 +249,7 @@ local assignedAbilityBySlot: {[string]: string?} = {
 	Special = nil,
 	Equipment = nil,
 }
+local lastWeaponModeActive = false
 
 local uiResolved = false
 local lastUIResolveTime = 0
@@ -294,6 +360,14 @@ local function parseEntityId(rawId: any): number?
 	return nil
 end
 
+local function isWeaponModeActive(): boolean
+	local character = localPlayer.Character
+	if not character then
+		return false
+	end
+	return character:GetAttribute("StarterWeaponId") == WEAPON_ID
+end
+
 local function resolveUIReferences()
 	if not mainHUD.Parent then
 		mainHUD = waitForMainHUD()
@@ -367,6 +441,9 @@ local function resolveUIReferences()
 		if ref.cooldown then
 			sanitizeCooldownFrame(ref.cooldown)
 			getCooldownBaseY(ref.cooldown)
+			if slotName == "Primary" then
+				hidePrimaryCooldownLine(ref.cooldown)
+			end
 		end
 		if ref.root == nil then
 			warnOnce("MissingSlotRoot_" .. slotName, string.format("[AbilitySlotHUDController] Slot root missing: %s", slotName))
@@ -729,11 +806,11 @@ local function renderCooldownTimerLabel(slotName: SlotName, remaining: number, s
 	end
 end
 
-local function renderAllCooldownTimerLabels()
+local function renderAllCooldownTimerLabels(weaponModeActive: boolean)
 	local slotEnabledByName: {[string]: boolean} = {
 		Primary = false,
 		Utility = true,
-		Secondary = assignedAbilityBySlot.Secondary ~= nil,
+		Secondary = weaponModeActive or (assignedAbilityBySlot.Secondary ~= nil),
 		Special = assignedAbilityBySlot.Special ~= nil,
 		Equipment = assignedAbilityBySlot.Equipment ~= nil,
 	}
@@ -769,7 +846,7 @@ local function renderAllSlotStrokes()
 	end
 end
 
-local function rebuildAbilitySlotAssignments()
+local function rebuildAbilitySlotAssignments(weaponModeActive: boolean)
 	abilitySlotByAbilityId = {}
 	assignedAbilityBySlot.Primary = nil
 
@@ -806,7 +883,14 @@ local function rebuildAbilitySlotAssignments()
 		return a < b
 	end)
 
-	for idx, slotName in ipairs(ABILITY_SLOTS) do
+	local assignmentSlots: {SlotName}
+	if weaponModeActive then
+		assignmentSlots = NON_SECONDARY_ABILITY_SLOTS
+	else
+		assignmentSlots = ABILITY_SLOTS
+	end
+
+	for idx, slotName in ipairs(assignmentSlots) do
 		local abilityId = available[idx]
 		if abilityId then
 			assignedAbilityBySlot[slotName] = abilityId
@@ -822,11 +906,11 @@ local function resolveCastSlot(abilityId: string): SlotName?
 	if string.sub(abilityId, 1, 9) == "Mobility_" then
 		return "Utility"
 	end
-	rebuildAbilitySlotAssignments()
+	rebuildAbilitySlotAssignments(isWeaponModeActive())
 	return abilitySlotByAbilityId[abilityId]
 end
 
-local function renderAbilitySlotIcons()
+local function renderAbilitySlotIcons(weaponModeActive: boolean)
 	setSlotIcon("Primary", PRIMARY_WEAPON_ICON_KEY)
 
 	local mobilityData = playerComponentState.MobilityData
@@ -838,7 +922,19 @@ local function renderAbilitySlotIcons()
 		setSlotIcon("Utility", "mobility:" .. equippedMobility)
 	end
 
-	for _, slotName in ipairs(ABILITY_SLOTS) do
+	if weaponModeActive then
+		setSlotIcon("Secondary", SECONDARY_WEAPON_ICON_KEY)
+	else
+		local secondaryAbilityId = assignedAbilityBySlot.Secondary
+		if secondaryAbilityId then
+			setSlotIcon("Secondary", secondaryAbilityId)
+		else
+			forceHideSlotImage("Secondary")
+			clearSlotCooldown("Secondary")
+		end
+	end
+
+	for _, slotName in ipairs(NON_SECONDARY_ABILITY_SLOTS) do
 		local abilityId = assignedAbilityBySlot[slotName]
 		if abilityId then
 			setSlotIcon(slotName, abilityId)
@@ -849,7 +945,7 @@ local function renderAbilitySlotIcons()
 	end
 end
 
-local function hydrateIdleCooldownsFromComponents()
+local function hydrateIdleCooldownsFromComponents(weaponModeActive: boolean)
 	local abilityCooldown = playerComponentState.AbilityCooldown
 	local cooldowns = if typeof(abilityCooldown) == "table" and typeof(abilityCooldown.cooldowns) == "table"
 		then abilityCooldown.cooldowns
@@ -857,6 +953,9 @@ local function hydrateIdleCooldownsFromComponents()
 
 	if cooldowns then
 		for _, slotName in ipairs(ABILITY_SLOTS) do
+			if weaponModeActive and slotName == "Secondary" then
+				continue
+			end
 			local abilityId = assignedAbilityBySlot[slotName]
 			if abilityId then
 				local record = cooldowns[abilityId]
@@ -902,9 +1001,16 @@ local function refreshUI()
 		resolveUIReferences()
 	end
 
-	rebuildAbilitySlotAssignments()
-	renderAbilitySlotIcons()
-	hydrateIdleCooldownsFromComponents()
+	local weaponModeActive = isWeaponModeActive()
+	if lastWeaponModeActive ~= weaponModeActive then
+		clearSlotCooldown("Primary")
+		clearSlotCooldown("Secondary")
+	end
+	lastWeaponModeActive = weaponModeActive
+
+	rebuildAbilitySlotAssignments(weaponModeActive)
+	renderAbilitySlotIcons(weaponModeActive)
+	hydrateIdleCooldownsFromComponents(weaponModeActive)
 	renderChargeLabels()
 
 	local ratiosBySlot: {[string]: number} = {
@@ -914,16 +1020,25 @@ local function refreshUI()
 		Special = getSlotCooldownRatio("Special"),
 		Equipment = getSlotCooldownRatio("Equipment"),
 	}
+	if weaponModeActive then
+		local primaryState = getSlotCooldownState("Primary")
+		ratiosBySlot.Primary = if primaryState and primaryState.state == "active" and primaryState.remaining > COOLDOWN_EPSILON
+			then 1
+			else 0
+	end
 
 	-- Hide inactive placeholders when no assigned ability.
 	for _, slotName in ipairs(ABILITY_SLOTS) do
+		if slotName == "Secondary" and weaponModeActive then
+			continue
+		end
 		if assignedAbilityBySlot[slotName] == nil then
 			ratiosBySlot[slotName] = 0
 		end
 	end
 
 	renderAllCooldownFrames(ratiosBySlot)
-	renderAllCooldownTimerLabels()
+	renderAllCooldownTimerLabels(weaponModeActive)
 	renderAllSlotStrokes()
 end
 
@@ -960,6 +1075,7 @@ local function clearPlayerState()
 	lastAppliedTimerTextBySlot = {}
 	lastAppliedTimerVisibleBySlot = {}
 	lastAppliedStrokeEnabledBySlot = {}
+	lastWeaponModeActive = false
 	setLabelHidden(chargeLabels.Primary)
 	setLabelHidden(chargeLabels.Utility)
 	setLabelHidden(chargeLabels.Secondary)
@@ -1144,8 +1260,36 @@ abilityCastRemote.OnClientEvent:Connect(function(abilityId: string, cooldownDura
 	if slotName == "Primary" then
 		return
 	end
+	if slotName == "Secondary" and isWeaponModeActive() then
+		return
+	end
 
 	startSlotCooldown(slotName, cooldownDuration, cooldownDuration)
+end)
+
+weaponSharedLockoutLocalEvent.Event:Connect(function(payload: any)
+	if typeof(payload) ~= "table" then
+		return
+	end
+	if payload.weaponId ~= WEAPON_ID then
+		return
+	end
+	if not isWeaponModeActive() then
+		return
+	end
+
+	local duration = if typeof(payload.duration) == "number" then payload.duration else nil
+	if (not duration or duration <= 0) and typeof(payload.endTime) == "number" then
+		duration = math.max(0, payload.endTime - tick())
+	end
+	if not duration or duration <= 0 then
+		clearSlotCooldown("Primary")
+		clearSlotCooldown("Secondary")
+		return
+	end
+
+	startSlotCooldown("Primary", duration, duration)
+	startSlotCooldown("Secondary", duration, duration)
 end)
 
 pcall(function()

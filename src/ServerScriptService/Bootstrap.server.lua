@@ -168,10 +168,14 @@ local STARTER_WEAPON_ID_ATTRIBUTE = "StarterWeaponId"
 local STARTER_WEAPON_IDLE_ATTRIBUTE = "StarterWeaponIdleAnimationId"
 local STARTER_WEAPON_WALK_ATTRIBUTE = "StarterWeaponWalkAnimationId"
 local STARTER_WEAPON_M1_ATTRIBUTE = "StarterWeaponM1AnimationId"
+local STARTER_WEAPON_M2_ATTRIBUTE = "StarterWeaponM2AnimationId"
+local STARTER_WEAPON_RELOAD_ATTRIBUTE = "StarterWeaponReloadAnimationId"
 local STARTER_WEAPON_ACTIVE_WALK_WINDOW_ATTRIBUTE = "StarterWeaponActiveWalkWindow"
 local STARTER_WEAPON_RANGE_ATTRIBUTE = "StarterWeaponRange"
 local STARTER_WEAPON_TRACER_LIFETIME_ATTRIBUTE = "StarterWeaponTracerLifetime"
 local STARTER_WEAPON_TRACER_FADE_DURATION_ATTRIBUTE = "StarterWeaponTracerFadeDuration"
+local STARTER_WEAPON_M2_CAST_DURATION_ATTRIBUTE = "StarterWeaponM2CastDuration"
+local STARTER_WEAPON_M2_FIRE_DELAY_ATTRIBUTE = "StarterWeaponM2FireDelay"
 local STARTER_WEAPON_PATH = Oathkeeper.assetPaths.weaponFolder
 local STARTER_WEAPON_MODEL_NAME = Oathkeeper.assetPaths.model
 local STARTER_WEAPON_GRIP_C0_NAME = Oathkeeper.assetPaths.gripC0
@@ -257,10 +261,14 @@ local function clearStarterWeaponAttributes(character: Model)
 	character:SetAttribute(STARTER_WEAPON_IDLE_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_WALK_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_M1_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_M2_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_RELOAD_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_ACTIVE_WALK_WINDOW_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_RANGE_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_TRACER_LIFETIME_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_TRACER_FADE_DURATION_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_M2_CAST_DURATION_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_M2_FIRE_DELAY_ATTRIBUTE, nil)
 end
 
 local function attachStarterWeapon(character: Model)
@@ -348,11 +356,15 @@ local function attachStarterWeapon(character: Model)
 	local idleAnimationId = resolveAnimationIdByPath(weaponFolder, Oathkeeper.assetPaths.animations.idle)
 	local walkAnimationId = resolveAnimationIdByPath(weaponFolder, Oathkeeper.assetPaths.animations.walk)
 	local m1AnimationId = resolveAnimationIdByPath(weaponFolder, Oathkeeper.assetPaths.animations.m1)
+	local m2AnimationId = resolveAnimationIdByPath(weaponFolder, Oathkeeper.assetPaths.animations.m2)
+	local reloadAnimationId = resolveAnimationIdByPath(weaponFolder, Oathkeeper.assetPaths.animations.reloadLoop)
 
 	character:SetAttribute(STARTER_WEAPON_ID_ATTRIBUTE, Oathkeeper.id)
 	character:SetAttribute(STARTER_WEAPON_IDLE_ATTRIBUTE, idleAnimationId)
 	character:SetAttribute(STARTER_WEAPON_WALK_ATTRIBUTE, walkAnimationId)
 	character:SetAttribute(STARTER_WEAPON_M1_ATTRIBUTE, m1AnimationId)
+	character:SetAttribute(STARTER_WEAPON_M2_ATTRIBUTE, m2AnimationId)
+	character:SetAttribute(STARTER_WEAPON_RELOAD_ATTRIBUTE, reloadAnimationId)
 	local configuredActiveWalkWindow = Oathkeeper.activeWalkWindow
 	if typeof(configuredActiveWalkWindow) ~= "number" or configuredActiveWalkWindow < 0 then
 		configuredActiveWalkWindow = 5.0
@@ -369,10 +381,20 @@ local function attachStarterWeapon(character: Model)
 	if typeof(configuredTracerFadeDuration) ~= "number" or configuredTracerFadeDuration < 0 then
 		configuredTracerFadeDuration = 0.5
 	end
+	local configuredM2CastDuration = Oathkeeper.m2CastDuration
+	if typeof(configuredM2CastDuration) ~= "number" or configuredM2CastDuration <= 0 then
+		configuredM2CastDuration = 0.60
+	end
+	local configuredM2FireDelay = Oathkeeper.m2FireDelay
+	if typeof(configuredM2FireDelay) ~= "number" or configuredM2FireDelay < 0 then
+		configuredM2FireDelay = 8 / 60
+	end
 	character:SetAttribute(STARTER_WEAPON_ACTIVE_WALK_WINDOW_ATTRIBUTE, configuredActiveWalkWindow)
 	character:SetAttribute(STARTER_WEAPON_RANGE_ATTRIBUTE, configuredRange)
 	character:SetAttribute(STARTER_WEAPON_TRACER_LIFETIME_ATTRIBUTE, configuredTracerLifetime)
 	character:SetAttribute(STARTER_WEAPON_TRACER_FADE_DURATION_ATTRIBUTE, configuredTracerFadeDuration)
+	character:SetAttribute(STARTER_WEAPON_M2_CAST_DURATION_ATTRIBUTE, configuredM2CastDuration)
+	character:SetAttribute(STARTER_WEAPON_M2_FIRE_DELAY_ATTRIBUTE, configuredM2FireDelay)
 end
 
 local function setComponent(entity: number, component: any, value: any, componentName: string)
@@ -405,6 +427,8 @@ function ECSWorldService.Initialize()
 	local weaponsRemotesFolder = ensureFolder(remotesFolder, "Weapons")
 	local primaryFireRequestRemote = ensureRemoteEvent(weaponsRemotesFolder, "PrimaryFireRequest")
 	local primaryShotRemote = ensureRemoteEvent(weaponsRemotesFolder, "PrimaryShot")
+	local secondaryFireRequestRemote = ensureRemoteEvent(weaponsRemotesFolder, "SecondaryFireRequest")
+	local secondaryShotRemote = ensureRemoteEvent(weaponsRemotesFolder, "SecondaryShot")
 	local sprintForceOffRemote = ensureRemoteEvent(weaponsRemotesFolder, "SprintForceOff")
 
 	local debugFlags = ReplicatedStorage:FindFirstChild("DebugFlags")
@@ -605,6 +629,8 @@ function ECSWorldService.Initialize()
 		end,
 		PrimaryFireRequest = primaryFireRequestRemote,
 		PrimaryShot = primaryShotRemote,
+		SecondaryFireRequest = secondaryFireRequestRemote,
+		SecondaryShot = secondaryShotRemote,
 		SprintForceOff = sprintForceOffRemote,
 	})
 	LoopGameService.init(world, Components, ExpSystem)
@@ -1109,8 +1135,8 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 			setComponent(existingEntity, Components.Ability, {}, "Ability")
 		end
 		
-		-- CRITICAL FIX: Preserve mobility upgrades on reconnect (issue: Shield Bash sometimes resets to Dash)
-		-- Only restore starter dash if player has NEVER had a mobility upgrade (should not happen after level 15)
+		-- CRITICAL FIX: Preserve mobility upgrades on reconnect (issue: mobility can reset incorrectly)
+		-- Only restore starter mobility if player has NEVER had a mobility upgrade (should not happen after level 15)
 		local mobilityData = world:get(existingEntity, Components.MobilityData)
 		local upgrades = world:get(existingEntity, Components.Upgrades)
 		
@@ -1118,11 +1144,11 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		local hasSelectedMobility = false
 		if upgrades and upgrades.abilities then
 			-- Player has made upgrades, so they passed level 15 and could have a mobility choice
-			-- In this case, NEVER reset to Dash even if MobilityData is missing
+			-- In this case, NEVER reset to starter mobility even if MobilityData is missing
 			hasSelectedMobility = true
 		end
 		
-		-- Only equip starter dash if:
+		-- Only equip starter mobility if:
 		-- 1. Player has no MobilityData AND
 		-- 2. Player hasn't reached level 15+ (no upgrades yet)
 		if not mobilityData and not hasSelectedMobility then
@@ -1262,7 +1288,7 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 	}, "AbilityCooldown")
 	end
 	
-	-- Equip starter dash for all new players
+	-- Equip starter mobility for all new players
 	UpgradeSystem.equipStarterDash(entity)
 
 	playerEntities[player] = entity

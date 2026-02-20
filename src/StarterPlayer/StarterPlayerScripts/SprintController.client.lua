@@ -19,7 +19,7 @@ local SHIFTLOCK_ROOT_NAME = "ShiftLock"
 local DEFAULT_CROSSHAIR_FRAME_NAME = "ShiftLockFrame"
 local SPRINT_FRAME_NAME = "SprintFrame"
 local SPRINT_RUN_ANIMATION_ID = "rbxassetid://113934996865672"
-local LOCAL_WEAPON_M1_ACTIVE_ATTRIBUTE = "WeaponM1ActiveLocal"
+local LOCAL_WEAPON_ATTACK_LOCK_ATTRIBUTE = "WeaponAttackLockLocal"
 local RUN_ANIMATION_BASE_WALKSPEED = 24
 local SPRINT_MULTIPLIER = 1.45
 local MOVEMENT_SPEED_BONUS_TO_HIT_CAP = 0.75
@@ -186,7 +186,7 @@ local function bindCharacter(newCharacter: Model?)
 	end
 
 	updateRunAnimation()
-	weaponEndlagConnection = newCharacter:GetAttributeChangedSignal(LOCAL_WEAPON_M1_ACTIVE_ATTRIBUTE):Connect(function()
+	weaponEndlagConnection = newCharacter:GetAttributeChangedSignal(LOCAL_WEAPON_ATTACK_LOCK_ATTRIBUTE):Connect(function()
 		pushSprintIntent()
 	end)
 	runAnimationConnection = RunService.RenderStepped:Connect(function()
@@ -207,7 +207,7 @@ local function isWeaponEndlagActive(): boolean
 	if not characterModel then
 		return false
 	end
-	local value = characterModel:GetAttribute(LOCAL_WEAPON_M1_ACTIVE_ATTRIBUTE)
+	local value = characterModel:GetAttribute(LOCAL_WEAPON_ATTACK_LOCK_ATTRIBUTE)
 	return typeof(value) == "boolean" and value
 end
 

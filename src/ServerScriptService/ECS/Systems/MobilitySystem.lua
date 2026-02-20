@@ -17,6 +17,7 @@ local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitbox
 
 -- Mobility configs
 local DashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Dash)
+local IceTracerConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.IceTracer)
 local ShieldBashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.ShieldBash)
 local DoubleJumpConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.DoubleJump)
 local BlinkConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Blink)
@@ -38,6 +39,7 @@ local PassiveEffects: any
 local MobilityActivateRemote: RemoteEvent
 local AbilityCastRemote: RemoteEvent
 local DashAfterimageRemote: RemoteEvent
+local IceTracerPathReplicateRemote: RemoteEvent
 
 -- Active Shield Bash dashes (server-side collision tracking)
 local activeShieldBashes: {{
@@ -60,10 +62,21 @@ local activeShieldBashes: {{
 
 -- Active afterimage tasks (for cleanup)
 local activeAfterimageTasks: {thread} = {}
+local activeIceTracerReplication: {[number]: {
+	playerEntity: number,
+	expiresAt: number,
+	castId: number?,
+	totalSegments: number,
+}} = {}
+
+local ICE_TRACER_ALLOWED_BUFFER = 0.5
+local ICE_TRACER_MAX_SEGMENTS_PER_PACKET = 48
+local ICE_TRACER_MAX_SEGMENTS_PER_CAST = 720
 
 -- Mobility config lookup
 local MOBILITY_CONFIGS = {
 	Dash = DashConfig,
+	IceTracer = IceTracerConfig,
 	ShieldBash = ShieldBashConfig,
 	DoubleJump = DoubleJumpConfig,
 	Blink = BlinkConfig,
@@ -73,6 +86,7 @@ local MOBILITY_CONFIGS = {
 -- Mobility display names for UI
 local MOBILITY_DISPLAY_NAMES = {
 	Dash = "Dash",
+	IceTracer = "Ice Tracer",
 	ShieldBash = "Shield Bash",
 	DoubleJump = "Double Jump",
 	Blink = "Blink",
@@ -91,6 +105,136 @@ local function getPlayerEntity(player: Player): number?
 		end
 	end
 	return nil
+end
+
+local function pruneExpiredIceTracerWindows(now: number)
+	for userId, state in pairs(activeIceTracerReplication) do
+		if now > state.expiresAt then
+			activeIceTracerReplication[userId] = nil
+		end
+	end
+end
+
+local function beginIceTracerReplicationWindow(player: Player, playerEntity: number, now: number, duration: number)
+	local safeDuration = math.max(0.05, duration)
+	activeIceTracerReplication[player.UserId] = {
+		playerEntity = playerEntity,
+		expiresAt = now + safeDuration + ICE_TRACER_ALLOWED_BUFFER,
+		castId = nil,
+		totalSegments = 0,
+	}
+end
+
+local function validateIceTracerSegment(rawSegment: any): (boolean, any?)
+	if typeof(rawSegment) ~= "table" then
+		return false, nil
+	end
+	if typeof(rawSegment.position) ~= "Vector3" then
+		return false, nil
+	end
+	if typeof(rawSegment.forward) ~= "Vector3" then
+		return false, nil
+	end
+	if rawSegment.forward.Magnitude < 1e-4 then
+		return false, nil
+	end
+	if typeof(rawSegment.yawDeg) ~= "number" then
+		return false, nil
+	end
+
+	return true, {
+		position = rawSegment.position,
+		forward = rawSegment.forward.Unit,
+		yawDeg = rawSegment.yawDeg,
+	}
+end
+
+local function handleIceTracerPathReplication(player: Player, payload: any)
+	if not IceTracerPathReplicateRemote then
+		return
+	end
+	if typeof(payload) ~= "table" then
+		return
+	end
+
+	local now = GameTimeSystem.getGameTime()
+	pruneExpiredIceTracerWindows(now)
+
+	local state = activeIceTracerReplication[player.UserId]
+	if not state then
+		return
+	end
+	if now > state.expiresAt then
+		activeIceTracerReplication[player.UserId] = nil
+		return
+	end
+
+	local castId = payload.castId
+	if typeof(castId) ~= "number" then
+		return
+	end
+	castId = math.floor(castId + 0.5)
+	if castId < 0 then
+		return
+	end
+
+	local isFinal = payload.isFinal == true
+	local rawSegments = payload.segments
+	if typeof(rawSegments) ~= "table" then
+		if isFinal then
+			rawSegments = {}
+		else
+			return
+		end
+	end
+
+	if state.castId == nil then
+		state.castId = castId
+	elseif state.castId ~= castId then
+		return
+	end
+
+	local segmentCount = #rawSegments
+	if segmentCount > ICE_TRACER_MAX_SEGMENTS_PER_PACKET then
+		return
+	end
+
+	state.totalSegments += segmentCount
+	if state.totalSegments > ICE_TRACER_MAX_SEGMENTS_PER_CAST then
+		activeIceTracerReplication[player.UserId] = nil
+		return
+	end
+
+	local playerEntity = getPlayerEntity(player)
+	if not playerEntity or playerEntity ~= state.playerEntity then
+		return
+	end
+	local mobilityData = world and MobilityData and world:get(playerEntity, MobilityData)
+	if not mobilityData or mobilityData.equippedMobility ~= "IceTracer" then
+		return
+	end
+
+	local sanitizedSegments = table.create(segmentCount)
+	for _, rawSegment in ipairs(rawSegments) do
+		local ok, sanitized = validateIceTracerSegment(rawSegment)
+		if ok and sanitized then
+			table.insert(sanitizedSegments, sanitized)
+		end
+	end
+
+	if #sanitizedSegments == 0 and not isFinal then
+		return
+	end
+
+	for _, otherPlayer in ipairs(Players:GetPlayers()) do
+		if otherPlayer ~= player then
+			IceTracerPathReplicateRemote:FireClient(otherPlayer, player, castId, sanitizedSegments, isFinal)
+		end
+	end
+
+	if isFinal then
+		activeIceTracerReplication[player.UserId] = nil
+	end
 end
 
 -- Validate and handle mobility activation
@@ -187,6 +331,11 @@ local function handleMobilityActivation(player: Player, mobilityId: string, vari
 	local displayName = MOBILITY_DISPLAY_NAMES[mobilityId] or mobilityId
 	if AbilityCastRemote then
 		AbilityCastRemote:FireClient(player, "Mobility_" .. mobilityId, effectiveCooldown, displayName)
+	end
+
+	if mobilityId == "IceTracer" then
+		local castDuration = mobilityData.duration or config.duration or (35 / 60)
+		beginIceTracerReplicationWindow(player, playerEntity, currentTime, castDuration)
 	end
 	
 	-- Apply server-side effects
@@ -510,10 +659,24 @@ function MobilitySystem.init(worldRef: any, components: any, dirtyService: any)
 	if not DashAfterimageRemote then
 		warn("[MobilitySystem] DashAfterimage remote not found - afterimage effects may not work")
 	end
+
+	IceTracerPathReplicateRemote = remotes:FindFirstChild("IceTracerPathReplicate")
+	if not IceTracerPathReplicateRemote then
+		IceTracerPathReplicateRemote = Instance.new("RemoteEvent")
+		IceTracerPathReplicateRemote.Name = "IceTracerPathReplicate"
+		IceTracerPathReplicateRemote.Parent = remotes
+	end
 	
 	-- Handle client activation requests
 	MobilityActivateRemote.OnServerEvent:Connect(function(player: Player, mobilityId: string, variant: string?)
 		handleMobilityActivation(player, mobilityId, variant)
+	end)
+	IceTracerPathReplicateRemote.OnServerEvent:Connect(function(player: Player, payload: any)
+		handleIceTracerPathReplication(player, payload)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player: Player)
+		activeIceTracerReplication[player.UserId] = nil
 	end)
 end
 
@@ -526,6 +689,7 @@ function MobilitySystem.step(dt: number)
 	if #activeShieldBashes > 0 then
 		processShieldBashCollisions(dt)
 	end
+	pruneExpiredIceTracerWindows(GameTimeSystem.getGameTime())
 end
 
 return MobilitySystem

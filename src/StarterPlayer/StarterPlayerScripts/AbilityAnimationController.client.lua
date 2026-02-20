@@ -6,6 +6,9 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local localPlayer = Players.LocalPlayer
+local ATTR_LOCAL_RANGED_AIM_ACTIVE = "AbilityRangedAimActiveLocal"
+local ATTR_LOCAL_ABILITY_CAST_ACTIVE = "AbilityCastActiveLocal"
+local RANGED_VERTICAL_AIM_PROFILE = "ranged_left_head"
 
 -- Animation state
 local currentAnimation: AnimationTrack? = nil
@@ -14,6 +17,8 @@ local currentAbilityId: string? = nil
 local currentCastId: number = 0  -- Unique ID for each cast instance
 local isAnimating = false
 local isPlayingSegment = false  -- True while an animation segment is actively playing
+local rangedAimActiveCastId: number? = nil
+local abilityCastActiveCastId: number? = nil
 
 -- Rapid-fire tracking per ability
 local lastAnimationEndTime: {[string]: number} = {}  -- Track when animation sequence ended per ability
@@ -30,6 +35,56 @@ local isPaused = false
 local MAX_ANIMATION_SPEED = 3.8  -- Cap at 3.8x speed for natural look
 local MAX_ANIMATION_LOOPS = 7  -- Max number of animations to play per cast
 local LAST_SEGMENT_SLOW_FACTOR = 0.4  -- Slow the final segment, speed others up to keep total time
+
+local function setRangedAimActive(active: boolean)
+	local character = localPlayer.Character
+	if not character then
+		return
+	end
+	character:SetAttribute(ATTR_LOCAL_RANGED_AIM_ACTIVE, active)
+end
+
+local function setAbilityCastActive(active: boolean)
+	local character = localPlayer.Character
+	if not character then
+		return
+	end
+	character:SetAttribute(ATTR_LOCAL_ABILITY_CAST_ACTIVE, active)
+end
+
+local function clearRangedAimForCast(castId: number)
+	if rangedAimActiveCastId ~= castId then
+		return
+	end
+	rangedAimActiveCastId = nil
+	setRangedAimActive(false)
+end
+
+local function clearAbilityCastForCast(castId: number)
+	if abilityCastActiveCastId ~= castId then
+		return
+	end
+	abilityCastActiveCastId = nil
+	setAbilityCastActive(false)
+end
+
+local function startRangedAimForCast(castId: number, verticalAimProfile: string?)
+	if verticalAimProfile ~= RANGED_VERTICAL_AIM_PROFILE then
+		if rangedAimActiveCastId ~= nil then
+			rangedAimActiveCastId = nil
+			setRangedAimActive(false)
+		end
+		return
+	end
+
+	rangedAimActiveCastId = castId
+	setRangedAimActive(true)
+end
+
+local function startAbilityCastForCast(castId: number)
+	abilityCastActiveCastId = castId
+	setAbilityCastActive(true)
+end
 
 -- Get humanoid and animator
 local function getAnimator(): Animator?
@@ -199,7 +254,8 @@ local function playAbilityCast(
 	pulseInterval: number,
 	damageStats: {[string]: number},
 	animationData: any,
-	skipFirstAnimation: boolean?
+	skipFirstAnimation: boolean?,
+	verticalAimProfile: string?
 )
 	-- Skip entirely if no animation data or no valid animation IDs
 	if not animationData or not animationData.animationIds then
@@ -264,11 +320,15 @@ local function playAbilityCast(
 	currentAbilityId = abilityId
 	currentCastId = currentCastId + 1  -- Increment for unique cast tracking
 	local thisCastId = currentCastId  -- Capture for this coroutine
+	startAbilityCastForCast(thisCastId)
+	startRangedAimForCast(thisCastId, verticalAimProfile)
 	
 	-- Spawn animation coroutine
 	task.spawn(function()
 		-- Don't animate if no projectiles
 		if projectileCount <= 0 then
+			clearAbilityCastForCast(thisCastId)
+			clearRangedAimForCast(thisCastId)
 			isAnimating = false
 			currentAnimation = nil
 			return
@@ -424,6 +484,8 @@ local function playAbilityCast(
 		
 		-- Track when this ability's animation finished
 		lastAnimationEndTime[abilityId] = tick()
+		clearAbilityCastForCast(thisCastId)
+		clearRangedAimForCast(thisCastId)
 		
 		-- Clear animation state only if this is still the current cast
 		if currentCastId == thisCastId then
@@ -447,6 +509,7 @@ abilityCastRemote.OnClientEvent:Connect(function(abilityId: string, cooldownDura
 	local pulseInterval = castData.pulseInterval or 0
 	local damageStats = castData.damageStats or {}
 	local animationData = castData.animationData  -- Server-provided animation config (secure)
+	local verticalAimProfile = if typeof(castData.verticalAimProfile) == "string" then castData.verticalAimProfile else nil
 	
 	-- Only animate if server provided animation data
 	if not animationData then
@@ -461,7 +524,7 @@ abilityCastRemote.OnClientEvent:Connect(function(abilityId: string, cooldownDura
 	animationData.cooldownDuration = cooldownDuration
 	
 	-- Play animation (skipFirstAnimation handled internally based on interruption)
-	playAbilityCast(abilityId, projectileCount, pulseInterval, damageStats, animationData, false)
+	playAbilityCast(abilityId, projectileCount, pulseInterval, damageStats, animationData, false, verticalAimProfile)
 end)
 
 -- Handle pause/unpause
@@ -487,6 +550,10 @@ localPlayer.CharacterAdded:Connect(function(character)
 	currentAnimation = nil
 	currentAnimationPriority = 999
 	currentAbilityId = nil
+	abilityCastActiveCastId = nil
+	character:SetAttribute(ATTR_LOCAL_ABILITY_CAST_ACTIVE, false)
+	rangedAimActiveCastId = nil
+	character:SetAttribute(ATTR_LOCAL_RANGED_AIM_ACTIVE, false)
 	
 	-- Clear cached tracks (new character = new animator)
 	table.clear(loadedTracks)
@@ -494,3 +561,15 @@ localPlayer.CharacterAdded:Connect(function(character)
 	-- Wait for humanoid and animator
 	character:WaitForChild("Humanoid")
 end)
+
+localPlayer.CharacterRemoving:Connect(function(removingCharacter: Model)
+	removingCharacter:SetAttribute(ATTR_LOCAL_ABILITY_CAST_ACTIVE, false)
+	abilityCastActiveCastId = nil
+	removingCharacter:SetAttribute(ATTR_LOCAL_RANGED_AIM_ACTIVE, false)
+	rangedAimActiveCastId = nil
+end)
+
+if localPlayer.Character then
+	localPlayer.Character:SetAttribute(ATTR_LOCAL_ABILITY_CAST_ACTIVE, false)
+	localPlayer.Character:SetAttribute(ATTR_LOCAL_RANGED_AIM_ACTIVE, false)
+end

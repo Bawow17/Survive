@@ -48,6 +48,7 @@ local UpgradeIcons = {
 
 	-- Mobility upgrades
 	["mobility:Dash"] = "99817712946636",
+	["mobility:IceTracer"] = "99817712946636",
 	["mobility:ShieldBash"] = "98379470571047",
 	["mobility:DoubleJump"] = "118165830384003",
 	["mobility:Blink"] = "103856385303705",

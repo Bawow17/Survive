@@ -57,6 +57,20 @@ local MANA_GRAPPLE_CONFIG = {
 	grappleDampStrength = 2.0,
 }
 
+local ICE_TRACER_CONFIG = {
+	distance = 103.125,
+	duration = 35 / 60,
+	cooldown = 3.0,
+	pathSpacing = 3.0,
+	rampFrames = 10,
+	totalFrames = 35,
+	lookAheadDistance = 15.0,
+	pathPartLifetime = 2.0,
+	pathFadeDuration = 0.35,
+	feetOffset = 3.0,
+}
+local ICE_TRACER_RNG = Random.new()
+
 -- Active trail (for cleanup)
 local activeTrail: Trail? = nil
 local trailStartTime: number = 0
@@ -68,6 +82,7 @@ local activeGravityConnection: RBXScriptConnection? = nil
 -- Remote events for server communication
 local MobilityActivateRemote: RemoteEvent
 local ShieldBashHitRemote: RemoteEvent
+local IceTracerPathReplicateRemote: RemoteEvent
 local EntityUpdate: RemoteEvent
 
 -- Player state
@@ -121,9 +136,34 @@ local serverGrappleManaPointPath: string? = nil
 local serverGrappleEndPath: string? = nil
 local serverGrappleBeamPath: string? = nil
 
+-- Ice Tracer config values from server
+local serverIceTracerPathPath: string? = nil
+local serverIceTracerBeam1Path: string? = nil
+local serverIceTracerBeam2Path: string? = nil
+local serverIceTracerAnimationPath: string? = nil
+local serverIceTracerPathSpacing: number? = nil
+local serverIceTracerRampFrames: number? = nil
+local serverIceTracerTotalFrames: number? = nil
+local serverIceTracerLookAheadDistance: number? = nil
+local serverIceTracerPartLifetime: number? = nil
+
 -- Track if currently dashing (prevent spam)
 local isDashing = false
 local activeDashConnection: RBXScriptConnection? = nil
+local activeIceTracerConnection: RBXScriptConnection? = nil
+local activeIceTracerLinearVelocity: LinearVelocity? = nil
+local iceTracerCastCounter = 0
+local activeIceTracerBeams: {{beam: Beam, container: Instance}} = {}
+local activeIceTracerPathParts: {Instance} = {}
+local activeIceTracerTrack: AnimationTrack? = nil
+local activeIceTracerTrackStoppedConnection: RBXScriptConnection? = nil
+local iceTracerJumpWasEnabled: boolean? = nil
+local activeIceTracerFacingLockConnection: RBXScriptConnection? = nil
+local iceTracerFacingDirection: Vector3? = nil
+local iceTracerAutoRotateWasEnabled: boolean? = nil
+local clearIceTracerVisuals: (boolean?) -> ()
+local ATTR_LOCAL_UTILITY_FACING_LOCK = "UtilityFacingLockActiveLocal"
+local ATTR_LOCAL_UTILITY_CAST_ACTIVE = "UtilityCastActiveLocal"
 
 -- Track if currently blinking (prevent spam)
 local isBlinking = false
@@ -802,6 +842,99 @@ local function findAttachmentInInstance(instance: Instance?, preferredPart: Base
 	return nil
 end
 
+local function setUtilityCastActive(active: boolean)
+	if character then
+		character:SetAttribute(ATTR_LOCAL_UTILITY_CAST_ACTIVE, active)
+	end
+end
+
+setUtilityCastActive(false)
+
+local function scheduleInstanceFadeAndDestroy(rootInstance: Instance?, lifetime: number, fadeDuration: number)
+	if not rootInstance then
+		return
+	end
+
+	local safeLifetime = math.max(0.05, lifetime)
+	local safeFadeDuration = math.max(0, math.min(fadeDuration, safeLifetime))
+	local partBaseTransparency: {[BasePart]: number} = {}
+	local beamBaseTransparency: {[Beam]: NumberSequence} = {}
+
+	local function capture(inst: Instance)
+		if inst:IsA("BasePart") then
+			partBaseTransparency[inst] = inst.Transparency
+		elseif inst:IsA("Beam") then
+			beamBaseTransparency[inst] = inst.Transparency
+		end
+	end
+
+	capture(rootInstance)
+	for _, descendant in ipairs(rootInstance:GetDescendants()) do
+		capture(descendant)
+	end
+
+	local fadeDelay = math.max(0, safeLifetime - safeFadeDuration)
+	task.delay(fadeDelay, function()
+		if safeFadeDuration <= 0 then
+			return
+		end
+		local fadeStart = tick()
+		local fadeConnection: RBXScriptConnection?
+		fadeConnection = RunService.Heartbeat:Connect(function()
+			local t = math.clamp((tick() - fadeStart) / safeFadeDuration, 0, 1)
+			for part, baseTransparency in pairs(partBaseTransparency) do
+				if part and part.Parent then
+					part.Transparency = baseTransparency + (1 - baseTransparency) * t
+				end
+			end
+			for beam, baseTransparency in pairs(beamBaseTransparency) do
+				if beam and beam.Parent then
+					beam.Transparency = lerpNumberSequenceToTransparent(baseTransparency, t)
+				end
+			end
+			if t >= 1 and fadeConnection then
+				fadeConnection:Disconnect()
+			end
+		end)
+	end)
+
+	task.delay(safeLifetime, function()
+		if rootInstance and rootInstance.Parent then
+			rootInstance:Destroy()
+		end
+	end)
+end
+
+local function findLeftArmGripAttachment(characterModel: Model?): Attachment?
+	if not characterModel then
+		return nil
+	end
+
+	local exact = characterModel:FindFirstChild("LeftArmGripAttachment", true)
+	if exact and exact:IsA("Attachment") then
+		return exact
+	end
+
+	local leftArm = characterModel:FindFirstChild("Left Arm")
+	if leftArm and leftArm:IsA("BasePart") then
+		local attachment = leftArm:FindFirstChildOfClass("Attachment")
+		if attachment then
+			return attachment
+		end
+	end
+
+	for _, descendant in ipairs(characterModel:GetDescendants()) do
+		if descendant:IsA("Attachment") then
+			local lowered = string.lower(descendant.Name)
+			if string.find(lowered, "leftarmgrip", 1, true) or string.find(lowered, "left", 1, true) then
+				return descendant
+			end
+		end
+	end
+
+	return nil
+end
+
 local function ensureBeamBetween(startInstance: Instance?, endInstance: Instance?)
 	if not startInstance or not endInstance then
 		return
@@ -1167,6 +1300,7 @@ end
 local function initRemotes()
 	local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
 	MobilityActivateRemote = remotes:WaitForChild("MobilityActivate")
+	IceTracerPathReplicateRemote = remotes:WaitForChild("IceTracerPathReplicate")
 	-- ShieldBashHit is created by server on first use, don't wait for it
 	ShieldBashHitRemote = remotes:FindFirstChild("ShieldBashHit")
 	
@@ -1208,6 +1342,14 @@ local function initRemotes()
 			if typeof(data) == "table" then
 				local previousMobility = equippedMobility
 				equippedMobility = data.equippedMobility
+				if previousMobility == "IceTracer" and equippedMobility ~= "IceTracer" then
+					if activeIceTracerConnection then
+						activeIceTracerConnection:Disconnect()
+						activeIceTracerConnection = nil
+					end
+					isDashing = false
+					clearIceTracerVisuals()
+				end
 				
 				
 				-- Read config values from server
@@ -1295,6 +1437,35 @@ local function initRemotes()
 				end
 				if typeof(data.grappleBeamPath) == "string" then
 					serverGrappleBeamPath = data.grappleBeamPath
+				end
+
+				-- Ice Tracer specific fields
+				if typeof(data.iceTracerPathPath) == "string" then
+					serverIceTracerPathPath = data.iceTracerPathPath
+				end
+				if typeof(data.iceTracerBeam1Path) == "string" then
+					serverIceTracerBeam1Path = data.iceTracerBeam1Path
+				end
+				if typeof(data.iceTracerBeam2Path) == "string" then
+					serverIceTracerBeam2Path = data.iceTracerBeam2Path
+				end
+				if typeof(data.iceTracerAnimationPath) == "string" then
+					serverIceTracerAnimationPath = data.iceTracerAnimationPath
+				end
+				if typeof(data.iceTracerPathSpacing) == "number" then
+					serverIceTracerPathSpacing = data.iceTracerPathSpacing
+				end
+				if typeof(data.iceTracerRampFrames) == "number" then
+					serverIceTracerRampFrames = data.iceTracerRampFrames
+				end
+				if typeof(data.iceTracerTotalFrames) == "number" then
+					serverIceTracerTotalFrames = data.iceTracerTotalFrames
+				end
+				if typeof(data.iceTracerLookAheadDistance) == "number" then
+					serverIceTracerLookAheadDistance = data.iceTracerLookAheadDistance
+				end
+				if typeof(data.iceTracerPartLifetime) == "number" then
+					serverIceTracerPartLifetime = data.iceTracerPartLifetime
 				end
 				
 				-- Shield Bash specific fields
@@ -1409,6 +1580,590 @@ local function isOnCooldownValue(cooldown: number): boolean
 		return isOnCooldown({ cooldown = lastUsedCooldown })
 	end
 	return isOnCooldown({ cooldown = cooldown })
+end
+
+local function getIceTracerConfig()
+	return {
+		distance = (serverDistance or ICE_TRACER_CONFIG.distance) * mobilityDistanceMultiplier,
+		duration = serverDuration or ICE_TRACER_CONFIG.duration,
+		cooldown = serverCooldown or ICE_TRACER_CONFIG.cooldown,
+		pathSpacing = serverIceTracerPathSpacing or ICE_TRACER_CONFIG.pathSpacing,
+		rampFrames = math.max(1, math.floor((serverIceTracerRampFrames or ICE_TRACER_CONFIG.rampFrames) + 0.5)),
+		totalFrames = math.max(1, math.floor((serverIceTracerTotalFrames or ICE_TRACER_CONFIG.totalFrames) + 0.5)),
+		lookAheadDistance = serverIceTracerLookAheadDistance or ICE_TRACER_CONFIG.lookAheadDistance,
+		pathPartLifetime = serverIceTracerPartLifetime or ICE_TRACER_CONFIG.pathPartLifetime,
+		pathFadeDuration = ICE_TRACER_CONFIG.pathFadeDuration,
+	}
+end
+
+local function setIceTracerJumpLocked(locked: boolean)
+	if not humanoid then
+		if not locked then
+			iceTracerJumpWasEnabled = nil
+		end
+		return
+	end
+
+	if locked then
+		if iceTracerJumpWasEnabled == nil then
+			local ok, wasEnabled = pcall(function()
+				return humanoid:GetStateEnabled(Enum.HumanoidStateType.Jumping)
+			end)
+			iceTracerJumpWasEnabled = if ok and typeof(wasEnabled) == "boolean" then wasEnabled else true
+		end
+		humanoid.Jump = false
+		pcall(function()
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+		end)
+		return
+	end
+
+	if iceTracerJumpWasEnabled ~= nil then
+		local restoreEnabled = iceTracerJumpWasEnabled
+		iceTracerJumpWasEnabled = nil
+		pcall(function()
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, restoreEnabled)
+		end)
+	end
+end
+
+local function setIceTracerFacingLocked(locked: boolean, direction: Vector3?)
+	local characterModel = character
+	if characterModel then
+		characterModel:SetAttribute(ATTR_LOCAL_UTILITY_FACING_LOCK, locked)
+	end
+
+	if locked then
+		if not humanoid or not rootPart then
+			return
+		end
+
+		local lockDirection = direction
+		if lockDirection and lockDirection.Magnitude > 1e-4 then
+			lockDirection = Vector3.new(lockDirection.X, 0, lockDirection.Z)
+			if lockDirection.Magnitude > 1e-4 then
+				iceTracerFacingDirection = lockDirection.Unit
+			end
+		end
+
+		if not iceTracerFacingDirection then
+			local forward = rootPart.CFrame.LookVector
+			local horizontalForward = Vector3.new(forward.X, 0, forward.Z)
+			if horizontalForward.Magnitude > 1e-4 then
+				iceTracerFacingDirection = horizontalForward.Unit
+			else
+				iceTracerFacingDirection = Vector3.new(0, 0, 1)
+			end
+		end
+
+		if iceTracerAutoRotateWasEnabled == nil then
+			iceTracerAutoRotateWasEnabled = humanoid.AutoRotate
+		end
+		humanoid.AutoRotate = false
+
+		if activeIceTracerFacingLockConnection == nil then
+			activeIceTracerFacingLockConnection = RunService.Heartbeat:Connect(function()
+				if not humanoid or humanoid.Health <= 0 or not rootPart or not rootPart.Parent then
+					return
+				end
+				humanoid.AutoRotate = false
+				local facing = iceTracerFacingDirection
+				if facing and facing.Magnitude > 1e-4 then
+					rootPart.CFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + facing)
+					rootPart.AssemblyAngularVelocity = Vector3.zero
+				end
+			end)
+		end
+		return
+	end
+
+	if activeIceTracerFacingLockConnection then
+		activeIceTracerFacingLockConnection:Disconnect()
+		activeIceTracerFacingLockConnection = nil
+	end
+	iceTracerFacingDirection = nil
+
+	if humanoid and iceTracerAutoRotateWasEnabled ~= nil then
+		humanoid.AutoRotate = iceTracerAutoRotateWasEnabled
+	end
+	iceTracerAutoRotateWasEnabled = nil
+end
+
+clearIceTracerVisuals = function(stopAnimation: boolean?)
+	if activeIceTracerLinearVelocity and activeIceTracerLinearVelocity.Parent then
+		activeIceTracerLinearVelocity:Destroy()
+	end
+	activeIceTracerLinearVelocity = nil
+	setIceTracerJumpLocked(false)
+
+	if stopAnimation == nil then
+		stopAnimation = true
+	end
+
+	if stopAnimation and activeIceTracerTrack then
+		setUtilityCastActive(false)
+		setIceTracerFacingLocked(false)
+		if activeIceTracerTrackStoppedConnection then
+			activeIceTracerTrackStoppedConnection:Disconnect()
+			activeIceTracerTrackStoppedConnection = nil
+		end
+		pcall(function()
+			activeIceTracerTrack:Stop(0.05)
+			activeIceTracerTrack:Destroy()
+		end)
+		activeIceTracerTrack = nil
+	elseif not stopAnimation and not activeIceTracerTrack then
+		setUtilityCastActive(false)
+		-- Fallback when animation asset fails to play: don't keep facing lock indefinitely.
+		setIceTracerFacingLocked(false)
+	end
+
+	for _, beamState in ipairs(activeIceTracerBeams) do
+		if beamState.beam and beamState.beam.Parent then
+			beamState.beam.Enabled = false
+		end
+		if beamState.container and beamState.container.Parent then
+			beamState.container:Destroy()
+		end
+	end
+	table.clear(activeIceTracerBeams)
+	table.clear(activeIceTracerPathParts)
+end
+
+local function startIceTracerAnimation()
+	if not humanoid or humanoid.Health <= 0 then
+		setUtilityCastActive(false)
+		return false
+	end
+
+	local animationPath = serverIceTracerAnimationPath
+	if typeof(animationPath) ~= "string" or animationPath == "" then
+		setUtilityCastActive(false)
+		return false
+	end
+
+	local template = findInstanceByPath(animationPath)
+	if not template then
+		setUtilityCastActive(false)
+		return false
+	end
+
+	local animationId: string? = nil
+	if template:IsA("Animation") then
+		animationId = template.AnimationId
+	else
+		local nested = template:FindFirstChildWhichIsA("Animation", true)
+		if nested then
+			animationId = nested.AnimationId
+		end
+	end
+
+	if typeof(animationId) ~= "string" or animationId == "" then
+		setUtilityCastActive(false)
+		return false
+	end
+
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = humanoid
+	end
+
+	local animation = Instance.new("Animation")
+	animation.AnimationId = animationId
+	local ok, track = pcall(function()
+		return animator:LoadAnimation(animation)
+	end)
+	animation:Destroy()
+	if ok and track then
+		track.Priority = Enum.AnimationPriority.Action4
+		track.Looped = false
+		if activeIceTracerTrackStoppedConnection then
+			activeIceTracerTrackStoppedConnection:Disconnect()
+			activeIceTracerTrackStoppedConnection = nil
+		end
+		activeIceTracerTrackStoppedConnection = track.Stopped:Connect(function()
+			setUtilityCastActive(false)
+			setIceTracerFacingLocked(false)
+			if activeIceTracerTrack == track then
+				activeIceTracerTrack = nil
+			end
+			if activeIceTracerTrackStoppedConnection then
+				activeIceTracerTrackStoppedConnection:Disconnect()
+				activeIceTracerTrackStoppedConnection = nil
+			end
+			pcall(function()
+				track:Destroy()
+			end)
+		end)
+		track:Play(0.05, 1, 1)
+		activeIceTracerTrack = track
+		setUtilityCastActive(true)
+		return true
+	end
+	setUtilityCastActive(false)
+	return false
+end
+
+local function spawnIceTracerSegment(pathPath: string, position: Vector3, forward: Vector3, yawDeg: number, lifetime: number, fadeDuration: number): (Attachment?, any?)
+	local segment = cloneBlinkObject(pathPath, position)
+	if not segment then
+		return nil, nil
+	end
+
+	-- Ice path segments should be usable as temporary platforms.
+	if segment:IsA("Model") then
+		for _, descendant in ipairs(segment:GetDescendants()) do
+			if descendant:IsA("BasePart") then
+				descendant.Anchored = true
+				descendant.CanCollide = true
+				descendant.CanTouch = true
+				descendant.CanQuery = true
+				descendant.CollisionGroup = "Default"
+			end
+		end
+	elseif segment:IsA("BasePart") then
+		segment.Anchored = true
+		segment.CanCollide = true
+		segment.CanTouch = true
+		segment.CanQuery = true
+		segment.CollisionGroup = "Default"
+	end
+
+	local normalizedForward = if forward.Magnitude > 1e-4 then forward.Unit else Vector3.new(0, 0, 1)
+	local segmentCFrame = CFrame.lookAt(position, position + normalizedForward) * CFrame.Angles(0, math.rad(yawDeg), 0)
+	setInstanceWorldCFrame(segment, segmentCFrame)
+
+	local segmentPart = getBasePartFromInstance(segment)
+	local segmentAttachment = findAttachmentInInstance(segment, segmentPart, {"attachment", "path", "target", "end"})
+	if not segmentAttachment and segmentPart then
+		segmentAttachment = Instance.new("Attachment")
+		segmentAttachment.Name = "PathAttachment"
+		segmentAttachment.Parent = segmentPart
+	end
+
+	scheduleInstanceFadeAndDestroy(segment, lifetime, fadeDuration)
+	table.insert(activeIceTracerPathParts, segment)
+
+	return segmentAttachment, {
+		position = position,
+		forward = normalizedForward,
+		yawDeg = yawDeg,
+	}
+end
+
+local function createIceTracerBeam(path: string?, name: string, startAttachment: Attachment, endAttachment: Attachment?): (Beam?, Instance?)
+	local beamContainer: Instance? = nil
+	local beam: Beam? = nil
+	if typeof(path) == "string" and path ~= "" then
+		local template = findInstanceByPath(path)
+		if template then
+			beamContainer = template:Clone()
+			beamContainer.Parent = workspace
+			beam = findBeamInInstance(beamContainer)
+		end
+	end
+
+	if not beam then
+		beam = Instance.new("Beam")
+		beam.FaceCamera = true
+		beam.Width0 = 0.25
+		beam.Width1 = 0.25
+		beam.Parent = startAttachment.Parent
+		beamContainer = beam
+	end
+
+	beam.Name = name
+	beam.Attachment0 = startAttachment
+	if endAttachment then
+		beam.Attachment1 = endAttachment
+	end
+	beam.Enabled = true
+	return beam, beamContainer
+end
+
+local function executeIceTracer()
+	if isDashing or isBlinking or isGrappling then
+		return false
+	end
+	if not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+
+	local config = getIceTracerConfig()
+	if isOnCooldown({ cooldown = config.cooldown }) then
+		return false
+	end
+
+	local slideDirection = humanoid.MoveDirection
+	if slideDirection.Magnitude < 0.1 then
+		slideDirection = rootPart.CFrame.LookVector
+	end
+	slideDirection = Vector3.new(slideDirection.X, 0, slideDirection.Z)
+	if slideDirection.Magnitude < 0.1 then
+		slideDirection = Vector3.new(0, 0, 1)
+	else
+		slideDirection = slideDirection.Unit
+	end
+
+	local function resolveSlideDirection(): Vector3
+		local moveDirection = humanoid.MoveDirection
+		if moveDirection.Magnitude >= 0.1 then
+			local horizontalMove = Vector3.new(moveDirection.X, 0, moveDirection.Z)
+			if horizontalMove.Magnitude >= 0.1 then
+				return horizontalMove.Unit
+			end
+		end
+
+		local look = rootPart.CFrame.LookVector
+		local horizontalLook = Vector3.new(look.X, 0, look.Z)
+		if horizontalLook.Magnitude >= 0.1 then
+			return horizontalLook.Unit
+		end
+
+		return slideDirection
+	end
+
+	clearIceTracerVisuals()
+	if activeIceTracerConnection then
+		activeIceTracerConnection:Disconnect()
+		activeIceTracerConnection = nil
+	end
+
+	local pathPath = serverIceTracerPathPath or "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IcePath"
+	local beam1Path = serverIceTracerBeam1Path or "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser"
+	local beam2Path = serverIceTracerBeam2Path or "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser2"
+	local pathSpacing = math.max(0.1, config.pathSpacing)
+	local frameDuration = 1 / 60
+	local postEffectDurationSeconds = 3 / 60
+
+	local rootAttachment = rootPart:FindFirstChild("RootAttachment")
+	if not rootAttachment or not rootAttachment:IsA("Attachment") then
+		if rootAttachment then
+			rootAttachment:Destroy()
+		end
+		rootAttachment = Instance.new("Attachment")
+		rootAttachment.Name = "RootAttachment"
+		rootAttachment.Position = Vector3.zero
+		rootAttachment.Parent = rootPart
+	end
+
+	local linearVelocity = Instance.new("LinearVelocity")
+	linearVelocity.Name = "IceTracerLinearVelocity"
+	linearVelocity.Attachment0 = rootAttachment
+	linearVelocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+	linearVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+	linearVelocity.ForceLimitMode = Enum.ForceLimitMode.PerAxis
+	linearVelocity.MaxAxesForce = Vector3.new(math.huge, 0, math.huge)
+	local slideSpeed = (config.distance / math.max(0.05, config.duration)) * 0.5525
+	linearVelocity.VectorVelocity = Vector3.new(slideDirection.X * slideSpeed, 0, slideDirection.Z * slideSpeed)
+	linearVelocity.Parent = rootPart
+	activeIceTracerLinearVelocity = linearVelocity
+
+	isDashing = true
+	setIceTracerFacingLocked(true, slideDirection)
+	setIceTracerJumpLocked(true)
+	startIceTracerAnimation()
+
+	if usingServerTime and serverGameTime then
+		local estimate = serverGameTime + math.max(0, tick() - lastGameTimeUpdate)
+		lastUsedTime = estimate
+	else
+		lastUsedTime = tick()
+	end
+
+	MobilityActivateRemote:FireServer("IceTracer")
+
+	iceTracerCastCounter += 1
+	local castId = iceTracerCastCounter
+	local startAttachment = findLeftArmGripAttachment(character) or rootAttachment
+	local latestAttachment: Attachment? = nil
+	local frameAccumulator = 0
+	local frameIndex = 0
+	local pathCursor: Vector3? = nil
+	local pausedVelocity: Vector3? = nil
+	local elapsedActive = 0
+	local effectsActive = true
+	local postEffectsElapsed = 0
+
+	local function endIceTracerEffects()
+		if not effectsActive then
+			return
+		end
+		effectsActive = false
+
+		for _, beamState in ipairs(activeIceTracerBeams) do
+			if beamState.beam and beamState.beam.Parent then
+				beamState.beam.Enabled = false
+			end
+		end
+
+		if IceTracerPathReplicateRemote then
+			IceTracerPathReplicateRemote:FireServer({
+				castId = castId,
+				segments = {},
+				isFinal = true,
+			})
+		end
+	end
+
+	local function emitInitialSegment()
+		if not rootPart or not rootPart.Parent then
+			return
+		end
+		local startPos = rootPart.Position - Vector3.new(0, ICE_TRACER_CONFIG.feetOffset, 0)
+		local yaw = ICE_TRACER_RNG:NextNumber(0, 360)
+		local segmentAttachment, segmentData = spawnIceTracerSegment(pathPath, startPos, slideDirection, yaw, config.pathPartLifetime, config.pathFadeDuration)
+		if segmentAttachment then
+			latestAttachment = segmentAttachment
+		end
+		pathCursor = startPos
+		if segmentData and IceTracerPathReplicateRemote then
+			task.defer(function()
+				if IceTracerPathReplicateRemote then
+					IceTracerPathReplicateRemote:FireServer({
+						castId = castId,
+						segments = { segmentData },
+						isFinal = false,
+					})
+				end
+			end)
+		end
+	end
+
+	emitInitialSegment()
+	if startAttachment and latestAttachment then
+		local beam1, container1 = createIceTracerBeam(beam1Path, "IceTracerBeam1", startAttachment, latestAttachment)
+		local beam2, container2 = createIceTracerBeam(beam2Path, "IceTracerBeam2", startAttachment, latestAttachment)
+		if beam1 and container1 then
+			table.insert(activeIceTracerBeams, { beam = beam1, container = container1 })
+		end
+		if beam2 and container2 then
+			table.insert(activeIceTracerBeams, { beam = beam2, container = container2 })
+		end
+	end
+
+	local function spawnSegmentsTowardTarget(targetPos: Vector3): {any}
+		local created = {}
+		if not pathCursor then
+			pathCursor = targetPos
+			return created
+		end
+
+		local toTarget = targetPos - pathCursor
+		while toTarget.Magnitude >= pathSpacing do
+			local nextPos = pathCursor + toTarget.Unit * pathSpacing
+			local yaw = ICE_TRACER_RNG:NextNumber(0, 360)
+			local segmentAttachment, segmentData = spawnIceTracerSegment(pathPath, nextPos, slideDirection, yaw, config.pathPartLifetime, config.pathFadeDuration)
+			if segmentAttachment then
+				latestAttachment = segmentAttachment
+			end
+			if segmentData then
+				table.insert(created, segmentData)
+			end
+			pathCursor = nextPos
+			toTarget = targetPos - pathCursor
+		end
+
+		return created
+	end
+
+	activeIceTracerConnection = RunService.Heartbeat:Connect(function(dt)
+		if not rootPart or not rootPart.Parent or not linearVelocity or not linearVelocity.Parent then
+			endIceTracerEffects()
+			if linearVelocity and linearVelocity.Parent then
+				linearVelocity:Destroy()
+			end
+			if activeIceTracerConnection then
+				activeIceTracerConnection:Disconnect()
+				activeIceTracerConnection = nil
+			end
+			activeIceTracerLinearVelocity = nil
+			isDashing = false
+			clearIceTracerVisuals()
+			return
+		end
+
+		if isPaused then
+			if not pausedVelocity then
+				pausedVelocity = linearVelocity.VectorVelocity
+				linearVelocity.VectorVelocity = Vector3.zero
+			end
+			return
+		elseif pausedVelocity then
+			linearVelocity.VectorVelocity = pausedVelocity
+			pausedVelocity = nil
+		end
+
+		local steerDirection = resolveSlideDirection()
+		if steerDirection.Magnitude > 1e-4 then
+			slideDirection = steerDirection
+			linearVelocity.VectorVelocity = Vector3.new(slideDirection.X * slideSpeed, 0, slideDirection.Z * slideSpeed)
+			setIceTracerFacingLocked(true, slideDirection)
+		end
+
+		elapsedActive += dt
+		frameAccumulator += dt
+
+		local frameSegments = {}
+		while effectsActive and frameAccumulator >= frameDuration and frameIndex < config.totalFrames do
+			frameAccumulator -= frameDuration
+			frameIndex += 1
+
+			local lookAheadAlpha = if frameIndex <= config.rampFrames then (frameIndex / config.rampFrames) else 1
+			local lookAhead = config.lookAheadDistance * lookAheadAlpha
+			local targetPos = rootPart.Position + (slideDirection * lookAhead) - Vector3.new(0, ICE_TRACER_CONFIG.feetOffset, 0)
+			local created = spawnSegmentsTowardTarget(targetPos)
+			for _, segment in ipairs(created) do
+				table.insert(frameSegments, segment)
+			end
+		end
+
+		if #frameSegments > 0 and IceTracerPathReplicateRemote then
+			IceTracerPathReplicateRemote:FireServer({
+				castId = castId,
+				segments = frameSegments,
+				isFinal = false,
+			})
+		end
+
+		if effectsActive and latestAttachment then
+			local currentStartAttachment = findLeftArmGripAttachment(character) or rootAttachment
+			for _, beamState in ipairs(activeIceTracerBeams) do
+				if beamState.beam and beamState.beam.Parent then
+					if currentStartAttachment then
+						beamState.beam.Attachment0 = currentStartAttachment
+					end
+					beamState.beam.Attachment1 = latestAttachment
+					beamState.beam.Enabled = true
+				end
+			end
+		end
+
+		if effectsActive and (elapsedActive >= config.duration or frameIndex >= config.totalFrames) then
+			endIceTracerEffects()
+		end
+
+		if not effectsActive then
+			postEffectsElapsed += dt
+		end
+
+		if not effectsActive and postEffectsElapsed >= postEffectDurationSeconds then
+			if linearVelocity and linearVelocity.Parent then
+				linearVelocity:Destroy()
+			end
+			activeIceTracerLinearVelocity = nil
+			rootPart.AssemblyLinearVelocity = Vector3.new(0, rootPart.AssemblyLinearVelocity.Y, 0)
+			if activeIceTracerConnection then
+				activeIceTracerConnection:Disconnect()
+				activeIceTracerConnection = nil
+			end
+			isDashing = false
+			clearIceTracerVisuals(false)
+		end
+	end)
+
+	return true
 end
 
 -- Execute Dash ability
@@ -2332,6 +3087,8 @@ local function onMobilityKeyPressed()
 	
 	if equippedMobility == "Dash" then
 		executeDash()
+	elseif equippedMobility == "IceTracer" then
+		executeIceTracer()
 	elseif equippedMobility == "ShieldBash" then
 		executeDash()  -- Shield Bash uses the same dash function with combat logic
 	elseif equippedMobility == "DoubleJump" then
@@ -2390,12 +3147,18 @@ player.CharacterAdded:Connect(function(newCharacter)
 	grappleToken += 1
 	isGrappling = false
 	grappleHoldActive = false
+	setUtilityCastActive(false)
 	
 	-- Clean up effects on respawn
 	if activeDashConnection then
 		activeDashConnection:Disconnect()
 		activeDashConnection = nil
 	end
+	if activeIceTracerConnection then
+		activeIceTracerConnection:Disconnect()
+		activeIceTracerConnection = nil
+	end
+	clearIceTracerVisuals()
 	
 	if activeBlinkConnection then
 		activeBlinkConnection:Disconnect()
@@ -2437,6 +3200,14 @@ local function setupPauseListeners()
 		if usingServerTime then
 			pausedServerGameTime = serverGameTime
 		end
+
+		if activeIceTracerConnection then
+			activeIceTracerConnection:Disconnect()
+			activeIceTracerConnection = nil
+			isDashing = false
+			clearIceTracerVisuals()
+		end
+		setUtilityCastActive(false)
 		
 		-- Completely freeze player by anchoring
 		if rootPart and rootPart.Parent then
