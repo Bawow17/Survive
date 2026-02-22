@@ -6,6 +6,21 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+local playerScripts = player:FindFirstChild("PlayerScripts")
+if not playerScripts then
+	playerScripts = player:WaitForChild("PlayerScripts", 10)
+end
+local scriptsContainer = playerScripts or script:FindFirstAncestor("StarterPlayerScripts")
+if not scriptsContainer then
+	warn("[SessionTimerDisplay] Could not locate StarterPlayerScripts ancestor")
+	return
+end
+local localSharedFolder = scriptsContainer:WaitForChild("_Shared", 10)
+if not localSharedFolder then
+	warn("[SessionTimerDisplay] Could not locate _Shared folder")
+	return
+end
+local TimeFormat = require(localSharedFolder:WaitForChild("TimeFormat"))
 
 -- Wait for MainHUD
 local mainHUD = playerGui:WaitForChild("MainHUD", 10)
@@ -30,9 +45,7 @@ local pauseStartTime = 0
 
 -- Format time as MM:SS
 local function formatTime(seconds: number): string
-	local minutes = math.floor(seconds / 60)
-	local secs = math.floor(seconds % 60)
-	return string.format("%02d:%02d", minutes, secs)
+	return TimeFormat.formatMMSS(seconds)
 end
 
 -- Update timer display

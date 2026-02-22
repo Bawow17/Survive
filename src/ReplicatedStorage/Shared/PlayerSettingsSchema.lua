@@ -10,6 +10,7 @@ export type SettingsV1 = {
 		projectileOpacitySelf: number,
 		projectileOpacityOthers: number,
 		otherPlayerVfxOpacity: number,
+		cameraFov: number,
 	},
 	accessibility: {
 		reduceFlash: boolean,
@@ -31,6 +32,7 @@ local DEFAULTS: SettingsV1 = {
 		projectileOpacitySelf = 1.0,
 		projectileOpacityOthers = 1.0,
 		otherPlayerVfxOpacity = 1.0,
+		cameraFov = 70,
 	},
 	accessibility = {
 		reduceFlash = false,
@@ -94,6 +96,7 @@ local function sanitizeInternal(raw: any): SettingsV1
 			projectileOpacitySelf = clamp(graphics.projectileOpacitySelf, 0.25, 1.00, DEFAULTS.graphics.projectileOpacitySelf),
 			projectileOpacityOthers = clamp(graphics.projectileOpacityOthers, 0.05, 1.00, DEFAULTS.graphics.projectileOpacityOthers),
 			otherPlayerVfxOpacity = clamp(graphics.otherPlayerVfxOpacity, 0.00, 1.00, DEFAULTS.graphics.otherPlayerVfxOpacity),
+			cameraFov = clampToStep(graphics.cameraFov, 60, 100, 1, DEFAULTS.graphics.cameraFov),
 		},
 		accessibility = {
 			reduceFlash = asBoolean(accessibility.reduceFlash, DEFAULTS.accessibility.reduceFlash),
@@ -131,6 +134,9 @@ local function mergeKnown(base: SettingsV1, patch: any): SettingsV1
 		end
 		if incoming.otherPlayerVfxOpacity ~= nil then
 			merged.graphics.otherPlayerVfxOpacity = incoming.otherPlayerVfxOpacity
+		end
+		if incoming.cameraFov ~= nil then
+			merged.graphics.cameraFov = incoming.cameraFov
 		end
 	end
 

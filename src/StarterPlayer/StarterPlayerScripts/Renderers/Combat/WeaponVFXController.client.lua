@@ -12,6 +12,22 @@ local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local weaponRemotesFolder = remotesFolder:WaitForChild("Weapons")
 local primaryShotRemote = weaponRemotesFolder:WaitForChild("PrimaryShot")
 local secondaryShotRemote = weaponRemotesFolder:WaitForChild("SecondaryShot")
+local playerScripts = localPlayer:FindFirstChild("PlayerScripts")
+if not playerScripts then
+	playerScripts = localPlayer:WaitForChild("PlayerScripts", 10)
+end
+local scriptsContainer = playerScripts or script:FindFirstAncestor("StarterPlayerScripts")
+if not scriptsContainer then
+	warn("[WeaponVFXController] Could not locate StarterPlayerScripts ancestor")
+	return
+end
+local localSharedFolder = scriptsContainer:WaitForChild("_Shared", 10)
+if not localSharedFolder then
+	warn("[WeaponVFXController] Could not locate _Shared folder")
+	return
+end
+local LocalEventRegistry = require(localSharedFolder:WaitForChild("LocalEventRegistry"))
+local InstancePath = require(localSharedFolder:WaitForChild("InstancePath"))
 
 local WEAPON_ID = "Oathkeeper"
 local DEFAULT_TRACER_LIFETIME = 2.0
@@ -34,42 +50,11 @@ local function warnOnce(key: string, message: string)
 	warn(message)
 end
 
-local function findByPath(root: Instance, path: string): Instance?
-	local current: Instance = root
-	for _, part in ipairs(string.split(path, ".")) do
-		local child = current:FindFirstChild(part)
-		if not child then
-			return nil
-		end
-		current = child
-	end
-	return current
-end
-
-local function getOrCreateLocalEvent(name: string): BindableEvent
-	local existing = weaponRemotesFolder:FindFirstChild(name)
-	if existing and existing:IsA("BindableEvent") then
-		return existing
-	end
-	local created = Instance.new("BindableEvent")
-	created.Name = name
-	created.Parent = weaponRemotesFolder
-
-	local resolved = weaponRemotesFolder:FindFirstChild(name)
-	if resolved and resolved:IsA("BindableEvent") then
-		if resolved ~= created then
-			created:Destroy()
-		end
-		return resolved
-	end
-	return created
-end
-
-local primaryShotLocalEvent = getOrCreateLocalEvent("PrimaryShotLocal")
-local secondaryShotLocalEvent = getOrCreateLocalEvent("SecondaryShotLocal")
+local primaryShotLocalEvent = LocalEventRegistry.getOrCreate(weaponRemotesFolder, "PrimaryShotLocal")
+local secondaryShotLocalEvent = LocalEventRegistry.getOrCreate(weaponRemotesFolder, "SecondaryShotLocal")
 
 local function getWeaponFolder(): Instance?
-	return findByPath(ReplicatedStorage, "ContentDrawer.WeaponModels.HandCannons.Oathkeeper")
+	return InstancePath.findByPath(ReplicatedStorage, "ContentDrawer.WeaponModels.HandCannons.Oathkeeper")
 end
 
 local function findParticleEmitter(source: Instance?): ParticleEmitter?
@@ -249,7 +234,7 @@ local function spawnImpactEffect(impactPosition: Vector3, impactNormal: Vector3,
 	end
 	endpointClone.Parent = Workspace
 
-	local hitEffect = findByPath(endpointClone, hitEffectPath)
+	local hitEffect = InstancePath.findByPath(endpointClone, hitEffectPath)
 	emitParticles(hitEffect or endpointClone, 1)
 
 	task.delay(2, function()
@@ -268,14 +253,14 @@ local function emitMuzzleFlashForShot(shooterUserId: number)
 	if not character then
 		return
 	end
-	local muzzleFlash = findByPath(character, MUZZLE_FLASH_PATH)
+	local muzzleFlash = InstancePath.findByPath(character, MUZZLE_FLASH_PATH)
 	emitParticles(muzzleFlash, 1)
 end
 
 local function resolveLiveMuzzleOrigin(shooterUserId: number, fallbackOrigin: Vector3?): Vector3?
 	local shooter = Players:GetPlayerByUserId(shooterUserId)
 	if shooter and shooter.Character then
-		local muzzle = findByPath(shooter.Character, WEAPON_MUZZLE_PART_PATH)
+		local muzzle = InstancePath.findByPath(shooter.Character, WEAPON_MUZZLE_PART_PATH)
 		if muzzle then
 			if muzzle:IsA("Attachment") then
 				return muzzle.WorldPosition
@@ -342,8 +327,8 @@ local function renderPrimaryShotVfx(payload: any, suppressCore: boolean)
 		return
 	end
 
-	local tracerTemplate = findByPath(weaponFolder, "VFX.Tracer")
-	local endpointTemplate = findByPath(weaponFolder, "VFX.Endpoint")
+	local tracerTemplate = InstancePath.findByPath(weaponFolder, "VFX.Tracer")
+	local endpointTemplate = InstancePath.findByPath(weaponFolder, "VFX.Endpoint")
 	local lifetime = typeof(payload.tracerLifetime) == "number" and payload.tracerLifetime or DEFAULT_TRACER_LIFETIME
 	local fadeDuration = typeof(payload.tracerFadeDuration) == "number" and payload.tracerFadeDuration or DEFAULT_TRACER_FADE_DURATION
 
@@ -388,8 +373,8 @@ local function renderSecondaryShotVfx(payload: any, suppressCore: boolean)
 		return
 	end
 
-	local tracerTemplate = findByPath(weaponFolder, "VFX.M2Tracer")
-	local endpointTemplate = findByPath(weaponFolder, "VFX.Endpoint")
+	local tracerTemplate = InstancePath.findByPath(weaponFolder, "VFX.M2Tracer")
+	local endpointTemplate = InstancePath.findByPath(weaponFolder, "VFX.Endpoint")
 	local lifetime = typeof(payload.tracerLifetime) == "number" and payload.tracerLifetime or DEFAULT_TRACER_LIFETIME
 	local fadeDuration = typeof(payload.tracerFadeDuration) == "number" and payload.tracerFadeDuration or DEFAULT_TRACER_FADE_DURATION
 

@@ -164,6 +164,7 @@ local iceTracerAutoRotateWasEnabled: boolean? = nil
 local clearIceTracerVisuals: (boolean?) -> ()
 local ATTR_LOCAL_UTILITY_FACING_LOCK = "UtilityFacingLockActiveLocal"
 local ATTR_LOCAL_UTILITY_CAST_ACTIVE = "UtilityCastActiveLocal"
+local ATTR_LOCAL_MOBILITY_VELOCITY_OVERRIDE = "MobilityVelocityOverrideLocal"
 
 -- Track if currently blinking (prevent spam)
 local isBlinking = false
@@ -848,7 +849,14 @@ local function setUtilityCastActive(active: boolean)
 	end
 end
 
+local function setMobilityVelocityOverrideLocal(active: boolean)
+	if character then
+		character:SetAttribute(ATTR_LOCAL_MOBILITY_VELOCITY_OVERRIDE, active)
+	end
+end
+
 setUtilityCastActive(false)
+setMobilityVelocityOverrideLocal(false)
 
 local function scheduleInstanceFadeAndDestroy(rootInstance: Instance?, lifetime: number, fadeDuration: number)
 	if not rootInstance then
@@ -1348,6 +1356,7 @@ local function initRemotes()
 						activeIceTracerConnection = nil
 					end
 					isDashing = false
+					setMobilityVelocityOverrideLocal(false)
 					clearIceTracerVisuals()
 				end
 				
@@ -1690,10 +1699,14 @@ local function setIceTracerFacingLocked(locked: boolean, direction: Vector3?)
 end
 
 clearIceTracerVisuals = function(stopAnimation: boolean?)
+	local hadVelocityOverride = activeIceTracerLinearVelocity and activeIceTracerLinearVelocity.Parent ~= nil
 	if activeIceTracerLinearVelocity and activeIceTracerLinearVelocity.Parent then
 		activeIceTracerLinearVelocity:Destroy()
 	end
 	activeIceTracerLinearVelocity = nil
+	if hadVelocityOverride then
+		setMobilityVelocityOverrideLocal(false)
+	end
 	setIceTracerJumpLocked(false)
 
 	if stopAnimation == nil then
@@ -1959,6 +1972,7 @@ local function executeIceTracer()
 	linearVelocity.VectorVelocity = Vector3.new(slideDirection.X * slideSpeed, 0, slideDirection.Z * slideSpeed)
 	linearVelocity.Parent = rootPart
 	activeIceTracerLinearVelocity = linearVelocity
+	setMobilityVelocityOverrideLocal(true)
 
 	isDashing = true
 	setIceTracerFacingLocked(true, slideDirection)
@@ -2080,6 +2094,7 @@ local function executeIceTracer()
 			end
 			activeIceTracerLinearVelocity = nil
 			isDashing = false
+			setMobilityVelocityOverrideLocal(false)
 			clearIceTracerVisuals()
 			return
 		end
@@ -2153,12 +2168,12 @@ local function executeIceTracer()
 				linearVelocity:Destroy()
 			end
 			activeIceTracerLinearVelocity = nil
-			rootPart.AssemblyLinearVelocity = Vector3.new(0, rootPart.AssemblyLinearVelocity.Y, 0)
 			if activeIceTracerConnection then
 				activeIceTracerConnection:Disconnect()
 				activeIceTracerConnection = nil
 			end
 			isDashing = false
+			setMobilityVelocityOverrideLocal(false)
 			clearIceTracerVisuals(false)
 		end
 	end)
@@ -2262,6 +2277,7 @@ local function executeDash()
 	linearVelocity.Parent = rootPart
 	
 	isDashing = true
+	setMobilityVelocityOverrideLocal(true)
 	local dashStartTime = tick()
 	local dashTotalPausedTime = 0
 	local dashLastPauseCheckTime = tick()
@@ -2499,6 +2515,7 @@ local function executeDash()
 			end
 			cleanupShieldBash()
 			isDashing = false
+			setMobilityVelocityOverrideLocal(false)
 			return
 		end
 		
@@ -2529,6 +2546,7 @@ local function executeDash()
 			end
 			cleanupShieldBash()
 			isDashing = false
+			setMobilityVelocityOverrideLocal(false)
 			return
 		end
 		
@@ -2570,6 +2588,7 @@ local function executeDash()
 				end
 				cleanupShieldBash()
 				isDashing = false
+				setMobilityVelocityOverrideLocal(false)
 				return
 			end
 			
@@ -2733,6 +2752,7 @@ local function cleanupBlink()
 	end
 	clearBlinkTransparency()
 	isBlinking = false
+	setMobilityVelocityOverrideLocal(false)
 end
 
 local function executeBlink()
@@ -2786,6 +2806,7 @@ local function executeBlink()
 	end
 
 	isBlinking = true
+	setMobilityVelocityOverrideLocal(true)
 	blinkToken += 1
 	local token = blinkToken
 	local windupStart = tick()
@@ -2914,6 +2935,7 @@ local function executeManaGrapple()
 	MobilityActivateRemote:FireServer("ManaGrapple")
 
 	isGrappling = true
+	setMobilityVelocityOverrideLocal(true)
 	grappleHoldActive = true
 	grappleToken += 1
 	local token = grappleToken
@@ -2957,6 +2979,7 @@ local function executeManaGrapple()
 		if token ~= grappleToken then
 			clearGrappleVfx()
 			isGrappling = false
+			setMobilityVelocityOverrideLocal(false)
 			if activeGrappleConnection then
 				activeGrappleConnection:Disconnect()
 				activeGrappleConnection = nil
@@ -2966,6 +2989,7 @@ local function executeManaGrapple()
 		if not character or not character.Parent or not humanoid or humanoid.Health <= 0 then
 			clearGrappleVfx()
 			isGrappling = false
+			setMobilityVelocityOverrideLocal(false)
 			if activeGrappleConnection then
 				activeGrappleConnection:Disconnect()
 				activeGrappleConnection = nil
@@ -3064,6 +3088,7 @@ local function executeManaGrapple()
 		if not grappleHoldActive or progress >= 1 then
 			clearGrappleVfx()
 			isGrappling = false
+			setMobilityVelocityOverrideLocal(false)
 			if activeGrappleConnection then
 				activeGrappleConnection:Disconnect()
 				activeGrappleConnection = nil
@@ -3146,6 +3171,7 @@ player.CharacterAdded:Connect(function(newCharacter)
 	blinkToken += 1
 	grappleToken += 1
 	isGrappling = false
+	setMobilityVelocityOverrideLocal(false)
 	grappleHoldActive = false
 	setUtilityCastActive(false)
 	
@@ -3206,6 +3232,7 @@ local function setupPauseListeners()
 			activeIceTracerConnection = nil
 			isDashing = false
 			clearIceTracerVisuals()
+			setMobilityVelocityOverrideLocal(false)
 		end
 		setUtilityCastActive(false)
 		
@@ -3271,6 +3298,14 @@ local function setupPauseListeners()
 		end
 	end)
 end
+
+player.CharacterRemoving:Connect(function(removingCharacter)
+	if removingCharacter ~= character then
+		return
+	end
+	setMobilityVelocityOverrideLocal(false)
+	setUtilityCastActive(false)
+end)
 
 -- Initialize
 initRemotes()

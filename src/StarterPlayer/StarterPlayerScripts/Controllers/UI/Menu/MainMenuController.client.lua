@@ -7,6 +7,21 @@ local TeleportService = game:GetService("TeleportService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+local playerScripts = player:FindFirstChild("PlayerScripts")
+if not playerScripts then
+	playerScripts = player:WaitForChild("PlayerScripts", 10)
+end
+local scriptsContainer = playerScripts or script:FindFirstAncestor("StarterPlayerScripts")
+if not scriptsContainer then
+	warn("[MainMenu] Could not locate StarterPlayerScripts ancestor")
+	return
+end
+local localSharedFolder = scriptsContainer:WaitForChild("_Shared", 10)
+if not localSharedFolder then
+	warn("[MainMenu] Could not locate _Shared folder")
+	return
+end
+local TimeFormat = require(localSharedFolder:WaitForChild("TimeFormat"))
 
 -- Wait for remotes
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
@@ -135,9 +150,7 @@ local function hideMenu()
 end
 
 local function formatTime(seconds: number): string
-	local minutes = math.floor(seconds / 60)
-	local secs = math.floor(seconds % 60)
-	return string.format("%02d:%02d", minutes, secs)
+	return TimeFormat.formatMMSS(seconds)
 end
 
 -- Cache for friends data to prevent empty list flicker

@@ -16,6 +16,22 @@ local primaryFireRequestRemote = weaponRemotesFolder:WaitForChild("PrimaryFireRe
 local primaryShotRemote = weaponRemotesFolder:WaitForChild("PrimaryShot")
 local secondaryFireRequestRemote = weaponRemotesFolder:WaitForChild("SecondaryFireRequest")
 local secondaryShotRemote = weaponRemotesFolder:WaitForChild("SecondaryShot")
+local playerScripts = localPlayer:FindFirstChild("PlayerScripts")
+if not playerScripts then
+	playerScripts = localPlayer:WaitForChild("PlayerScripts", 10)
+end
+local scriptsContainer = playerScripts or script:FindFirstAncestor("StarterPlayerScripts")
+if not scriptsContainer then
+	warn("[WeaponInputController] Could not locate StarterPlayerScripts ancestor")
+	return
+end
+local localSharedFolder = scriptsContainer:WaitForChild("_Shared", 10)
+if not localSharedFolder then
+	warn("[WeaponInputController] Could not locate _Shared folder")
+	return
+end
+local LocalEventRegistry = require(localSharedFolder:WaitForChild("LocalEventRegistry"))
+local InstancePath = require(localSharedFolder:WaitForChild("InstancePath"))
 
 local WEAPON_ID = "Oathkeeper"
 local DEFAULT_COOLDOWN = 1.2
@@ -55,43 +71,12 @@ local shotRayParams = RaycastParams.new()
 shotRayParams.FilterType = Enum.RaycastFilterType.Exclude
 shotRayParams.IgnoreWater = true
 
-local function getOrCreateLocalEvent(name: string): BindableEvent
-	local existing = weaponRemotesFolder:FindFirstChild(name)
-	if existing and existing:IsA("BindableEvent") then
-		return existing
-	end
-	local created = Instance.new("BindableEvent")
-	created.Name = name
-	created.Parent = weaponRemotesFolder
-
-	local resolved = weaponRemotesFolder:FindFirstChild(name)
-	if resolved and resolved:IsA("BindableEvent") then
-		if resolved ~= created then
-			created:Destroy()
-		end
-		return resolved
-	end
-	return created
-end
-
-local primaryShotLocalEvent = getOrCreateLocalEvent("PrimaryShotLocal")
-local secondaryShotLocalEvent = getOrCreateLocalEvent("SecondaryShotLocal")
-local weaponSharedLockoutLocalEvent = getOrCreateLocalEvent("WeaponSharedLockoutLocal")
-
-local function findByPath(root: Instance, path: string): Instance?
-	local current: Instance = root
-	for _, part in ipairs(string.split(path, ".")) do
-		local child = current:FindFirstChild(part)
-		if not child then
-			return nil
-		end
-		current = child
-	end
-	return current
-end
+local primaryShotLocalEvent = LocalEventRegistry.getOrCreate(weaponRemotesFolder, "PrimaryShotLocal")
+local secondaryShotLocalEvent = LocalEventRegistry.getOrCreate(weaponRemotesFolder, "SecondaryShotLocal")
+local weaponSharedLockoutLocalEvent = LocalEventRegistry.getOrCreate(weaponRemotesFolder, "WeaponSharedLockoutLocal")
 
 local function resolveMuzzleOrigin(character: Model): Vector3?
-	local muzzle = findByPath(character, WEAPON_MUZZLE_PATH)
+	local muzzle = InstancePath.findByPath(character, WEAPON_MUZZLE_PATH)
 	if not muzzle then
 		return nil
 	end

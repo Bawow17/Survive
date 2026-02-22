@@ -19,6 +19,23 @@ local requestInitialSync = ecsRemotes:WaitForChild("RequestInitialSync")
 local abilityCastRemote = remotesFolder:WaitForChild("AbilityCast")
 local weaponRemotesFolder = remotesFolder:WaitForChild("Weapons")
 
+local playerScripts = localPlayer:FindFirstChild("PlayerScripts")
+if not playerScripts then
+	playerScripts = localPlayer:WaitForChild("PlayerScripts", 10)
+end
+local scriptsContainer = playerScripts or script:FindFirstAncestor("StarterPlayerScripts")
+if not scriptsContainer then
+	warn("[AbilitySlotHUDController] Could not locate StarterPlayerScripts ancestor")
+	return
+end
+local localSharedFolder = scriptsContainer:WaitForChild("_Shared", 10)
+if not localSharedFolder then
+	warn("[AbilitySlotHUDController] Could not locate _Shared folder")
+	return
+end
+local LocalEventRegistry = require(localSharedFolder:WaitForChild("LocalEventRegistry"))
+local MainHUDLocator = require(localSharedFolder:WaitForChild("MainHUDLocator"))
+
 local gamePaused = remotesFolder:WaitForChild("GamePaused")
 local gameUnpaused = remotesFolder:WaitForChild("GameUnpaused")
 
@@ -73,26 +90,7 @@ local function warnOnce(key: string, message: string)
 	warn(message)
 end
 
-local function getOrCreateLocalEvent(name: string): BindableEvent
-	local existing = weaponRemotesFolder:FindFirstChild(name)
-	if existing and existing:IsA("BindableEvent") then
-		return existing
-	end
-	local created = Instance.new("BindableEvent")
-	created.Name = name
-	created.Parent = weaponRemotesFolder
-
-	local resolved = weaponRemotesFolder:FindFirstChild(name)
-	if resolved and resolved:IsA("BindableEvent") then
-		if resolved ~= created then
-			created:Destroy()
-		end
-		return resolved
-	end
-	return created
-end
-
-local weaponSharedLockoutLocalEvent = getOrCreateLocalEvent("WeaponSharedLockoutLocal")
+local weaponSharedLockoutLocalEvent = LocalEventRegistry.getOrCreate(weaponRemotesFolder, "WeaponSharedLockoutLocal")
 
 local function debugLog(message: string)
 	if not DEBUG_COOLDOWN_HUD then
@@ -101,20 +99,7 @@ local function debugLog(message: string)
 	print("[AbilitySlotHUDController] " .. message)
 end
 
-local function waitForMainHUD(): Instance
-	while true do
-		local hud = playerGui:FindFirstChild("MainHUD")
-		if hud and (hud:IsA("ScreenGui") or hud:IsA("Frame")) then
-			return hud
-		end
-		local added = playerGui.ChildAdded:Wait()
-		if added.Name == "MainHUD" and (added:IsA("ScreenGui") or added:IsA("Frame")) then
-			return added
-		end
-	end
-end
-
-local mainHUD: Instance = waitForMainHUD()
+local mainHUD: Instance = MainHUDLocator.waitForMainHUD(playerGui)
 
 local sharedComponents: {[string]: {[number]: any}} = {
 	EntityType = {},
@@ -370,7 +355,7 @@ end
 
 local function resolveUIReferences()
 	if not mainHUD.Parent then
-		mainHUD = waitForMainHUD()
+		mainHUD = MainHUDLocator.waitForMainHUD(playerGui)
 	end
 
 	local bottomBarFrame = mainHUD:FindFirstChild("BottomBarFrame")

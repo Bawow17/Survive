@@ -20,6 +20,11 @@ local ATTR_REDUCE_FLASH = "Setting_accessibility_reduceFlash"
 local ATTR_REDUCE_MOTION = "Setting_accessibility_reduceMotion"
 local ATTR_TOGGLE_SPRINT_MODE = "Setting_controls_toggleSprintMode"
 local ATTR_SETTINGS_OPEN = "UI_SettingsOpen"
+local ATTR_CAMERA_FOV = "Setting_graphics_cameraFov"
+
+local CAMERA_FOV_MIN = 60
+local CAMERA_FOV_MAX = 100
+local CAMERA_FOV_DEFAULT = 70
 
 local function ensureOpenSignal(): BindableEvent
 	local existing = ReplicatedStorage:FindFirstChild("OpenSettingsPanel")
@@ -120,6 +125,14 @@ local function formatNumber(value: number): string
 	return string.format("%.2f", value)
 end
 
+local function applyCameraFov(value: number)
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+	camera.FieldOfView = math.clamp(value, CAMERA_FOV_MIN, CAMERA_FOV_MAX)
+end
+
 local function toComponentBaseName(labelText: string): string
 	local cleaned = string.gsub(labelText, "[^%w]+", " ")
 	local parts = {}
@@ -146,9 +159,11 @@ local function applyToAttributes(settings: SettingsV1)
 	player:SetAttribute(ATTR_PROJECTILE_OPACITY_SELF, settings.graphics.projectileOpacitySelf)
 	player:SetAttribute(ATTR_PROJECTILE_OPACITY_OTHERS, settings.graphics.projectileOpacityOthers)
 	player:SetAttribute(ATTR_OTHER_PLAYER_VFX_OPACITY, settings.graphics.otherPlayerVfxOpacity)
+	player:SetAttribute(ATTR_CAMERA_FOV, settings.graphics.cameraFov)
 	player:SetAttribute(ATTR_REDUCE_FLASH, settings.accessibility.reduceFlash)
 	player:SetAttribute(ATTR_REDUCE_MOTION, false)
 	player:SetAttribute(ATTR_TOGGLE_SPRINT_MODE, settings.controls.toggleSprintMode)
+	applyCameraFov(settings.graphics.cameraFov)
 end
 
 local function refreshAllRows()
@@ -176,7 +191,7 @@ local function pushDebounced()
 	end)
 end
 
-local function findSettingRow(componentBaseName: string, labelText: string?): Frame?
+local function findSettingRow(componentBaseName: string, labelText: string?, suppressWarning: boolean?): Frame?
 	if not content then
 		return nil
 	end
@@ -197,7 +212,40 @@ local function findSettingRow(componentBaseName: string, labelText: string?): Fr
 		end
 	end
 
-	warn(string.format("[SettingsController] Missing row: %sFrame", componentBaseName))
+	if suppressWarning ~= true then
+		warn(string.format("[SettingsController] Missing row: %sFrame", componentBaseName))
+	end
+	return nil
+end
+
+local function getNextLayoutOrder(): number
+	if not content then
+		return 1
+	end
+	local maxLayoutOrder = 0
+	for _, child in ipairs(content:GetChildren()) do
+		if child:IsA("GuiObject") then
+			maxLayoutOrder = math.max(maxLayoutOrder, child.LayoutOrder)
+		end
+	end
+	return maxLayoutOrder + 1
+end
+
+local function cloneTemplateSettingRow(componentBaseName: string): Frame?
+	if not content then
+		return nil
+	end
+
+	for _, child in ipairs(content:GetChildren()) do
+		if child:IsA("Frame") and child:FindFirstChild("DescriptionLabel") and child:FindFirstChild("ValueLabel") then
+			local cloned = child:Clone()
+			cloned.Name = componentBaseName .. "Frame"
+			cloned.LayoutOrder = getNextLayoutOrder()
+			cloned.Parent = content
+			return cloned
+		end
+	end
+
 	return nil
 end
 
@@ -247,6 +295,122 @@ local function addSliderRow(
 			pushDebounced()
 		end)
 	end
+
+	table.insert(refreshRows, refresh)
+	refresh()
+end
+
+local function addNumberInputRow(
+	labelText: string,
+	minimum: number,
+	maximum: number,
+	getter: () -> number,
+	setter: (number) -> ()
+)
+	local componentBaseName = toComponentBaseName(labelText)
+	local row = findSettingRow(componentBaseName, labelText, true)
+	if not row then
+		row = cloneTemplateSettingRow(componentBaseName)
+	end
+	if not row then
+		warn(string.format("[SettingsController] Missing or failed to create row: %sFrame", componentBaseName))
+		return
+	end
+
+	local description = row:FindFirstChild("DescriptionLabel")
+	if description and description:IsA("TextLabel") then
+		description.Text = string.format("%s (%d-%d)", labelText, minimum, maximum)
+	end
+
+	local decreaseButton = row:FindFirstChild("DecreaseButton")
+	if decreaseButton and decreaseButton:IsA("GuiObject") then
+		decreaseButton.Visible = false
+		if decreaseButton:IsA("GuiButton") then
+			decreaseButton.Active = false
+			decreaseButton.AutoButtonColor = false
+		end
+	end
+
+	local increaseButton = row:FindFirstChild("IncreaseButton")
+	if increaseButton and increaseButton:IsA("GuiObject") then
+		increaseButton.Visible = false
+		if increaseButton:IsA("GuiButton") then
+			increaseButton.Active = false
+			increaseButton.AutoButtonColor = false
+		end
+	end
+
+	local valueLabel = row:FindFirstChild("ValueLabel")
+	local input = row:FindFirstChild("ValueInput")
+	if input and not input:IsA("TextBox") then
+		input:Destroy()
+		input = nil
+	end
+
+	local valueInput = if input and input:IsA("TextBox") then (input :: TextBox) else nil
+	if not valueInput then
+		local created = Instance.new("TextBox")
+		created.Name = "ValueInput"
+		created.ClearTextOnFocus = false
+		created.TextEditable = true
+		created.PlaceholderText = string.format("%d-%d", minimum, maximum)
+		created.TextXAlignment = Enum.TextXAlignment.Center
+		created.TextYAlignment = Enum.TextYAlignment.Center
+
+		if valueLabel and valueLabel:IsA("TextLabel") then
+			local valueTextLabel = valueLabel :: TextLabel
+			created.Size = valueTextLabel.Size
+			created.Position = valueTextLabel.Position
+			created.AnchorPoint = valueTextLabel.AnchorPoint
+			created.BackgroundColor3 = valueTextLabel.BackgroundColor3
+			created.BackgroundTransparency = valueTextLabel.BackgroundTransparency
+			created.BorderColor3 = valueTextLabel.BorderColor3
+			created.BorderSizePixel = valueTextLabel.BorderSizePixel
+			created.Font = valueTextLabel.Font
+			created.TextSize = valueTextLabel.TextSize
+			created.TextColor3 = valueTextLabel.TextColor3
+			created.TextStrokeColor3 = valueTextLabel.TextStrokeColor3
+			created.TextStrokeTransparency = valueTextLabel.TextStrokeTransparency
+			created.TextScaled = valueTextLabel.TextScaled
+			valueTextLabel.Visible = false
+		else
+			created.Size = UDim2.new(0.30, 0, 0.72, 0)
+			created.Position = UDim2.new(0.66, 0, 0.14, 0)
+			created.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+			created.BackgroundTransparency = 0
+			created.BorderSizePixel = 0
+			created.Font = Enum.Font.GothamMedium
+			created.TextSize = 14
+			created.TextColor3 = Color3.fromRGB(235, 235, 235)
+		end
+
+		created.Parent = row
+		valueInput = created
+	end
+
+	local function refresh()
+		local clampedValue = math.clamp(math.round(getter()), minimum, maximum)
+		valueInput.Text = tostring(clampedValue)
+	end
+
+	local function commitInput()
+		local previousValue = math.clamp(math.round(getter()), minimum, maximum)
+		local parsedValue = tonumber(valueInput.Text)
+		if not parsedValue then
+			refresh()
+			return
+		end
+		local nextValue = math.clamp(math.round(parsedValue), minimum, maximum)
+		if nextValue ~= previousValue then
+			setter(nextValue)
+			pushDebounced()
+		end
+		refresh()
+	end
+
+	valueInput.FocusLost:Connect(function()
+		commitInput()
+	end)
 
 	table.insert(refreshRows, refresh)
 	refresh()
@@ -328,6 +492,13 @@ end, function(value: number)
 	applyToAttributes(currentSettings)
 end)
 
+addNumberInputRow("Field Of View", CAMERA_FOV_MIN, CAMERA_FOV_MAX, function()
+	return currentSettings.graphics.cameraFov
+end, function(value: number)
+	currentSettings.graphics.cameraFov = value
+	applyToAttributes(currentSettings)
+end)
+
 addToggleRow("Reduce Flash Effects", function()
 	return currentSettings.accessibility.reduceFlash
 end, function(value: boolean)
@@ -386,6 +557,10 @@ task.spawn(function()
 	else
 		setSettingsFromSource(PlayerSettingsSchema.createDefault())
 	end
+end)
+
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+	applyCameraFov(currentSettings.graphics.cameraFov or CAMERA_FOV_DEFAULT)
 end)
 
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)

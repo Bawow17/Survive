@@ -5,6 +5,7 @@ local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
+local Workspace = game:GetService("Workspace")
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -210,6 +211,61 @@ local function ensureFolder(parent: Instance, name: string): Folder
 	return folder
 end
 
+local function disableFluidForcesOnPart(part: BasePart)
+	pcall(function()
+		(part :: any).EnableFluidForces = false
+	end)
+end
+
+local function disableCharacterFluidForces(character: Model)
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			disableFluidForcesOnPart(descendant)
+		end
+	end
+
+	character.DescendantAdded:Connect(function(descendant: Instance)
+		if descendant:IsA("BasePart") then
+			disableFluidForcesOnPart(descendant)
+		end
+	end)
+end
+
+local warnedWorkspaceFluidForcesRuntimeConfig = false
+
+local function disableWorkspaceFluidForces()
+	local enumSuccess, fluidForcesEnum = pcall(function()
+		return Enum.FluidForces
+	end)
+	if not enumSuccess or not fluidForcesEnum then
+		return
+	end
+
+	local targetValue = fluidForcesEnum.Default or fluidForcesEnum.Disabled
+	if not targetValue then
+		for _, enumItem in ipairs(fluidForcesEnum:GetEnumItems()) do
+			local enumName = string.lower(enumItem.Name)
+			if enumName == "default" or enumName == "disabled" then
+				targetValue = enumItem
+				break
+			end
+		end
+	end
+
+	if targetValue then
+		local writeSuccess, writeError = pcall(function()
+			(Workspace :: any).FluidForces = targetValue
+		end)
+		if not writeSuccess and not warnedWorkspaceFluidForcesRuntimeConfig then
+			warnedWorkspaceFluidForcesRuntimeConfig = true
+			warn(string.format(
+				"[Bootstrap] Workspace.FluidForces cannot be configured at runtime in this environment; configure it in Studio/engine settings instead. Details: %s",
+				tostring(writeError)
+			))
+		end
+	end
+end
+
 local function findByPath(root: Instance, path: string): Instance?
 	local current: Instance = root
 	for _, part in ipairs(string.split(path, ".")) do
@@ -413,6 +469,8 @@ local function markNewEntity(entity: number)
 end
 
 function ECSWorldService.Initialize()
+	disableWorkspaceFluidForces()
+
 	-- Create commonly-used remotes before heavy startup work so clients do not
 	-- stall waiting for events during initial join.
 	local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
@@ -1824,6 +1882,8 @@ Players.PlayerAdded:Connect(function(player)
 	GameStateManager.onPlayerJoin(player)
 	
 	local function onCharacterAdded(character: Model)
+		disableCharacterFluidForces(character)
+
 		-- Spawn player at lobby position (GameStateManager will teleport to game when they press Play)
 		local humanoidRootPart = character:WaitForChild("HumanoidRootPart", 5)
 		if humanoidRootPart then

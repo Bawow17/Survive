@@ -9,6 +9,21 @@ local Lighting = game:GetService("Lighting")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local camera = workspace.CurrentCamera
+local playerScripts = player:FindFirstChild("PlayerScripts")
+if not playerScripts then
+	playerScripts = player:WaitForChild("PlayerScripts", 10)
+end
+local scriptsContainer = playerScripts or script:FindFirstAncestor("StarterPlayerScripts")
+if not scriptsContainer then
+	warn("[WipeScreen] Could not locate StarterPlayerScripts ancestor")
+	return
+end
+local localSharedFolder = scriptsContainer:WaitForChild("_Shared", 10)
+if not localSharedFolder then
+	warn("[WipeScreen] Could not locate _Shared folder")
+	return
+end
+local TimeFormat = require(localSharedFolder:WaitForChild("TimeFormat"))
 
 -- Wait for remotes
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
@@ -80,24 +95,11 @@ local MENU_CAMERA_CFRAME = CFrame.new(
 
 -- Format time as MM:SS
 local function formatTime(seconds: number): string
-	local minutes = math.floor(seconds / 60)
-	local secs = math.floor(seconds % 60)
-	return string.format("%02d:%02d", minutes, secs)
+	return TimeFormat.formatMMSS(seconds)
 end
 
 local function formatIntWithCommas(value: number): string
-	local rounded = math.floor(value + 0.0001)
-	local sign = ""
-	if rounded < 0 then
-		sign = "-"
-		rounded = -rounded
-	end
-	local text = tostring(rounded)
-	local withCommas = text:reverse():gsub("(%d%d%d)", "%1,"):reverse()
-	if withCommas:sub(1, 1) == "," then
-		withCommas = withCommas:sub(2)
-	end
-	return sign .. withCommas
+	return TimeFormat.formatIntWithCommas(value)
 end
 
 -- Populate scoreboard with player stats

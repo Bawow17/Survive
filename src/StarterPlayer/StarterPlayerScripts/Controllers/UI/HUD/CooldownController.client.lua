@@ -8,24 +8,26 @@ local RunService = game:GetService("RunService")
 
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
+local playerScripts = localPlayer:FindFirstChild("PlayerScripts")
+if not playerScripts then
+	playerScripts = localPlayer:WaitForChild("PlayerScripts", 10)
+end
+local scriptsContainer = playerScripts or script:FindFirstAncestor("StarterPlayerScripts")
+if not scriptsContainer then
+	warn("[CooldownController] Could not locate StarterPlayerScripts ancestor")
+	return
+end
+local localSharedFolder = scriptsContainer:WaitForChild("_Shared", 10)
+if not localSharedFolder then
+	warn("[CooldownController] Could not locate _Shared folder")
+	return
+end
+local MainHUDLocator = require(localSharedFolder:WaitForChild("MainHUDLocator"))
 
 -- Track pause state
 local isPaused = false
 
-local function waitForMainHUD(): Instance
-	while true do
-		local hud = playerGui:FindFirstChild("MainHUD")
-		if hud and (hud:IsA("ScreenGui") or hud:IsA("Frame")) then
-			return hud
-		end
-		local guiAdded = playerGui.ChildAdded:Wait()
-		if guiAdded.Name == "MainHUD" and (guiAdded:IsA("ScreenGui") or guiAdded:IsA("Frame")) then
-			return guiAdded
-		end
-	end
-end
-
-local mainHUD = waitForMainHUD()
+local mainHUD = MainHUDLocator.waitForMainHUD(playerGui)
 
 -- Find existing CooldownTracker container
 local container = mainHUD:WaitForChild("CooldownTracker") :: Frame

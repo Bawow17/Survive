@@ -7,7 +7,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local localPlayer = Players.LocalPlayer
-local character = script.Parent
+local character = script:FindFirstAncestorWhichIsA("Model")
 
 if not character:IsA("Model") then
 	return
