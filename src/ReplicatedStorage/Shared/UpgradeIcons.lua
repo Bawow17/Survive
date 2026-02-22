@@ -20,12 +20,14 @@ local UpgradeIcons = {
 	-- Ability upgrades (fill in as you add icons)
 	MagicBolt = "137338447639770",
 	FireBall = "129036102914829",
+	IceShardSpecial = "101138111348070",
 	IceShard = "101138111348070",
 	Refractions = "87778366744205",
 
 	-- Ability unlocks (optional, separate from ability upgrade icons)
 	["unlock:MagicBolt"] = "137338447639770",
 	["unlock:FireBall"] = "129036102914829",
+	["unlock:IceShardSpecial"] = "101138111348070",
 	["unlock:IceShard"] = "101138111348070",
 	["unlock:Refractions"] = "87778366744205",
 

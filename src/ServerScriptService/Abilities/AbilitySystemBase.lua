@@ -459,6 +459,32 @@ local function findModelByPath(modelPath: string): Model?
 	return nil
 end
 
+local function replicateAbilityModelFromPath(abilityId: string, modelPath: any): boolean
+	if typeof(modelPath) ~= "string" or modelPath == "" then
+		return ModelReplicationService.replicateAbility(abilityId)
+	end
+
+	local serverPath = nil
+	if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
+		serverPath = modelPath:sub(#"ReplicatedStorage." + 1)
+	elseif modelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
+		serverPath = modelPath:sub(#"ServerStorage." + 1)
+	end
+
+	if serverPath then
+		local serverParts = string.split(serverPath, ".")
+		if #serverParts > 1 then
+			local replicatedPath = table.concat(serverParts, ".", 1, #serverParts - 1)
+			local success = ModelReplicationService.replicateModel(serverPath, replicatedPath)
+			if success then
+				return true
+			end
+		end
+	end
+
+	return ModelReplicationService.replicateAbility(abilityId)
+end
+
 -- Get the center position of an enemy for targeting
 function AbilitySystemBase.getEnemyCenterPosition(enemyEntity: number): Vector3?
 	if not world or not Components then
@@ -656,7 +682,7 @@ function AbilitySystemBase.createProjectile(
 	
 	-- Ensure model is replicated before creating projectile
 	if balance.modelPath then
-		ModelReplicationService.replicateAbility(abilityId)
+		replicateAbilityModelFromPath(abilityId, balance.modelPath)
 	end
 
 	-- Update collision radius based on actual hitbox size from model

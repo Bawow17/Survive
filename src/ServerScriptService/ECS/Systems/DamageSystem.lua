@@ -29,6 +29,7 @@ local PassiveEffects: any
 local EnemyAggro: any
 local AttackCooldown: any
 local EnemyTier: any
+local EnemyFrostbite: any
 
 local RNG = Random.new()
 
@@ -138,6 +139,7 @@ function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	EnemyAggro = Components.EnemyAggro
 	AttackCooldown = Components.AttackCooldown
 	EnemyTier = Components.EnemyTier
+	EnemyFrostbite = Components.EnemyFrostbite
 
 	local remotesFolder = ReplicatedStorage:FindFirstChild("RemoteEvents")
 	if not remotesFolder then
@@ -314,6 +316,32 @@ local function updateEnemyAggro(enemyEntity: number, sourceEntity: number, appli
 	DirtyService.mark(enemyEntity, "EnemyAggro")
 end
 
+local function getEnemyFrostbiteMultiplier(enemyEntity: number, now: number): number
+	if not EnemyFrostbite then
+		return 1
+	end
+
+	local frostbite = world:get(enemyEntity, EnemyFrostbite)
+	if not frostbite then
+		return 1
+	end
+
+	local endTime = frostbite.endTime or 0
+	if endTime <= now then
+		world:remove(enemyEntity, EnemyFrostbite)
+		DirtyService.mark(enemyEntity, "EnemyFrostbite")
+		return 1
+	end
+
+	local stacks = math.max(math.floor((frostbite.stacks or 0) + 0.0001), 0)
+	local damageTakenPerStack = math.max(frostbite.damageTakenPerStack or 0, 0)
+	if stacks <= 0 or damageTakenPerStack <= 0 then
+		return 1
+	end
+
+	return 1 + (stacks * damageTakenPerStack)
+end
+
 -- Apply damage to an entity with all feedback effects
 -- sourceEntity: optional player entity that dealt the damage (for ability tracking)
 -- abilityId: optional ability identifier (for damage stat tracking)
@@ -392,6 +420,10 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 				critAccumulators[sourceEntity] = acc
 			end
 		end
+	end
+
+	if isEnemy and sourceEntity and isPlayerSourceEntity(sourceEntity) then
+		damageAmount = damageAmount * getEnemyFrostbiteMultiplier(targetEntity, tick())
 	end
 	
 	-- CRITICAL: Check if player is Shield Bashing - absorb ALL damage and prevent death
@@ -821,6 +853,56 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	end
 	
 	return died, applied
+end
+
+function DamageSystem.applyEnemyFrostbite(
+	enemyEntity: number,
+	stacksToAdd: number,
+	duration: number,
+	damageTakenPerStack: number,
+	statusId: string?
+): boolean
+	if not world or not enemyEntity or not EnemyFrostbite then
+		return false
+	end
+
+	local entityType = world:get(enemyEntity, EntityType)
+	if not entityType or entityType.type ~= "Enemy" then
+		return false
+	end
+
+	local addStacks = math.max(math.floor((stacksToAdd or 0) + 0.0001), 0)
+	local applyDuration = math.max(duration or 0, 0)
+	local perStack = math.max(damageTakenPerStack or 0, 0)
+	if addStacks <= 0 or applyDuration <= 0 or perStack <= 0 then
+		return false
+	end
+
+	local now = tick()
+	local existing = world:get(enemyEntity, EnemyFrostbite)
+	local existingStacks = 0
+	local existingActive = false
+	if existing and typeof(existing) == "table" then
+		existingActive = (existing.endTime or 0) > now
+		if existingActive then
+			existingStacks = math.max(math.floor((existing.stacks or 0) + 0.0001), 0)
+		end
+	end
+
+	local nextStacks = existingStacks + addStacks
+	if nextStacks <= 0 then
+		return false
+	end
+
+	DirtyService.setIfChanged(world, enemyEntity, EnemyFrostbite, {
+		statusId = statusId or (existing and existing.statusId) or "Frostbite",
+		stacks = nextStacks,
+		damageTakenPerStack = perStack,
+		startTime = existingActive and (existing and existing.startTime or now) or now,
+		endTime = now + applyDuration,
+	}, "EnemyFrostbite")
+
+	return true
 end
 
 function DamageSystem.getStats()

@@ -23,12 +23,43 @@ local function profGauge(name: string, value: number)
 	end
 end
 
+local ModelReplicationService: any
+
+local function replicateAbilityModelForPlayer(ability: any)
+	if not ability then
+		return
+	end
+
+	local modelPath = ability.balance and ability.balance.modelPath or nil
+	if typeof(modelPath) == "string" and modelPath ~= "" then
+		local serverPath: string? = nil
+		if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
+			serverPath = modelPath:sub(#"ReplicatedStorage." + 1)
+		elseif modelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
+			serverPath = modelPath:sub(#"ServerStorage." + 1)
+		end
+
+		if serverPath then
+			local parts = string.split(serverPath, ".")
+			if #parts > 1 then
+				local replicatedPath = table.concat(parts, ".", 1, #parts - 1)
+				local success = ModelReplicationService.replicateModel(serverPath, replicatedPath)
+				if success then
+					return
+				end
+			end
+		end
+	end
+
+	ModelReplicationService.replicateAbility(ability.id)
+end
+
 local ECS = require(game.ServerScriptService.ECS.ECSFacade)
 local DirtyService = require(game.ServerScriptService.ECS.DirtyService)
 local ProjectilePool = require(game.ServerScriptService.ECS.ProjectilePool)
 local ExpOrbPool = require(game.ServerScriptService.ECS.ExpOrbPool)
 local EnemyPool = require(game.ServerScriptService.ECS.EnemyPool)
-local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
+ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
 local EnemyColliderOverlayService = require(game.ServerScriptService.Services.EnemyColliderOverlayService)
 local MovementSystem = require(game.ServerScriptService.ECS.Systems.MovementSystem)
@@ -1159,7 +1190,7 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 			for abilityId, ability in pairs(AbilityRegistry.getAll()) do
 				if ability.balance.StartWith then
 					-- Replicate ability model to client on-demand
-					ModelReplicationService.replicateAbility(ability.id)
+					replicateAbilityModelForPlayer(ability)
 					
 					-- Add to abilities table
 					abilities[ability.id] = {
@@ -1317,7 +1348,7 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 	for abilityId, ability in pairs(AbilityRegistry.getAll()) do
 		if ability.balance.StartWith then
 			-- Replicate ability model to client on-demand
-			ModelReplicationService.replicateAbility(ability.id)
+			replicateAbilityModelForPlayer(ability)
 			
 			-- Add to abilities table
 			abilities[ability.id] = {

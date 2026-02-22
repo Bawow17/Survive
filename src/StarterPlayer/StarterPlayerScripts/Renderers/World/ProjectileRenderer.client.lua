@@ -116,6 +116,7 @@ type ProjectileRecord = {
 	lastHomingUpdate: number?,
 	lastOwnerPos: Vector3?,
 	stickOffset: Vector3?,
+	isSplitChild: boolean?,
 	model: Model?,
 	parts: {BasePart}?,
 	primary: BasePart?,
@@ -811,6 +812,51 @@ local function getOwnerRootPart(userId: number?): BasePart?
 	return nil
 end
 
+local function getOwnerLeftArmGripAttachment(userId: number?): Attachment?
+	if not userId then
+		return nil
+	end
+	local owner = Players:GetPlayerByUserId(userId)
+	if not owner then
+		return nil
+	end
+	local character = owner.Character
+	if not character then
+		return nil
+	end
+
+	local exact = character:FindFirstChild("LeftArmGripAttachment", true)
+	if exact and exact:IsA("Attachment") then
+		return exact
+	end
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("Attachment") then
+			local lowered = string.lower(descendant.Name)
+			if string.find(lowered, "left", 1, true) and string.find(lowered, "grip", 1, true) then
+				return descendant
+			end
+		end
+	end
+	return nil
+end
+
+local function resolveInitialVisualSpawnPosition(kind: string, ownerUserId: number?, isSplitChild: boolean, fallback: Vector3): Vector3
+	if kind ~= "IceShardSpecial" then
+		return fallback
+	end
+	if isSplitChild then
+		return fallback
+	end
+	if ownerUserId ~= player.UserId then
+		return fallback
+	end
+	local leftGripAttachment = getOwnerLeftArmGripAttachment(ownerUserId)
+	if leftGripAttachment then
+		return leftGripAttachment.WorldPosition
+	end
+	return fallback
+end
+
 local function findNearestEnemy(position: Vector3, radius: number): Vector3?
 	local closest: Vector3? = nil
 	local radiusSq = radius * radius
@@ -1094,27 +1140,31 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 		local speed = typeof(data.speed) == "number" and data.speed or 0
 		local spawnTime = typeof(data.spawnTime) == "number" and data.spawnTime or now
 		local lifetime = typeof(data.lifetime) == "number" and data.lifetime or nil
+		local ownerUserId = typeof(data.ownerUserId) == "number" and data.ownerUserId or nil
+		local kind = typeof(data.kind) == "string" and data.kind or "Projectile"
+		local isSplitChild = data.isSplitChild == true
 		local age = math.max(now - spawnTime, 0)
 		if lifetime then
 			age = math.min(age, lifetime)
 		end
-		local initialPos = origin + direction * speed * age
+		local simulatedPos = origin + direction * speed * age
+		local initialPos = resolveInitialVisualSpawnPosition(kind, ownerUserId, isSplitChild, simulatedPos)
 
 		local record = activeProjectiles[id]
 		if not record then
 			record = {
 				id = id,
-				kind = data.kind or "Projectile",
+				kind = kind,
 				origin = origin,
 				direction = direction,
 				speed = speed,
 				spawnTime = spawnTime,
 				lifetime = lifetime,
 				expiresAt = lifetime and (spawnTime + lifetime) or nil,
-				modelPath = resolveModelPath(data.kind or "Projectile", data.modelPath),
+				modelPath = resolveModelPath(kind, data.modelPath),
 				visualScale = typeof(data.scale) == "number" and data.scale or nil,
 				visualColor = typeof(data.color) == "Color3" and data.color or nil,
-				ownerUserId = typeof(data.ownerUserId) == "number" and data.ownerUserId or nil,
+				ownerUserId = ownerUserId,
 				stayHorizontal = data.stayHorizontal == true,
 				alwaysStayHorizontal = data.alwaysStayHorizontal == true,
 				stickToPlayer = data.stickToPlayer == true,
@@ -1126,10 +1176,11 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 				lastPos = initialPos,
 				lastOwnerPos = nil,
 				stickOffset = nil,
+				isSplitChild = isSplitChild,
 			}
 			activeProjectiles[id] = record
 		else
-			record.kind = data.kind or record.kind
+			record.kind = kind
 			record.origin = origin
 			record.direction = direction
 			record.speed = speed
@@ -1139,7 +1190,7 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			record.modelPath = resolveModelPath(record.kind, data.modelPath) or record.modelPath
 			record.visualScale = typeof(data.scale) == "number" and data.scale or record.visualScale
 			record.visualColor = typeof(data.color) == "Color3" and data.color or record.visualColor
-			record.ownerUserId = typeof(data.ownerUserId) == "number" and data.ownerUserId or record.ownerUserId
+			record.ownerUserId = ownerUserId or record.ownerUserId
 			record.stayHorizontal = data.stayHorizontal == true
 			record.alwaysStayHorizontal = data.alwaysStayHorizontal == true
 			record.stickToPlayer = data.stickToPlayer == true
@@ -1151,6 +1202,7 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			record.lastPos = initialPos
 			record.lastOwnerPos = nil
 			record.stickOffset = nil
+			record.isSplitChild = isSplitChild
 		end
 
 		if record.orbit and not record.orbit.ownerUserId then

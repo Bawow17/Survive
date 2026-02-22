@@ -51,4 +51,7 @@ EnemyComponents.EnemyAggro = world:component()
 -- EnemyTier component - Normal/Super/Elite classification
 EnemyComponents.EnemyTier = world:component()
 
+-- EnemyFrostbite component - Tracks Frostbite status stacks and expiry
+EnemyComponents.EnemyFrostbite = world:component()
+
 return EnemyComponents

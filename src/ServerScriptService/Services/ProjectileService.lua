@@ -106,6 +106,13 @@ type SlowConfig = {
 	impaleModelPath: string?,
 }
 
+type FrostbiteOnHit = {
+	statusId: string?,
+	stacks: number,
+	duration: number,
+	damageTakenPerStack: number,
+}
+
 type ProjectileRecord = {
 	id: number,
 	kind: string,
@@ -133,6 +140,7 @@ type ProjectileRecord = {
 	beam: BeamConfig?,
 	splitOnHit: SplitConfig?,
 	slowOnHit: SlowConfig?,
+	frostbiteOnHit: FrostbiteOnHit?,
 	recipients: {[Player]: boolean},
 	visualScale: number?,
 	visualColor: Color3?,
@@ -144,6 +152,7 @@ type ProjectileRecord = {
 	stickToPlayer: boolean?,
 	lastOwnerPos: Vector3?,
 	stickOffset: Vector3?,
+	isSplitChild: boolean?,
 }
 
 local world: any
@@ -226,6 +235,10 @@ local invincibleDiagClosestMissHorizontalDelta = 0
 local RAYCAST_PARAMS = RaycastParams.new()
 RAYCAST_PARAMS.FilterType = Enum.RaycastFilterType.Exclude
 RAYCAST_PARAMS.IgnoreWater = true
+
+local WORLD_COLLISION_RAYCAST_PARAMS = RaycastParams.new()
+WORLD_COLLISION_RAYCAST_PARAMS.FilterType = Enum.RaycastFilterType.Exclude
+WORLD_COLLISION_RAYCAST_PARAMS.IgnoreWater = true
 
 local spawnCounts: {[Player]: {count: number, resetAt: number}} = setmetatable({}, { __mode = "k" })
 local pendingSpawns: {[Player]: {any}} = {}
@@ -402,6 +415,7 @@ local function queueSpawnForPlayer(player: Player, record: ProjectileRecord)
 			rotation = record.beam.rotation,
 			lengthAxis = record.beam.lengthAxis,
 		} or nil,
+		isSplitChild = record.isSplitChild == true,
 	})
 end
 
@@ -726,7 +740,7 @@ local function buildSpreadOffsets(count: number): {number}
 	return offsets
 end
 
-local function spawnSplitProjectiles(record: ProjectileRecord, hitPos: Vector3, now: number)
+local function spawnSplitProjectiles(record: ProjectileRecord, hitPos: Vector3, now: number, excludedTargetEntity: number?)
 	if not record.splitOnHit then
 		return
 	end
@@ -762,7 +776,7 @@ local function spawnSplitProjectiles(record: ProjectileRecord, hitPos: Vector3, 
 		end
 		direction = direction.Unit
 
-		ProjectileService.spawnProjectile({
+		local splitProjectileId = ProjectileService.spawnProjectile({
 			kind = record.kind,
 			origin = hitPos,
 			direction = direction,
@@ -780,7 +794,16 @@ local function spawnSplitProjectiles(record: ProjectileRecord, hitPos: Vector3, 
 			stayHorizontal = record.stayHorizontal,
 			alwaysStayHorizontal = record.alwaysStayHorizontal,
 			stickToPlayer = record.stickToPlayer,
+			isSplitChild = true,
 		})
+
+		if splitProjectileId and excludedTargetEntity then
+			local splitRecord = projectiles[splitProjectileId]
+			if splitRecord then
+				splitRecord.hitSet[excludedTargetEntity] = true
+				splitRecord.hitCooldowns[excludedTargetEntity] = now + math.max(record.hitCooldown or 0.04, 0.04)
+			end
+		end
 	end
 end
 
@@ -909,6 +932,31 @@ local function passesRaycastCheck(startPos: Vector3, endPos: Vector3): (boolean,
 	end
 	local blocker = result.Instance and result.Instance:GetFullName() or "unknown"
 	return false, blocker
+end
+
+local function getWorldCollisionHit(record: ProjectileRecord, startPos: Vector3, endPos: Vector3): RaycastResult?
+	local dir = endPos - startPos
+	if dir.Magnitude <= 1e-4 then
+		return nil
+	end
+
+	local filters = table.create(10)
+	local enemiesFolder = Workspace:FindFirstChild("Enemies")
+	if enemiesFolder then
+		filters[#filters + 1] = enemiesFolder
+	end
+	local projectilesFolder = Workspace:FindFirstChild("Projectiles")
+	if projectilesFolder then
+		filters[#filters + 1] = projectilesFolder
+	end
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character then
+			filters[#filters + 1] = player.Character
+		end
+	end
+
+	WORLD_COLLISION_RAYCAST_PARAMS.FilterDescendantsInstances = filters
+	return Workspace:Raycast(startPos, dir, WORLD_COLLISION_RAYCAST_PARAMS)
 end
 
 local function gatherEnemyCollisionCandidates(center: Vector3, radius: number, includeHorizontalFallback: boolean?): {number}
@@ -1066,6 +1114,8 @@ function ProjectileService.spawnProjectile(payload: {
 	beam: BeamConfig?,
 	splitOnHit: SplitConfig?,
 	slowOnHit: SlowConfig?,
+	frostbiteOnHit: FrostbiteOnHit?,
+	isSplitChild: boolean?,
 }): number?
 	if not payload or typeof(payload.origin) ~= "Vector3" then
 		return nil
@@ -1134,6 +1184,7 @@ function ProjectileService.spawnProjectile(payload: {
 		beam = payload.beam,
 		splitOnHit = payload.splitOnHit,
 		slowOnHit = payload.slowOnHit,
+		frostbiteOnHit = payload.frostbiteOnHit,
 		recipients = {},
 		visualScale = payload.visualScale,
 		visualColor = payload.visualColor,
@@ -1145,6 +1196,7 @@ function ProjectileService.spawnProjectile(payload: {
 		stickToPlayer = payload.stickToPlayer,
 		lastOwnerPos = nil,
 		stickOffset = nil,
+		isSplitChild = payload.isSplitChild == true,
 	}
 
 	if record.homing then
@@ -1467,6 +1519,10 @@ function ProjectileService.step(dt: number)
 		end
 		if record.expiresAt <= now then
 			local impactPos = record.lastPos
+			if record.splitOnHit and not record.splitOnHit.used then
+				record.splitOnHit.used = true
+				spawnSplitProjectiles(record, impactPos, now, nil)
+			end
 			if record.aoe and record.aoe.triggerOnExpire then
 				startExplosion(record, impactPos, "exploded", true)
 				despawnProjectile(record, "exploded", nil)
@@ -1696,7 +1752,6 @@ function ProjectileService.step(dt: number)
 				end
 			end
 
-			local segMid = (segmentStart + segmentEnd) * 0.5
 			local thickness = record.radius
 			if beamSize then
 				if beamLengthAxis == "X" then
@@ -1707,193 +1762,242 @@ function ProjectileService.step(dt: number)
 					thickness = math.max(beamSize.X, beamSize.Y) * 0.5
 				end
 			end
-			local segRadius = (segmentStart - segmentEnd).Magnitude * 0.5 + thickness + 6
-			local segmentVerticalDelta = math.abs(segmentEnd.Y - segmentStart.Y)
-			local includeHorizontalFallback = segmentVerticalDelta >= DIAGONAL_VERTICAL_DELTA_THRESHOLD
-			local candidates = gatherEnemyCollisionCandidates(segMid, segRadius, includeHorizontalFallback)
 
-			for _, enemyId in ipairs(candidates) do
-				if collisionChecks >= MAX_COLLISION_CHECKS_PER_TICK or hitBudget <= 0 then
+			-- IceShardSpecial should collide with world geometry (walls/terrain) for
+			-- both primary and split shards.
+			if record.kind == "IceShardSpecial" and not record.beam then
+				local worldHit = getWorldCollisionHit(record, segmentStart, segmentEnd)
+				if worldHit then
+					hit = true
+					hitPos = worldHit.Position
+					if record.splitOnHit and not record.splitOnHit.used then
+						record.splitOnHit.used = true
+						spawnSplitProjectiles(record, hitPos, now, nil)
+						hitReason = "split"
+					else
+						hitReason = "wall"
+					end
+				end
+			end
+
+			if not hit then
+				local segMid = (segmentStart + segmentEnd) * 0.5
+				local segRadius = (segmentStart - segmentEnd).Magnitude * 0.5 + thickness + 6
+				local segmentVerticalDelta = math.abs(segmentEnd.Y - segmentStart.Y)
+				local includeHorizontalFallback = segmentVerticalDelta >= DIAGONAL_VERTICAL_DELTA_THRESHOLD
+				local candidates = gatherEnemyCollisionCandidates(segMid, segRadius, includeHorizontalFallback)
+
+				for _, enemyId in ipairs(candidates) do
+					if collisionChecks >= MAX_COLLISION_CHECKS_PER_TICK or hitBudget <= 0 then
+						if INVINCIBLE_ENEMY_DIAGNOSTICS then
+							if collisionChecks >= MAX_COLLISION_CHECKS_PER_TICK then
+								invincibleDiagCounters.projectilesSkippedByCollisionBudget += 1
+							end
+							if hitBudget <= 0 then
+								invincibleDiagCounters.projectilesSkippedByHitBudget += 1
+							end
+						end
+						break
+					end
+					collisionChecks += 1
 					if INVINCIBLE_ENEMY_DIAGNOSTICS then
-						if collisionChecks >= MAX_COLLISION_CHECKS_PER_TICK then
-							invincibleDiagCounters.projectilesSkippedByCollisionBudget += 1
-						end
-						if hitBudget <= 0 then
-							invincibleDiagCounters.projectilesSkippedByHitBudget += 1
-						end
+						invincibleDiagCounters.collisionChecks += 1
 					end
-					break
-				end
-				collisionChecks += 1
-				if INVINCIBLE_ENEMY_DIAGNOSTICS then
-					invincibleDiagCounters.collisionChecks += 1
-				end
 
-				local hitCooldown = record.hitCooldowns[enemyId]
-				if hitCooldown and hitCooldown > now then
-					continue
-				end
-				if not record.beam and record.hitSet[enemyId] then
-					continue
-				end
-				local entityType = world:get(enemyId, EntityType)
-				if not entityType or entityType.type ~= "Enemy" then
-					continue
-				end
-				local enemyHealth = world:get(enemyId, Health)
-				local enemyPos, enemyRadiusOverride, _, enemyBoxCFrame, enemyHalfExtents = getEnemyCollisionCenter(enemyId)
-				if not enemyPos then
-					continue
-				end
-				local enemyRadius = 2.5
-				local collision = world:get(enemyId, Collision)
-				if enemyRadiusOverride then
-					enemyRadius = enemyRadiusOverride
-				elseif collision and collision.radius then
-					enemyRadius = collision.radius
-				end
-				local hitThis = false
-				local hitPosCandidate = enemyPos
-				local raycastTarget = enemyPos
-				local inflatedBy = thickness + ENEMY_COLLISION_GRACE_RADIUS
-				if enemyBoxCFrame and enemyHalfExtents then
-					local intersects, hitPoint = segmentIntersectsOrientedBox(
-						segmentStart,
-						segmentEnd,
-						enemyBoxCFrame,
-						enemyHalfExtents,
-						inflatedBy
-					)
-					if intersects and hitPoint then
-						hitThis = true
-						hitPosCandidate = hitPoint
-						raycastTarget = enemyPos
-					elseif INVINCIBLE_ENEMY_DIAGNOSTICS then
-						local segClosestToCenter = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
-						local expandedHalf = inflateHalfExtents(enemyHalfExtents, inflatedBy)
-						local missDistSq, _, delta = pointToOrientedBoxDistance(segClosestToCenter, enemyBoxCFrame, expandedHalf)
-						local missGap = math.sqrt(missDistSq)
-						if missGap <= 1 then
-							invincibleDiagCounters.nearMissUnder1Stud += 1
-						elseif missGap <= 3 then
-							invincibleDiagCounters.nearMissUnder3Stud += 1
+					local hitCooldown = record.hitCooldowns[enemyId]
+					if hitCooldown and hitCooldown > now then
+						continue
+					end
+					if not record.beam and record.hitSet[enemyId] then
+						continue
+					end
+					local entityType = world:get(enemyId, EntityType)
+					if not entityType or entityType.type ~= "Enemy" then
+						continue
+					end
+					local enemyHealth = world:get(enemyId, Health)
+					local enemyPos, enemyRadiusOverride, _, enemyBoxCFrame, enemyHalfExtents = getEnemyCollisionCenter(enemyId)
+					if not enemyPos then
+						continue
+					end
+					local enemyRadius = 2.5
+					local collision = world:get(enemyId, Collision)
+					if enemyRadiusOverride then
+						enemyRadius = enemyRadiusOverride
+					elseif collision and collision.radius then
+						enemyRadius = collision.radius
+					end
+					local hitThis = false
+					local hitPosCandidate = enemyPos
+					local raycastTarget = enemyPos
+					local inflatedBy = thickness + ENEMY_COLLISION_GRACE_RADIUS
+					if enemyBoxCFrame and enemyHalfExtents then
+						local intersects, hitPoint = segmentIntersectsOrientedBox(
+							segmentStart,
+							segmentEnd,
+							enemyBoxCFrame,
+							enemyHalfExtents,
+							inflatedBy
+						)
+						if intersects and hitPoint then
+							hitThis = true
+							-- Use an uninflated hit point when possible so split origin is at the
+							-- actual collision contact, not the inflated broad-phase shell.
+							local _, preciseHitPoint = segmentIntersectsOrientedBox(
+								segmentStart,
+								segmentEnd,
+								enemyBoxCFrame,
+								enemyHalfExtents,
+								0
+							)
+							hitPosCandidate = preciseHitPoint or hitPoint
+							raycastTarget = enemyPos
+						elseif INVINCIBLE_ENEMY_DIAGNOSTICS then
+							local segClosestToCenter = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
+							local expandedHalf = inflateHalfExtents(enemyHalfExtents, inflatedBy)
+							local missDistSq, _, delta = pointToOrientedBoxDistance(segClosestToCenter, enemyBoxCFrame, expandedHalf)
+							local missGap = math.sqrt(missDistSq)
+							if missGap <= 1 then
+								invincibleDiagCounters.nearMissUnder1Stud += 1
+							elseif missGap <= 3 then
+								invincibleDiagCounters.nearMissUnder3Stud += 1
+							end
+							if missGap >= 0 and missGap < invincibleDiagClosestMissGap then
+								invincibleDiagClosestMissGap = missGap
+								invincibleDiagClosestMissProjectileId = record.id
+								invincibleDiagClosestMissEnemyId = enemyId
+								invincibleDiagClosestMissKind = record.kind
+								invincibleDiagClosestMissVerticalDelta = math.abs(delta.Y)
+								invincibleDiagClosestMissHorizontalDelta = Vector3.new(delta.X, 0, delta.Z).Magnitude
+							end
 						end
-						if missGap >= 0 and missGap < invincibleDiagClosestMissGap then
-							invincibleDiagClosestMissGap = missGap
-							invincibleDiagClosestMissProjectileId = record.id
-							invincibleDiagClosestMissEnemyId = enemyId
-							invincibleDiagClosestMissKind = record.kind
-							invincibleDiagClosestMissVerticalDelta = math.abs(delta.Y)
-							invincibleDiagClosestMissHorizontalDelta = Vector3.new(delta.X, 0, delta.Z).Magnitude
+					else
+						local centerClosest = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
+						local centerDistSq = distanceSq(centerClosest, enemyPos)
+						local hitRadius = inflatedBy + enemyRadius
+						if centerDistSq <= hitRadius * hitRadius then
+							hitThis = true
+							-- Fallback collision approximation: place contact on enemy surface.
+							local contactDir = centerClosest - enemyPos
+							if contactDir.Magnitude <= 1e-4 then
+								contactDir = -record.direction
+							end
+							if contactDir.Magnitude > 1e-4 then
+								contactDir = contactDir.Unit
+							else
+								contactDir = Vector3.new(0, 0, -1)
+							end
+							hitPosCandidate = enemyPos + contactDir * enemyRadius
+							raycastTarget = enemyPos
 						end
 					end
-				else
-					local centerClosest = closestPointOnSegment(segmentStart, segmentEnd, enemyPos)
-					local centerDistSq = distanceSq(centerClosest, enemyPos)
-					local hitRadius = inflatedBy + enemyRadius
-					if centerDistSq <= hitRadius * hitRadius then
-						hitThis = true
-						hitPosCandidate = centerClosest
-						raycastTarget = enemyPos
-					end
-				end
 
-				if hitThis then
-					if INVINCIBLE_ENEMY_DIAGNOSTICS then
-						invincibleDiagCounters.geometricHits += 1
-					end
-					if record.collision and record.collision.useRaycast then
-						local passesRaycast, blocker = passesRaycastCheck(record.lastPos, raycastTarget)
-						if not passesRaycast then
-							if INVINCIBLE_ENEMY_DIAGNOSTICS then
-								invincibleDiagCounters.projectileRaycastBlocked += 1
+					if hitThis then
+						if INVINCIBLE_ENEMY_DIAGNOSTICS then
+							invincibleDiagCounters.geometricHits += 1
+						end
+						if record.collision and record.collision.useRaycast then
+							local passesRaycast, blocker = passesRaycastCheck(record.lastPos, raycastTarget)
+							if not passesRaycast then
+								if INVINCIBLE_ENEMY_DIAGNOSTICS then
+									invincibleDiagCounters.projectileRaycastBlocked += 1
+									local enemyScale, enemySubtype, enemyTier = getEnemyDebugMeta(enemyId)
+									recordProjectileRejectionSample(
+										record.id,
+										enemyId,
+										record.kind,
+										enemyHealth and enemyHealth.current or nil,
+										world:has(enemyId, DeathAnimation),
+										enemyScale,
+										enemySubtype,
+										enemyTier,
+										"raycastBlocked",
+										blocker
+									)
+								end
+								continue
+							end
+						end
+						if INVINCIBLE_ENEMY_DIAGNOSTICS then
+							invincibleDiagCounters.damageCalls += 1
+						end
+						local enemyHealthAtHit = enemyHealth and enemyHealth.current or nil
+						local _, didApply = DamageSystem.applyDamage(enemyId, record.damage, "magic", record.ownerEntity, record.kind)
+						if INVINCIBLE_ENEMY_DIAGNOSTICS then
+							if didApply then
+								invincibleDiagCounters.damageApplied += 1
+							else
+								invincibleDiagCounters.damageRejectedAfterHit += 1
 								local enemyScale, enemySubtype, enemyTier = getEnemyDebugMeta(enemyId)
 								recordProjectileRejectionSample(
 									record.id,
 									enemyId,
 									record.kind,
-									enemyHealth and enemyHealth.current or nil,
+									enemyHealthAtHit,
 									world:has(enemyId, DeathAnimation),
 									enemyScale,
 									enemySubtype,
 									enemyTier,
-									"raycastBlocked",
-									blocker
+									"didNotApply",
+									nil
 								)
 							end
-							continue
 						end
-					end
-					if INVINCIBLE_ENEMY_DIAGNOSTICS then
-						invincibleDiagCounters.damageCalls += 1
-					end
-					local enemyHealthAtHit = enemyHealth and enemyHealth.current or nil
-					local _, didApply = DamageSystem.applyDamage(enemyId, record.damage, "magic", record.ownerEntity, record.kind)
-					if INVINCIBLE_ENEMY_DIAGNOSTICS then
-						if didApply then
-							invincibleDiagCounters.damageApplied += 1
-						else
-							invincibleDiagCounters.damageRejectedAfterHit += 1
-							local enemyScale, enemySubtype, enemyTier = getEnemyDebugMeta(enemyId)
-							recordProjectileRejectionSample(
-								record.id,
+						if didApply and record.frostbiteOnHit and DamageSystem.applyEnemyFrostbite then
+							DamageSystem.applyEnemyFrostbite(
 								enemyId,
-								record.kind,
-								enemyHealthAtHit,
-								world:has(enemyId, DeathAnimation),
-								enemyScale,
-								enemySubtype,
-								enemyTier,
-								"didNotApply",
-								nil
+								record.frostbiteOnHit.stacks,
+								record.frostbiteOnHit.duration,
+								record.frostbiteOnHit.damageTakenPerStack,
+								record.frostbiteOnHit.statusId
 							)
 						end
-					end
-					if record.slowOnHit then
-						EnemySlowSystem.applySlow(
-							enemyId,
-							record.slowOnHit.duration,
-							record.slowOnHit.multiplier,
-							record.slowOnHit.impaleModelPath
-						)
-					end
-					if not record.beam then
-						record.hitSet[enemyId] = true
-					end
-					record.hitCooldowns[enemyId] = now + record.hitCooldown
-					if not record.beam then
-						record.hitCount += 1
-						record.pierceRemaining -= 1
-					end
-					hitBudget -= 1
-					hitPos = hitPosCandidate
-
-					if record.homing and not record.beam then
-						record.homing.targetEntity = nil
-					end
-
-					if record.beam then
-						-- Beam persists; no despawn or split handling.
-						-- no despawn
-					elseif record.splitOnHit and not record.splitOnHit.used then
-						record.splitOnHit.used = true
-						spawnSplitProjectiles(record, hitPosCandidate, now)
-						hit = true
-						hitReason = "split"
-					elseif record.aoe and record.aoe.trigger == "hit" then
-						local shouldDespawn = record.pierceRemaining <= 0 or record.hitCount >= ((record.basePierce or 0) + 1)
-						startExplosion(record, hitPosCandidate, "exploded", shouldDespawn)
-						if shouldDespawn then
-							hit = true
-							hitReason = "exploded"
+						if record.slowOnHit then
+							EnemySlowSystem.applySlow(
+								enemyId,
+								record.slowOnHit.duration,
+								record.slowOnHit.multiplier,
+								record.slowOnHit.impaleModelPath
+							)
 						end
-					elseif record.pierceRemaining <= 0 or record.hitCount >= ((record.basePierce or 0) + 1) then
-						hit = true
-					end
-
-					if hit then
+						if not record.beam then
+							record.hitSet[enemyId] = true
+						end
+						record.hitCooldowns[enemyId] = now + record.hitCooldown
+						if not record.beam then
+							record.hitCount += 1
+							record.pierceRemaining -= 1
+						end
+						hitBudget -= 1
 						hitPos = hitPosCandidate
-						break
+
+						if record.homing and not record.beam then
+							record.homing.targetEntity = nil
+						end
+
+						if record.beam then
+							-- Beam persists; no despawn or split handling.
+							-- no despawn
+						elseif record.splitOnHit and not record.splitOnHit.used then
+							record.splitOnHit.used = true
+							spawnSplitProjectiles(record, hitPosCandidate, now, enemyId)
+							hit = true
+							hitReason = "split"
+						elseif record.aoe and record.aoe.trigger == "hit" then
+							local shouldDespawn = record.pierceRemaining <= 0 or record.hitCount >= ((record.basePierce or 0) + 1)
+							startExplosion(record, hitPosCandidate, "exploded", shouldDespawn)
+							if shouldDespawn then
+								hit = true
+								hitReason = "exploded"
+							end
+						elseif record.pierceRemaining <= 0 or record.hitCount >= ((record.basePierce or 0) + 1) then
+							hit = true
+						end
+
+						if hit then
+							hitPos = hitPosCandidate
+							break
+						end
 					end
 				end
 			end

@@ -1,7 +1,7 @@
 --!strict
--- AirMomentumController V2
--- Holds an airborne target horizontal velocity state so humanoid air slowdown
--- does not immediately drain carried momentum from jumps/mobility launches.
+-- AirMomentumController V3
+-- Air: persistent target-state momentum retention.
+-- Ground: high-speed landing carry only (no global walk slide).
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -14,6 +14,8 @@ local ATTR_MOBILITY_VELOCITY_OVERRIDE = "MobilityVelocityOverrideLocal"
 local ATTR_DEBUG_TARGET_SPEED = "AirMomentumTargetSpeedLocal"
 local ATTR_DEBUG_ACTUAL_SPEED = "AirMomentumActualSpeedLocal"
 local ATTR_DEBUG_ACTIVE = "AirMomentumActiveLocal"
+local ATTR_GROUND_CARRY_ACTIVE = "GroundCarryActiveLocal"
+local ATTR_GROUND_CARRY_SPEED = "GroundCarrySpeedLocal"
 
 local EPSILON = 1e-4
 
@@ -22,19 +24,42 @@ local DEFAULTS = {
 	mode = "target_state",
 	writePhase = "PostSimulation",
 	groundResetGraceSeconds = 0.08,
-	groundCarryWindowSeconds = 0.25,
+	groundCarryWindowSeconds = 0.1,
 	overrideReleaseCarryWindowSeconds = 0.35,
-	landingAssistSeconds = 0.16,
+	landingAssistSeconds = 0.08,
 	landingAssistSpeedThreshold = 0.01,
-	groundFrictionEnabled = true,
+
+	-- Deprecated global friction path. Kept for config compatibility only.
+	groundFrictionEnabled = false,
 	groundFrictionLinearDecel = 8.0,
 	groundFrictionDrag = 1.0,
 	groundFrictionMinSpeed = 1.0,
 	groundOppositeBrakeAccel = 90.0,
+
+	landingCarryEnabled = true,
+	landingCarryActivationWalkspeedMultiplier = 1.15,
+	landingCarryActivationMinSpeed = 22.0,
+	landingCarryRecentAirborneWindow = 0.25,
+	landingCarryMinDuration = 0.18,
+	landingCarryMaxDuration = 0.70,
+	landingCarryDurationRefSpeed = 90.0,
+	landingCarryLinearDecel = 180.0,
+	landingCarryDrag = 0.0,
+	landingCarryTurnResponse = 9.0,
+	landingCarryOppositeBrakeAccel = 135.0,
+	landingCarryExitSpeed = 10.0,
+	landingCarryPreserveWithSameInput = true,
+	landingCarryDebugAttributes = false,
+
 	oppositeDotThreshold = -0.2,
 	oppositeBrakeAccel = 72,
 	turnResponse = 7.5,
 	turnSpeedLossPerSecond = 0.01,
+	bhopLinearDecel = 0.0, -- 0 => derived from landingCarryLinearDecel / 3
+	airDirectionalFightAccel = 260.0,
+	airControlAccelToWalkSpeed = 42.0,
+	airMisalignedBrakeAccel = 18.0,
+	airMisalignedLossPerSecond = 1.25,
 	noInputRetentionPerSecond = 0.9998,
 	adoptExternalBoost = true,
 	externalBoostAdoptThreshold = 1.0,
@@ -75,10 +100,29 @@ local CONFIG = {
 	groundFrictionDrag = readNumber(rawConfig.groundFrictionDrag, DEFAULTS.groundFrictionDrag),
 	groundFrictionMinSpeed = readNumber(rawConfig.groundFrictionMinSpeed, DEFAULTS.groundFrictionMinSpeed),
 	groundOppositeBrakeAccel = readNumber(rawConfig.groundOppositeBrakeAccel, DEFAULTS.groundOppositeBrakeAccel),
+	landingCarryEnabled = readBoolean(rawConfig.landingCarryEnabled, DEFAULTS.landingCarryEnabled),
+	landingCarryActivationWalkspeedMultiplier = readNumber(rawConfig.landingCarryActivationWalkspeedMultiplier, DEFAULTS.landingCarryActivationWalkspeedMultiplier),
+	landingCarryActivationMinSpeed = readNumber(rawConfig.landingCarryActivationMinSpeed, DEFAULTS.landingCarryActivationMinSpeed),
+	landingCarryRecentAirborneWindow = readNumber(rawConfig.landingCarryRecentAirborneWindow, DEFAULTS.landingCarryRecentAirborneWindow),
+	landingCarryMinDuration = readNumber(rawConfig.landingCarryMinDuration, DEFAULTS.landingCarryMinDuration),
+	landingCarryMaxDuration = readNumber(rawConfig.landingCarryMaxDuration, DEFAULTS.landingCarryMaxDuration),
+	landingCarryDurationRefSpeed = readNumber(rawConfig.landingCarryDurationRefSpeed, DEFAULTS.landingCarryDurationRefSpeed),
+	landingCarryLinearDecel = readNumber(rawConfig.landingCarryLinearDecel, DEFAULTS.landingCarryLinearDecel),
+	landingCarryDrag = readNumber(rawConfig.landingCarryDrag, DEFAULTS.landingCarryDrag),
+	landingCarryTurnResponse = readNumber(rawConfig.landingCarryTurnResponse, DEFAULTS.landingCarryTurnResponse),
+	landingCarryOppositeBrakeAccel = readNumber(rawConfig.landingCarryOppositeBrakeAccel, DEFAULTS.landingCarryOppositeBrakeAccel),
+	landingCarryExitSpeed = readNumber(rawConfig.landingCarryExitSpeed, DEFAULTS.landingCarryExitSpeed),
+	landingCarryPreserveWithSameInput = readBoolean(rawConfig.landingCarryPreserveWithSameInput, DEFAULTS.landingCarryPreserveWithSameInput),
+	landingCarryDebugAttributes = readBoolean(rawConfig.landingCarryDebugAttributes, DEFAULTS.landingCarryDebugAttributes),
 	oppositeDotThreshold = readNumber(rawConfig.oppositeDotThreshold, DEFAULTS.oppositeDotThreshold),
 	oppositeBrakeAccel = readNumber(rawConfig.oppositeBrakeAccel, DEFAULTS.oppositeBrakeAccel),
 	turnResponse = readNumber(rawConfig.turnResponse, DEFAULTS.turnResponse),
 	turnSpeedLossPerSecond = readNumber(rawConfig.turnSpeedLossPerSecond, DEFAULTS.turnSpeedLossPerSecond),
+	bhopLinearDecel = readNumber(rawConfig.bhopLinearDecel, DEFAULTS.bhopLinearDecel),
+	airDirectionalFightAccel = readNumber(rawConfig.airDirectionalFightAccel, DEFAULTS.airDirectionalFightAccel),
+	airControlAccelToWalkSpeed = readNumber(rawConfig.airControlAccelToWalkSpeed, DEFAULTS.airControlAccelToWalkSpeed),
+	airMisalignedBrakeAccel = readNumber(rawConfig.airMisalignedBrakeAccel, DEFAULTS.airMisalignedBrakeAccel),
+	airMisalignedLossPerSecond = readNumber(rawConfig.airMisalignedLossPerSecond, DEFAULTS.airMisalignedLossPerSecond),
 	noInputRetentionPerSecond = readNumber(rawConfig.noInputRetentionPerSecond, DEFAULTS.noInputRetentionPerSecond),
 	adoptExternalBoost = readBoolean(rawConfig.adoptExternalBoost, DEFAULTS.adoptExternalBoost),
 	externalBoostAdoptThreshold = readNumber(rawConfig.externalBoostAdoptThreshold, DEFAULTS.externalBoostAdoptThreshold),
@@ -97,7 +141,9 @@ local isPaused = false
 
 local wasGrounded = true
 local lastGroundedAt = 0
+local lastAirborneAt = 0
 local lastAirborneHorizontalVelocity = Vector3.zero
+local airbornePeakHorizontalVelocity = Vector3.zero
 local groundCarryVelocity = Vector3.zero
 local groundCarryRecordedAt = 0
 local overrideReleaseVelocity = Vector3.zero
@@ -106,11 +152,20 @@ local lastOverrideActive = false
 local targetHorizontalVelocity = Vector3.zero
 local hasTargetHorizontalVelocity = false
 
+local landingCarryActive = false
+local landingCarryVelocity = Vector3.zero
+local landingCarryStartedAt = 0
+local landingCarryDuration = 0
+local landingCarryAttachment: Attachment? = nil
+local landingCarryLinearVelocity: LinearVelocity? = nil
+local landingCarryConsumedThisGroundContact = false
+local landingAssistConsumedThisGroundContact = false
+
 local function horizontal(vector: Vector3): Vector3
 	return Vector3.new(vector.X, 0, vector.Z)
 end
 
-local function setDebugAttributes(active: boolean, targetSpeed: number, actualSpeed: number)
+local function setAirDebugAttributes(active: boolean, targetSpeed: number, actualSpeed: number)
 	if not CONFIG.debugAttributes or not character then
 		return
 	end
@@ -119,13 +174,29 @@ local function setDebugAttributes(active: boolean, targetSpeed: number, actualSp
 	character:SetAttribute(ATTR_DEBUG_ACTUAL_SPEED, actualSpeed)
 end
 
-local function clearDebugAttributes()
+local function clearAirDebugAttributes()
 	if not CONFIG.debugAttributes or not character then
 		return
 	end
 	character:SetAttribute(ATTR_DEBUG_ACTIVE, false)
 	character:SetAttribute(ATTR_DEBUG_TARGET_SPEED, 0)
 	character:SetAttribute(ATTR_DEBUG_ACTUAL_SPEED, 0)
+end
+
+local function setGroundCarryDebugAttributes(active: boolean, speed: number)
+	if not CONFIG.landingCarryDebugAttributes or not character then
+		return
+	end
+	character:SetAttribute(ATTR_GROUND_CARRY_ACTIVE, active)
+	character:SetAttribute(ATTR_GROUND_CARRY_SPEED, speed)
+end
+
+local function clearGroundCarryDebugAttributes()
+	if not CONFIG.landingCarryDebugAttributes or not character then
+		return
+	end
+	character:SetAttribute(ATTR_GROUND_CARRY_ACTIVE, false)
+	character:SetAttribute(ATTR_GROUND_CARRY_SPEED, 0)
 end
 
 local function getUnitHorizontalInput(moveDirection: Vector3): Vector3?
@@ -158,10 +229,156 @@ local function buildCarryCandidate(baseHorizontal: Vector3, nowTime: number, inc
 	return carryCandidate
 end
 
-local function resetAirState()
+local function destroyLandingCarryConstraint()
+	if landingCarryLinearVelocity and landingCarryLinearVelocity.Parent then
+		landingCarryLinearVelocity:Destroy()
+	end
+	landingCarryLinearVelocity = nil
+
+	if landingCarryAttachment and landingCarryAttachment.Parent then
+		landingCarryAttachment:Destroy()
+	end
+	landingCarryAttachment = nil
+end
+
+local function stopLandingCarry()
+	landingCarryActive = false
+	landingCarryVelocity = Vector3.zero
+	landingCarryStartedAt = 0
+	landingCarryDuration = 0
+	destroyLandingCarryConstraint()
+	clearGroundCarryDebugAttributes()
+end
+
+local function startLandingCarry(initialHorizontalVelocity: Vector3): boolean
+	if not rootPart or not rootPart.Parent then
+		return false
+	end
+
+	local speed = initialHorizontalVelocity.Magnitude
+	if speed <= EPSILON then
+		return false
+	end
+
+	stopLandingCarry()
+
+	landingCarryAttachment = Instance.new("Attachment")
+	landingCarryAttachment.Name = "AirMomentumCarryAttachment"
+	landingCarryAttachment.Position = Vector3.zero
+	landingCarryAttachment.Parent = rootPart
+
+	landingCarryLinearVelocity = Instance.new("LinearVelocity")
+	landingCarryLinearVelocity.Name = "AirMomentumLandingCarry"
+	landingCarryLinearVelocity.Attachment0 = landingCarryAttachment
+	landingCarryLinearVelocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+	landingCarryLinearVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+	landingCarryLinearVelocity.ForceLimitMode = Enum.ForceLimitMode.PerAxis
+	landingCarryLinearVelocity.MaxAxesForce = Vector3.new(math.huge, 0, math.huge)
+	landingCarryLinearVelocity.VectorVelocity = Vector3.new(initialHorizontalVelocity.X, 0, initialHorizontalVelocity.Z)
+	landingCarryLinearVelocity.Parent = rootPart
+	rootPart.AssemblyLinearVelocity = Vector3.new(
+		initialHorizontalVelocity.X,
+		rootPart.AssemblyLinearVelocity.Y,
+		initialHorizontalVelocity.Z
+	)
+
+	landingCarryActive = true
+	landingCarryConsumedThisGroundContact = true
+	landingCarryVelocity = initialHorizontalVelocity
+	landingCarryStartedAt = tick()
+	local activationThreshold = math.max(
+		CONFIG.landingCarryActivationMinSpeed,
+		(if humanoid then humanoid.WalkSpeed else 0) * CONFIG.landingCarryActivationWalkspeedMultiplier
+	)
+	local minDuration = math.max(0, CONFIG.landingCarryMinDuration)
+	local maxDuration = math.max(minDuration, CONFIG.landingCarryMaxDuration)
+	local exitSpeed = math.max(0, CONFIG.landingCarryExitSpeed)
+	local rawDuration = math.max(0, speed - exitSpeed) / math.max(1e-3, CONFIG.landingCarryLinearDecel)
+	landingCarryDuration = math.clamp(rawDuration, minDuration, maxDuration)
+	setGroundCarryDebugAttributes(true, speed)
+	return true
+end
+
+local function updateLandingCarry(dt: number, currentHumanoid: Humanoid, overrideActive: boolean): boolean
+	if not landingCarryActive then
+		return false
+	end
+
+	if overrideActive then
+		stopLandingCarry()
+		return false
+	end
+	if not landingCarryLinearVelocity or not landingCarryLinearVelocity.Parent then
+		stopLandingCarry()
+		return false
+	end
+
+	local speed = landingCarryVelocity.Magnitude
+	if speed <= CONFIG.landingCarryExitSpeed then
+		stopLandingCarry()
+		return false
+	end
+
+	local direction = landingCarryVelocity.Unit
+	local inputDirection = getUnitHorizontalInput(currentHumanoid.MoveDirection)
+	local baseWalkSpeed = math.max(0, currentHumanoid.WalkSpeed)
+	if inputDirection then
+		local dot = direction:Dot(inputDirection)
+		local turnAlpha = 1 - math.exp(-CONFIG.landingCarryTurnResponse * dt)
+		if dot <= CONFIG.oppositeDotThreshold then
+			speed = math.max(0, speed - (CONFIG.landingCarryOppositeBrakeAccel * dt))
+			local steered = direction:Lerp(inputDirection, math.clamp(turnAlpha * 0.8, 0, 1))
+			if steered.Magnitude > EPSILON then
+				direction = steered.Unit
+			end
+		else
+			if CONFIG.landingCarryPreserveWithSameInput and dot > 0 then
+				-- Same-direction input should still decelerate, but only down to base walk speed.
+				if speed > (baseWalkSpeed + 0.25) then
+					speed = math.max(baseWalkSpeed, speed - (CONFIG.landingCarryLinearDecel * dt))
+				else
+					stopLandingCarry()
+					return false
+				end
+			else
+				local speedDrop = CONFIG.landingCarryLinearDecel * dt
+				if dot < 0 then
+					-- Slightly opposing input should bleed faster than neutral.
+					speedDrop *= 1.2
+				end
+				speed = math.max(0, speed - speedDrop)
+			end
+			local steered = direction:Lerp(inputDirection, math.clamp(turnAlpha, 0, 1))
+			if steered.Magnitude > EPSILON then
+				direction = steered.Unit
+			end
+		end
+	else
+		local speedDrop = CONFIG.landingCarryLinearDecel * dt
+		speed = math.max(0, speed - speedDrop)
+	end
+
+	if speed <= CONFIG.landingCarryExitSpeed then
+		stopLandingCarry()
+		return false
+	end
+
+	landingCarryVelocity = direction * speed
+	landingCarryLinearVelocity.VectorVelocity = Vector3.new(landingCarryVelocity.X, 0, landingCarryVelocity.Z)
+	if rootPart and rootPart.Parent then
+		local currentVelocity = rootPart.AssemblyLinearVelocity
+		rootPart.AssemblyLinearVelocity = Vector3.new(landingCarryVelocity.X, currentVelocity.Y, landingCarryVelocity.Z)
+	end
+	setGroundCarryDebugAttributes(true, speed)
+	return true
+end
+
+local function resetControllerState()
 	wasGrounded = true
 	lastGroundedAt = tick()
+	lastAirborneAt = tick()
 	lastAirborneHorizontalVelocity = Vector3.zero
+	airbornePeakHorizontalVelocity = Vector3.zero
 	groundCarryVelocity = Vector3.zero
 	groundCarryRecordedAt = 0
 	overrideReleaseVelocity = Vector3.zero
@@ -169,14 +386,18 @@ local function resetAirState()
 	lastOverrideActive = false
 	targetHorizontalVelocity = Vector3.zero
 	hasTargetHorizontalVelocity = false
-	clearDebugAttributes()
+	landingCarryConsumedThisGroundContact = false
+	landingAssistConsumedThisGroundContact = false
+	stopLandingCarry()
+	clearAirDebugAttributes()
+	clearGroundCarryDebugAttributes()
 end
 
 local function bindCharacter(newCharacter: Model?)
 	character = newCharacter
 	humanoid = nil
 	rootPart = nil
-	resetAirState()
+	resetControllerState()
 
 	if not newCharacter then
 		return
@@ -191,6 +412,10 @@ local function bindCharacter(newCharacter: Model?)
 		newCharacter:SetAttribute(ATTR_DEBUG_TARGET_SPEED, 0)
 		newCharacter:SetAttribute(ATTR_DEBUG_ACTUAL_SPEED, 0)
 	end
+	if CONFIG.landingCarryDebugAttributes then
+		newCharacter:SetAttribute(ATTR_GROUND_CARRY_ACTIVE, false)
+		newCharacter:SetAttribute(ATTR_GROUND_CARRY_SPEED, 0)
+	end
 
 	if humanoid then
 		wasGrounded = humanoid.FloorMaterial ~= Enum.Material.Air
@@ -198,6 +423,7 @@ local function bindCharacter(newCharacter: Model?)
 	end
 	if rootPart then
 		lastAirborneHorizontalVelocity = horizontal(rootPart.AssemblyLinearVelocity)
+		airbornePeakHorizontalVelocity = lastAirborneHorizontalVelocity
 	end
 	lastOverrideActive = newCharacter:GetAttribute(ATTR_MOBILITY_VELOCITY_OVERRIDE) == true
 end
@@ -208,7 +434,8 @@ local gameUnpaused = remotes:WaitForChild("GameUnpaused")
 
 gamePaused.OnClientEvent:Connect(function()
 	isPaused = true
-	clearDebugAttributes()
+	stopLandingCarry()
+	clearAirDebugAttributes()
 end)
 
 gameUnpaused.OnClientEvent:Connect(function()
@@ -259,13 +486,20 @@ local function applyAirMomentumStep(dt: number)
 	lastOverrideActive = overrideActive
 
 	if grounded then
-		if not wasGrounded then
+		local justLanded = not wasGrounded
+		if justLanded then
 			lastGroundedAt = now
+			landingCarryConsumedThisGroundContact = false
+			landingAssistConsumedThisGroundContact = false
 		end
+
 		local landingAssistWindow = math.max(CONFIG.groundResetGraceSeconds, CONFIG.landingAssistSeconds)
 		local withinLandingAssistWindow = (now - lastGroundedAt) <= landingAssistWindow
+		local recentAirborne = (now - lastAirborneAt) <= CONFIG.landingCarryRecentAirborneWindow
+		local jumpQueued = currentHumanoid.Jump
 
-		if withinLandingAssistWindow then
+		-- Keep bhop/instant-jump continuity without introducing global ground slide.
+		if withinLandingAssistWindow and not landingAssistConsumedThisGroundContact and (justLanded or jumpQueued) then
 			local carryCandidate = buildCarryCandidate(currentHorizontal, now, true)
 			if carryCandidate.Magnitude > (currentHorizontalSpeed + CONFIG.landingAssistSpeedThreshold) then
 				local allowAssist = true
@@ -280,6 +514,9 @@ local function applyAirMomentumStep(dt: number)
 					currentHorizontalSpeed = carryCandidate.Magnitude
 				end
 			end
+			-- Landing assist is single-fire per ground contact to avoid speed resetting
+			-- every frame while jump is held (bhop input).
+			landingAssistConsumedThisGroundContact = true
 		end
 
 		if (now - groundCarryRecordedAt) > CONFIG.groundCarryWindowSeconds then
@@ -290,74 +527,64 @@ local function applyAirMomentumStep(dt: number)
 			groundCarryRecordedAt = now
 		end
 
-		wasGrounded = true
-		if CONFIG.groundFrictionEnabled and not overrideActive then
-			local inputDirection = getUnitHorizontalInput(currentHumanoid.MoveDirection)
-			if inputDirection == nil then
-				local coastSource = chooseHigherMagnitude(currentHorizontal, targetHorizontalVelocity)
-				local coastSpeed = coastSource.Magnitude
-				if coastSpeed > CONFIG.groundFrictionMinSpeed then
-					local coastDirection = coastSource.Unit
-					local speedDrop = (CONFIG.groundFrictionLinearDecel + coastSpeed * CONFIG.groundFrictionDrag) * stepDt
-					local nextSpeed = math.max(0, coastSpeed - speedDrop)
-					if nextSpeed > CONFIG.groundFrictionMinSpeed then
-						local nextHorizontal = coastDirection * nextSpeed
-						currentRootPart.AssemblyLinearVelocity = Vector3.new(nextHorizontal.X, velocity.Y, nextHorizontal.Z)
-						currentHorizontal = nextHorizontal
-						currentHorizontalSpeed = nextSpeed
-						targetHorizontalVelocity = nextHorizontal
-						hasTargetHorizontalVelocity = true
-					else
-						targetHorizontalVelocity = Vector3.zero
-						hasTargetHorizontalVelocity = false
-					end
-				else
-					targetHorizontalVelocity = Vector3.zero
-					hasTargetHorizontalVelocity = false
-				end
+		local activationThreshold = math.max(
+			CONFIG.landingCarryActivationMinSpeed,
+			currentHumanoid.WalkSpeed * CONFIG.landingCarryActivationWalkspeedMultiplier
+		)
+		local boostedGroundThreshold = math.max(
+			CONFIG.landingCarryExitSpeed + 0.5,
+			currentHumanoid.WalkSpeed + 0.5
+		)
+		local recentOverrideRelease = (now - overrideReleasedAt) <= CONFIG.overrideReleaseCarryWindowSeconds
+		if landingCarryConsumedThisGroundContact then
+			-- Re-arm once player is back near normal movement speed.
+			local rearmSpeed = math.max(CONFIG.landingCarryExitSpeed + 0.5, currentHumanoid.WalkSpeed + 0.5)
+			if currentHorizontalSpeed <= rearmSpeed then
+				landingCarryConsumedThisGroundContact = false
+			end
+		end
+
+		local highSpeedGrounded = currentHorizontalSpeed >= (activationThreshold + 0.25)
+		local canActivateLandingCarry = CONFIG.landingCarryEnabled
+			and not overrideActive
+			and not landingCarryActive
+			and not landingCarryConsumedThisGroundContact
+			and ((withinLandingAssistWindow or recentAirborne) or highSpeedGrounded or recentOverrideRelease)
+		if canActivateLandingCarry then
+			local carryCandidate = buildCarryCandidate(currentHorizontal, now, true)
+			local overrideCarryEligible = recentOverrideRelease and carryCandidate.Magnitude >= boostedGroundThreshold
+			if carryCandidate.Magnitude >= activationThreshold or overrideCarryEligible then
+				startLandingCarry(carryCandidate)
 			else
-				if currentHorizontalSpeed > CONFIG.groundFrictionMinSpeed then
-					local currentDirection = if currentHorizontalSpeed > EPSILON then currentHorizontal.Unit else inputDirection
-					local dot = currentDirection:Dot(inputDirection)
-					if dot <= CONFIG.oppositeDotThreshold then
-						local turnAlpha = 1 - math.exp(-CONFIG.turnResponse * stepDt)
-						local steered = currentDirection:Lerp(inputDirection, math.clamp(turnAlpha * 0.8, 0, 1))
-						if steered.Magnitude > EPSILON then
-							currentDirection = steered.Unit
-						end
-						local nextSpeed = math.max(0, currentHorizontalSpeed - (CONFIG.groundOppositeBrakeAccel * stepDt))
-						if nextSpeed > CONFIG.groundFrictionMinSpeed then
-							local nextHorizontal = currentDirection * nextSpeed
-							currentRootPart.AssemblyLinearVelocity = Vector3.new(nextHorizontal.X, velocity.Y, nextHorizontal.Z)
-							currentHorizontal = nextHorizontal
-							currentHorizontalSpeed = nextSpeed
-							targetHorizontalVelocity = nextHorizontal
-							hasTargetHorizontalVelocity = true
-						else
-							targetHorizontalVelocity = Vector3.zero
-							hasTargetHorizontalVelocity = false
-						end
-					else
-						targetHorizontalVelocity = currentHorizontal
-						hasTargetHorizontalVelocity = currentHorizontalSpeed > CONFIG.groundFrictionMinSpeed
-					end
-				else
-					targetHorizontalVelocity = Vector3.zero
-					hasTargetHorizontalVelocity = false
-				end
+				stopLandingCarry()
+			end
+		elseif overrideActive then
+			stopLandingCarry()
+		end
+
+		if landingCarryActive then
+			local stillCarrying = updateLandingCarry(stepDt, currentHumanoid, overrideActive)
+			if stillCarrying then
+				local liveHorizontal = horizontal(currentRootPart.AssemblyLinearVelocity)
+				currentHorizontal = liveHorizontal
+				currentHorizontalSpeed = liveHorizontal.Magnitude
 			end
 		end
 
-		if (now - lastGroundedAt) > CONFIG.groundResetGraceSeconds then
+		wasGrounded = true
+		if (now - lastAirborneAt) > CONFIG.groundResetGraceSeconds then
 			lastAirborneHorizontalVelocity = Vector3.zero
-			if not CONFIG.groundFrictionEnabled or currentHorizontalSpeed <= CONFIG.groundFrictionMinSpeed then
-				targetHorizontalVelocity = Vector3.zero
-				hasTargetHorizontalVelocity = false
-			end
+			airbornePeakHorizontalVelocity = Vector3.zero
+			targetHorizontalVelocity = Vector3.zero
+			hasTargetHorizontalVelocity = false
 		end
 
-		setDebugAttributes(false, targetHorizontalVelocity.Magnitude, currentHorizontalSpeed)
+		setAirDebugAttributes(false, targetHorizontalVelocity.Magnitude, currentHorizontalSpeed)
 		return
+	end
+
+	if landingCarryActive then
+		stopLandingCarry()
 	end
 
 	if wasGrounded then
@@ -374,9 +601,15 @@ local function applyAirMomentumStep(dt: number)
 		end
 	end
 	wasGrounded = false
+	lastAirborneAt = now
+	landingCarryConsumedThisGroundContact = false
+	landingAssistConsumedThisGroundContact = false
 
 	if currentHorizontalSpeed > EPSILON then
 		lastAirborneHorizontalVelocity = currentHorizontal
+		if currentHorizontalSpeed > airbornePeakHorizontalVelocity.Magnitude then
+			airbornePeakHorizontalVelocity = currentHorizontal
+		end
 	end
 
 	if CONFIG.adoptExternalBoost and currentHorizontalSpeed > (targetHorizontalVelocity.Magnitude + CONFIG.externalBoostAdoptThreshold) then
@@ -389,13 +622,13 @@ local function applyAirMomentumStep(dt: number)
 			targetHorizontalVelocity = currentHorizontal
 			hasTargetHorizontalVelocity = true
 		end
-		setDebugAttributes(false, targetHorizontalVelocity.Magnitude, currentHorizontalSpeed)
+		setAirDebugAttributes(false, targetHorizontalVelocity.Magnitude, currentHorizontalSpeed)
 		return
 	end
 
 	if not hasTargetHorizontalVelocity then
 		if currentHorizontalSpeed <= EPSILON then
-			setDebugAttributes(false, 0, currentHorizontalSpeed)
+			setAirDebugAttributes(false, 0, currentHorizontalSpeed)
 			return
 		end
 		targetHorizontalVelocity = currentHorizontal
@@ -406,7 +639,7 @@ local function applyAirMomentumStep(dt: number)
 	if speed <= CONFIG.minControllableSpeed then
 		targetHorizontalVelocity = Vector3.zero
 		hasTargetHorizontalVelocity = false
-		setDebugAttributes(false, 0, currentHorizontalSpeed)
+		setAirDebugAttributes(false, 0, currentHorizontalSpeed)
 		return
 	end
 
@@ -422,15 +655,61 @@ local function applyAirMomentumStep(dt: number)
 				direction = steered.Unit
 			end
 		else
-			speed = speed * math.max(0, 1 - (CONFIG.turnSpeedLossPerSecond * stepDt))
+			-- Directional-fight steering:
+			-- only keep momentum component along current input direction,
+			-- and actively bleed the rest so turning cannot fully preserve old speed.
+			local momentum = direction * speed
+			local forwardCarrySpeed = math.max(0, momentum:Dot(inputDirection))
+			local desiredMomentum = inputDirection * forwardCarrySpeed
+			local toDesired = desiredMomentum - momentum
+			local maxChange = math.max(0, CONFIG.airDirectionalFightAccel) * stepDt
+			local toDesiredMag = toDesired.Magnitude
+			if toDesiredMag > EPSILON and maxChange > EPSILON then
+				if toDesiredMag > maxChange then
+					momentum += toDesired.Unit * maxChange
+				else
+					momentum = desiredMomentum
+				end
+			else
+				momentum = desiredMomentum
+			end
+
+			-- Keep a small baseline decay.
+			momentum *= math.max(0, 1 - (CONFIG.turnSpeedLossPerSecond * stepDt))
+
+			-- Keep low-speed in-air control responsive without pumping high-speed momentum.
+			local walkSpeed = math.max(0, currentHumanoid.WalkSpeed)
+			local alongInputSpeed = momentum:Dot(inputDirection)
+			if alongInputSpeed < walkSpeed then
+				local accelStep = math.min(walkSpeed - alongInputSpeed, CONFIG.airControlAccelToWalkSpeed * stepDt)
+				momentum += inputDirection * accelStep
+			end
+
 			local steered = direction:Lerp(inputDirection, math.clamp(turnAlpha, 0, 1))
-			if steered.Magnitude > EPSILON then
-				direction = steered.Unit
+			if steered.Magnitude > EPSILON and momentum.Magnitude > EPSILON then
+				-- preserve directional responsiveness while using momentum vector for speed.
+				local steeredDir = steered.Unit
+				local blended = momentum:Lerp(steeredDir * momentum.Magnitude, math.clamp(turnAlpha * 0.35, 0, 1))
+				if blended.Magnitude > EPSILON then
+					momentum = blended
+				end
+			end
+
+			speed = momentum.Magnitude
+			if speed > EPSILON then
+				direction = momentum.Unit
 			end
 		end
 	else
 		speed = speed * math.pow(CONFIG.noInputRetentionPerSecond, stepDt)
 	end
+
+	-- Bhop deceleration: never zero, and by default 3x less than ground carry friction.
+	local bhopDecel = CONFIG.bhopLinearDecel
+	if bhopDecel <= 0 then
+		bhopDecel = math.max(0, CONFIG.landingCarryLinearDecel / 3)
+	end
+	speed = math.max(0, speed - (bhopDecel * stepDt))
 
 	local capStart = math.max(CONFIG.softCapMinStart, currentHumanoid.WalkSpeed * CONFIG.softCapWalkspeedMultiplier)
 	local capHard = capStart * CONFIG.softCapHardMultiplier
@@ -444,7 +723,7 @@ local function applyAirMomentumStep(dt: number)
 	if speed <= CONFIG.minControllableSpeed then
 		targetHorizontalVelocity = Vector3.zero
 		hasTargetHorizontalVelocity = false
-		setDebugAttributes(false, 0, currentHorizontalSpeed)
+		setAirDebugAttributes(false, 0, currentHorizontalSpeed)
 		return
 	end
 
@@ -457,7 +736,7 @@ local function applyAirMomentumStep(dt: number)
 		currentRootPart.AssemblyLinearVelocity = Vector3.new(nextHorizontal.X, velocity.Y, nextHorizontal.Z)
 	end
 
-	setDebugAttributes(true, speed, currentHorizontalSpeed)
+	setAirDebugAttributes(true, speed, currentHorizontalSpeed)
 end
 
 local updateSignal = RunService.Heartbeat

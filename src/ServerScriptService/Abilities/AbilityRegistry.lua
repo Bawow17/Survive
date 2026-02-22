@@ -7,6 +7,35 @@ local AbilityRegistry = {}
 local abilitiesFolder = script.Parent
 local registeredAbilities: {[string]: any} = {}
 
+local function replicateAbilityModelForGrant(modelReplicationService: any, abilityId: string, abilityBalance: any)
+	if not modelReplicationService then
+		return
+	end
+
+	local modelPath = abilityBalance and abilityBalance.modelPath or nil
+	if typeof(modelPath) == "string" and modelPath ~= "" then
+		local serverPath: string? = nil
+		if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
+			serverPath = modelPath:sub(#"ReplicatedStorage." + 1)
+		elseif modelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
+			serverPath = modelPath:sub(#"ServerStorage." + 1)
+		end
+
+		if serverPath then
+			local parts = string.split(serverPath, ".")
+			if #parts > 1 then
+				local replicatedPath = table.concat(parts, ".", 1, #parts - 1)
+				local success = modelReplicationService.replicateModel(serverPath, replicatedPath)
+				if success then
+					return
+				end
+			end
+		end
+	end
+
+	modelReplicationService.replicateAbility(abilityId)
+end
+
 -- Validate that an ability has the required files
 local function validateAbility(abilityId: string, abilityFolder: Instance): boolean
 	-- Check for Config.lua (new unified format) or Balance.lua (legacy)
@@ -234,7 +263,7 @@ function AbilityRegistry.grantAbility(
 	
 	-- Replicate model to client if replication service provided
 	if ModelReplicationService then
-		ModelReplicationService.replicateAbility(abilityId)
+		replicateAbilityModelForGrant(ModelReplicationService, abilityId, ability.balance)
 	end
 
 	-- Ensure Ability marker component exists so ability systems can pick this player up
