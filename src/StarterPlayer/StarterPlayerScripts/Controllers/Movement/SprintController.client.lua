@@ -47,6 +47,11 @@ local getSprintIntent: () -> boolean = function(): boolean
 	return false
 end
 
+local function isSprintInputLocked(): boolean
+	return player:GetAttribute("CooldownsFrozen") == true
+		or player:GetAttribute("UltimateInputLocked") == true
+end
+
 local function disconnectRunAnimationConnection()
 	if runAnimationConnection then
 		runAnimationConnection:Disconnect()
@@ -212,6 +217,9 @@ local function isWeaponEndlagActive(): boolean
 end
 
 getSprintIntent = function(): boolean
+	if isSprintInputLocked() then
+		return false
+	end
 	if isWeaponEndlagActive() then
 		return false
 	end
@@ -370,11 +378,23 @@ local function forceStopSprint()
 	pushSprintIntent()
 end
 
+local wasSprintInputLocked = false
+local function refreshSprintInputLockState()
+	local isLocked = isSprintInputLocked()
+	if isLocked and not wasSprintInputLocked then
+		forceStopSprint()
+	end
+	wasSprintInputLocked = isLocked
+end
+
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 	if gameProcessed then
 		return
 	end
 	if UserInputService:GetFocusedTextBox() then
+		return
+	end
+	if isSprintInputLocked() then
 		return
 	end
 
@@ -420,6 +440,8 @@ player:GetAttributeChangedSignal(ATTR_TOGGLE_SPRINT_MODE):Connect(function()
 	end
 	pushSprintIntent()
 end)
+player:GetAttributeChangedSignal("CooldownsFrozen"):Connect(refreshSprintInputLockState)
+player:GetAttributeChangedSignal("UltimateInputLocked"):Connect(refreshSprintInputLockState)
 
 player.CharacterAdded:Connect(function()
 	bindCharacter(player.Character)
@@ -445,6 +467,7 @@ end)
 resolveSprintUi()
 bindCharacter(player.Character)
 resetLocalSprintState()
+refreshSprintInputLockState()
 
 sprintForceOffRemote.OnClientEvent:Connect(function()
 	forceStopSprint()

@@ -34,7 +34,7 @@ return {
 		oppositeBrakeAccel = 72,
 		turnResponse = 7.5,
 		turnSpeedLossPerSecond = 0.01,
-		bhopLinearDecel = 0.0, -- 0 = auto derive from landingCarryLinearDecel / 3
+		bhopLinearDecel = 0.0, -- 0 = auto derive from landingCarryLinearDecel / 5
 		airDirectionalFightAccel = 260.0,
 		airControlAccelToWalkSpeed = 42.0,
 		airMisalignedBrakeAccel = 18.0,

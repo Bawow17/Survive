@@ -34,6 +34,7 @@ local function profGauge(name: string, value: number)
 end
 
 local ProjectileService = {}
+local TemporalStasisSystem: any
 
 type HomingConfig = {
 	strengthDeg: number,
@@ -95,6 +96,7 @@ type BeamConfig = {
 type SplitConfig = {
 	count: number,
 	damageMultiplier: number,
+	procCoefficient: number?,
 	scaleMultiplier: number,
 	maxSpreadDeg: number,
 	targetingAngle: number?,
@@ -153,6 +155,14 @@ type ProjectileRecord = {
 	lastOwnerPos: Vector3?,
 	stickOffset: Vector3?,
 	isSplitChild: boolean?,
+	timeStopFrozen: boolean?,
+	timeStopSessionId: number?,
+	frozenAt: number?,
+	frozenPosition: Vector3?,
+	accumulatedFrozenDuration: number?,
+	timeStopCollisionBoostUntil: number?,
+	procCoefficient: number?,
+	splitProcCoefficient: number?,
 }
 
 local world: any
@@ -182,6 +192,8 @@ local projectileRemotesFolder: Instance
 local ProjectilesSpawnBatch: RemoteEvent
 local ProjectilesDespawnBatch: RemoteEvent
 local ProjectilesImpactBatch: RemoteEvent
+local ProjectilesFreezeBatch: RemoteEvent
+local ProjectilesResumeBatch: RemoteEvent
 
 local SIM_HZ = 15
 local SIM_INTERVAL = 1 / SIM_HZ
@@ -244,7 +256,11 @@ local spawnCounts: {[Player]: {count: number, resetAt: number}} = setmetatable({
 local pendingSpawns: {[Player]: {any}} = {}
 local pendingDespawns: {[Player]: {any}} = {}
 local pendingImpacts: {[Player]: {any}} = {}
+local pendingFreezes: {[Player]: {any}} = {}
+local pendingResumes: {[Player]: {any}} = {}
 local petalRetargetRequests: {[number]: boolean} = {}
+local freezeProjectile: (ProjectileRecord, Vector3?, number?) -> () = function() end
+local unfreezeProjectile: (ProjectileRecord, number?) -> () = function() end
 local activeExplosions: {{
 	position: Vector3,
 	radius: number,
@@ -263,6 +279,7 @@ local activeExplosions: {{
 	retargetOwnerEntity: number?,
 	retargetTriggered: boolean?,
 	sourceProjectileId: number?,
+	procCoefficient: number?,
 }} = {}
 local lastRecipientRefresh = 0
 
@@ -396,6 +413,7 @@ local function queueSpawnForPlayer(player: Player, record: ProjectileRecord)
 			strengthDeg = record.homing.strengthDeg,
 			maxAngleDeg = record.homing.maxAngleDeg,
 			maxTurnDeg = record.homing.maxTurnDeg,
+			targetEntity = record.homing.targetEntity,
 			stayHorizontal = record.homing.stayHorizontal,
 			alwaysStayHorizontal = record.homing.alwaysStayHorizontal,
 		} or nil,
@@ -416,7 +434,33 @@ local function queueSpawnForPlayer(player: Player, record: ProjectileRecord)
 			lengthAxis = record.beam.lengthAxis,
 		} or nil,
 		isSplitChild = record.isSplitChild == true,
+		frozen = record.timeStopFrozen == true,
+		timeStopSessionId = record.timeStopSessionId,
 	})
+end
+
+local function queueFreezeForRecipients(record: ProjectileRecord, position: Vector3, sessionId: number?)
+	for player in pairs(record.recipients) do
+		if player and player.Parent == Players then
+			queueForPlayer(pendingFreezes, player, {
+				id = record.id,
+				pos = position,
+				sessionId = sessionId,
+			})
+		end
+	end
+end
+
+local function queueResumeForRecipients(record: ProjectileRecord, frozenDuration: number, sessionId: number?)
+	for player in pairs(record.recipients) do
+		if player and player.Parent == Players then
+			queueForPlayer(pendingResumes, player, {
+				id = record.id,
+				frozenDuration = frozenDuration,
+				sessionId = sessionId,
+			})
+		end
+	end
 end
 
 local function sendDespawn(record: ProjectileRecord, reason: string)
@@ -756,6 +800,7 @@ local function spawnSplitProjectiles(record: ProjectileRecord, hitPos: Vector3, 
 	local lifetime = record.lifetime or math.max(record.expiresAt - now, 0.05)
 	local splitScale = split.scaleMultiplier or 1
 	local splitDamage = record.damage * (split.damageMultiplier or 1)
+	local splitProcCoefficient = split.procCoefficient or record.splitProcCoefficient or record.procCoefficient
 	local splitRadius = record.radius * splitScale
 	local splitScaleVisual = (record.visualScale or 1) * splitScale
 	local basePierce = record.basePierce or 0
@@ -795,6 +840,8 @@ local function spawnSplitProjectiles(record: ProjectileRecord, hitPos: Vector3, 
 			alwaysStayHorizontal = record.alwaysStayHorizontal,
 			stickToPlayer = record.stickToPlayer,
 			isSplitChild = true,
+			procCoefficient = splitProcCoefficient,
+			splitProcCoefficient = record.splitProcCoefficient,
 		})
 
 		if splitProjectileId and excludedTargetEntity then
@@ -1053,6 +1100,20 @@ function ProjectileService.init(worldRef: any, components: any, getPlayerFromEnt
 		ProjectilesImpactBatch.Parent = projectileRemotesFolder
 	end
 
+	ProjectilesFreezeBatch = projectileRemotesFolder:FindFirstChild("ProjectilesFreezeBatch") :: RemoteEvent
+	if not ProjectilesFreezeBatch then
+		ProjectilesFreezeBatch = Instance.new("RemoteEvent")
+		ProjectilesFreezeBatch.Name = "ProjectilesFreezeBatch"
+		ProjectilesFreezeBatch.Parent = projectileRemotesFolder
+	end
+
+	ProjectilesResumeBatch = projectileRemotesFolder:FindFirstChild("ProjectilesResumeBatch") :: RemoteEvent
+	if not ProjectilesResumeBatch then
+		ProjectilesResumeBatch = Instance.new("RemoteEvent")
+		ProjectilesResumeBatch.Name = "ProjectilesResumeBatch"
+		ProjectilesResumeBatch.Parent = projectileRemotesFolder
+	end
+
 	Players.PlayerAdded:Connect(function(player: Player)
 		if #projectileList == 0 then
 			return
@@ -1085,6 +1146,8 @@ function ProjectileService.init(worldRef: any, components: any, getPlayerFromEnt
 		pendingSpawns[player] = nil
 		pendingDespawns[player] = nil
 		pendingImpacts[player] = nil
+		pendingFreezes[player] = nil
+		pendingResumes[player] = nil
 		spawnCounts[player] = nil
 	end)
 end
@@ -1116,6 +1179,8 @@ function ProjectileService.spawnProjectile(payload: {
 	slowOnHit: SlowConfig?,
 	frostbiteOnHit: FrostbiteOnHit?,
 	isSplitChild: boolean?,
+	procCoefficient: number?,
+	splitProcCoefficient: number?,
 }): number?
 	if not payload or typeof(payload.origin) ~= "Vector3" then
 		return nil
@@ -1197,9 +1262,17 @@ function ProjectileService.spawnProjectile(payload: {
 		lastOwnerPos = nil,
 		stickOffset = nil,
 		isSplitChild = payload.isSplitChild == true,
+		timeStopFrozen = false,
+		timeStopSessionId = nil,
+		frozenAt = nil,
+		frozenPosition = nil,
+		accumulatedFrozenDuration = 0,
+		timeStopCollisionBoostUntil = nil,
+		procCoefficient = payload.procCoefficient,
+		splitProcCoefficient = payload.splitProcCoefficient,
 	}
 
-	if record.homing then
+	if record.homing and typeof(record.homing.targetEntity) ~= "number" then
 		record.homing.targetEntity = nil
 	end
 	if record.orbit then
@@ -1210,6 +1283,13 @@ function ProjectileService.spawnProjectile(payload: {
 		if ownerPos then
 			record.lastOwnerPos = ownerPos
 			record.stickOffset = record.origin - ownerPos
+		end
+	end
+
+	if TemporalStasisSystem and TemporalStasisSystem.isActive and TemporalStasisSystem.isActive() then
+		if TemporalStasisSystem.isPointFrozen and TemporalStasisSystem.isPointFrozen(record.origin) then
+			local sessionId = TemporalStasisSystem.getActiveSessionId and TemporalStasisSystem.getActiveSessionId() or nil
+			freezeProjectile(record, record.origin, sessionId)
 		end
 	end
 
@@ -1259,6 +1339,7 @@ local function startExplosion(record: ProjectileRecord, center: Vector3, reason:
 		retargetOwnerEntity = aoe.retargetPetalsOwner,
 		retargetTriggered = false,
 		sourceProjectileId = record.id,
+		procCoefficient = record.procCoefficient,
 	}
 
 	sendImpact(record, center, reason, aoe, despawnOnImpact)
@@ -1316,7 +1397,53 @@ local function processExplosions(now: number, hitBudget: number): number
 								invincibleDiagCounters.damageCalls += 1
 							end
 							local enemyHealthAtHit = health.current
-							local _, didApply = DamageSystem.applyDamage(enemyId, explosion.damage, "magic", explosion.ownerEntity, explosion.kind)
+							local knockbackEffect = nil
+							if explosion.knockbackDistance and explosion.knockbackDistance > 0 then
+								local dir = testPos - explosion.position
+								dir = Vector3.new(dir.X, 0, dir.Z)
+								if dir.Magnitude > 0.01 then
+									knockbackEffect = {
+										kind = "knockback",
+										direction = dir,
+										distance = explosion.knockbackDistance,
+										duration = explosion.knockbackDuration or 0.25,
+										stunned = explosion.knockbackStunned,
+									}
+								end
+							end
+							local didApply = false
+							if TemporalStasisSystem and TemporalStasisSystem.submitEnemyHit then
+								local _, applied = TemporalStasisSystem.submitEnemyHit({
+									targetEntity = enemyId,
+									sourceEntity = explosion.ownerEntity,
+									damageAmount = explosion.damage,
+									damageType = "magic",
+									abilityId = explosion.kind,
+									procCoefficient = explosion.procCoefficient,
+									timestamp = now,
+									sideEffects = knockbackEffect and { knockbackEffect } or nil,
+								})
+								didApply = applied == true
+							else
+								local _, applied = DamageSystem.applyDamage(
+									enemyId,
+									explosion.damage,
+									"magic",
+									explosion.ownerEntity,
+									explosion.kind,
+									{ procCoefficient = explosion.procCoefficient }
+								)
+								didApply = applied == true
+								if didApply and knockbackEffect then
+									DamageSystem.applyKnockback(
+										enemyId,
+										knockbackEffect.direction,
+										knockbackEffect.distance,
+										knockbackEffect.duration,
+										knockbackEffect.stunned
+									)
+								end
+							end
 							if INVINCIBLE_ENEMY_DIAGNOSTICS then
 								if didApply then
 									invincibleDiagCounters.damageApplied += 1
@@ -1338,19 +1465,6 @@ local function processExplosions(now: number, hitBudget: number): number
 								end
 							end
 
-							if explosion.knockbackDistance and explosion.knockbackDistance > 0 then
-								local dir = testPos - explosion.position
-								dir = Vector3.new(dir.X, 0, dir.Z)
-								if dir.Magnitude > 0.01 then
-									DamageSystem.applyKnockback(
-										enemyId,
-										dir,
-										explosion.knockbackDistance,
-										explosion.knockbackDuration or 0.25,
-										explosion.knockbackStunned
-									)
-								end
-							end
 						end
 					end
 				end
@@ -1430,13 +1544,57 @@ function ProjectileService.despawnOwnedProjectiles(ownerEntity: number)
 	petalRetargetRequests[ownerEntity] = nil
 end
 
+freezeProjectile = function(record: ProjectileRecord, freezePosition: Vector3?, sessionId: number?)
+	if record.timeStopFrozen then
+		return
+	end
+	local now = getSimTime()
+	local frozenPos = freezePosition or record.lastPos
+	record.timeStopFrozen = true
+	record.timeStopSessionId = sessionId
+	record.frozenAt = now
+	record.frozenPosition = frozenPos
+	record.lastPos = frozenPos
+	record.lastSimTime = now
+	record.nextSimTime = now
+	queueFreezeForRecipients(record, frozenPos, sessionId)
+end
+
+unfreezeProjectile = function(record: ProjectileRecord, sessionId: number?)
+	if not record.timeStopFrozen then
+		return
+	end
+	local now = getSimTime()
+	local frozenAt = record.frozenAt or now
+	local frozenDuration = math.max(now - frozenAt, 0)
+	record.timeStopFrozen = false
+	record.timeStopSessionId = nil
+	record.frozenAt = nil
+	record.frozenPosition = nil
+	record.accumulatedFrozenDuration = (record.accumulatedFrozenDuration or 0) + frozenDuration
+	if frozenDuration > 0 then
+		record.spawnTime += frozenDuration
+		record.expiresAt += frozenDuration
+		if record.hitCooldowns then
+			for enemyId, expiresAt in pairs(record.hitCooldowns) do
+				record.hitCooldowns[enemyId] = expiresAt + frozenDuration
+			end
+		end
+	end
+	-- Keep resumed projectiles collidable even when they are far from players.
+	-- During long stasis windows, players can move far enough that relevance
+	-- culling would otherwise disable collision and cause pass-throughs.
+	record.timeStopCollisionBoostUntil = record.expiresAt
+	queueResumeForRecipients(record, frozenDuration, sessionId)
+end
+
 function ProjectileService.step(dt: number)
 	local now = getSimTime()
 	if INVINCIBLE_ENEMY_DIAGNOSTICS then
 		invincibleDiagCounters.projectilesTotalSeen += #projectileList
 	end
 	if #projectileList == 0 and #activeExplosions == 0 then
-		if next(pendingSpawns) or next(pendingDespawns) or next(pendingImpacts) then
+		if next(pendingSpawns) or next(pendingDespawns) or next(pendingImpacts) or next(pendingFreezes) or next(pendingResumes) then
 			for player, payloads in pairs(pendingSpawns) do
 				if player and player.Parent == Players then
 					ProjectilesSpawnBatch:FireClient(player, payloads)
@@ -1455,11 +1613,25 @@ function ProjectileService.step(dt: number)
 				end
 				pendingImpacts[player] = nil
 			end
+			for player, payloads in pairs(pendingFreezes) do
+				if player and player.Parent == Players then
+					ProjectilesFreezeBatch:FireClient(player, payloads)
+				end
+				pendingFreezes[player] = nil
+			end
+			for player, payloads in pairs(pendingResumes) do
+				if player and player.Parent == Players then
+					ProjectilesResumeBatch:FireClient(player, payloads)
+				end
+				pendingResumes[player] = nil
+			end
 		end
 		return
 	end
 
 	local playerPositions = OctreeSystem.getPlayerPositions()
+	local stasisActive = TemporalStasisSystem and TemporalStasisSystem.isActive and TemporalStasisSystem.isActive() or false
+	local stasisSessionId = stasisActive and TemporalStasisSystem and TemporalStasisSystem.getActiveSessionId and TemporalStasisSystem.getActiveSessionId() or nil
 	if INVINCIBLE_ENEMY_DIAGNOSTICS then
 		invincibleDiagCounters.lastPlayerCount = #playerPositions
 		if #playerPositions == 0 then
@@ -1517,6 +1689,21 @@ function ProjectileService.step(dt: number)
 		if not record then
 			continue
 		end
+		if record.timeStopFrozen then
+			local stillFrozen = false
+			if stasisActive and TemporalStasisSystem and TemporalStasisSystem.isPointFrozen then
+				stillFrozen = TemporalStasisSystem.isPointFrozen(record.lastPos)
+			end
+			if stillFrozen then
+				record.lastSimTime = now
+				record.nextSimTime = now + SIM_INTERVAL
+				continue
+			end
+			unfreezeProjectile(record, stasisSessionId)
+		elseif stasisActive and TemporalStasisSystem and TemporalStasisSystem.isPointFrozen and TemporalStasisSystem.isPointFrozen(record.lastPos) then
+			freezeProjectile(record, record.lastPos, stasisSessionId)
+			continue
+		end
 		if record.expiresAt <= now then
 			local impactPos = record.lastPos
 			if record.splitOnHit and not record.splitOnHit.used then
@@ -1546,6 +1733,13 @@ function ProjectileService.step(dt: number)
 			simInterval = PETAL_SIM_INTERVAL
 		elseif not allowCollision then
 			simInterval = FAR_SIM_INTERVAL
+		end
+		if record.timeStopCollisionBoostUntil then
+			if now <= record.timeStopCollisionBoostUntil then
+				allowCollision = true
+			else
+				record.timeStopCollisionBoostUntil = nil
+			end
 		end
 		if INVINCIBLE_ENEMY_DIAGNOSTICS and allowCollision then
 			invincibleDiagCounters.projectilesCollisionEnabled += 1
@@ -1680,6 +1874,18 @@ function ProjectileService.step(dt: number)
 			newPos = Vector3.new(newPos.X, record.origin.Y, newPos.Z)
 		elseif record.homing and record.homing.alwaysStayHorizontal then
 			newPos = Vector3.new(newPos.X, record.origin.Y, newPos.Z)
+		end
+
+		if stasisActive and TemporalStasisSystem and TemporalStasisSystem.getFreezeEntryPoint then
+			local freezePos, _entryT, entrySessionId = TemporalStasisSystem.getFreezeEntryPoint(record.lastPos, newPos)
+			if freezePos then
+				record.lastPos = freezePos
+				record.lastSimTime = now
+				record.nextSimTime = now + simInterval
+				simCount += 1
+				freezeProjectile(record, freezePos, entrySessionId or stasisSessionId)
+				continue
+			end
 		end
 
 		local hit = false
@@ -1922,7 +2128,68 @@ function ProjectileService.step(dt: number)
 							invincibleDiagCounters.damageCalls += 1
 						end
 						local enemyHealthAtHit = enemyHealth and enemyHealth.current or nil
-						local _, didApply = DamageSystem.applyDamage(enemyId, record.damage, "magic", record.ownerEntity, record.kind)
+						local sideEffects = nil
+						if record.frostbiteOnHit then
+							sideEffects = sideEffects or {}
+							table.insert(sideEffects, {
+								kind = "frostbite",
+								statusId = record.frostbiteOnHit.statusId,
+								stacks = record.frostbiteOnHit.stacks,
+								duration = record.frostbiteOnHit.duration,
+								damageTakenPerStack = record.frostbiteOnHit.damageTakenPerStack,
+							})
+						end
+						if record.slowOnHit then
+							sideEffects = sideEffects or {}
+							table.insert(sideEffects, {
+								kind = "slow",
+								duration = record.slowOnHit.duration,
+								multiplier = record.slowOnHit.multiplier,
+								impaleModelPath = record.slowOnHit.impaleModelPath,
+							})
+						end
+
+						local didApply = false
+						if TemporalStasisSystem and TemporalStasisSystem.submitEnemyHit then
+							local _, applied = TemporalStasisSystem.submitEnemyHit({
+								targetEntity = enemyId,
+								sourceEntity = record.ownerEntity,
+								damageAmount = record.damage,
+								damageType = "magic",
+								abilityId = record.kind,
+								procCoefficient = record.procCoefficient,
+								timestamp = now,
+								sideEffects = sideEffects,
+							})
+							didApply = applied == true
+						else
+							local _, applied = DamageSystem.applyDamage(
+								enemyId,
+								record.damage,
+								"magic",
+								record.ownerEntity,
+								record.kind,
+								{ procCoefficient = record.procCoefficient }
+							)
+							didApply = applied == true
+							if didApply and record.frostbiteOnHit and DamageSystem.applyEnemyFrostbite then
+								DamageSystem.applyEnemyFrostbite(
+									enemyId,
+									record.frostbiteOnHit.stacks,
+									record.frostbiteOnHit.duration,
+									record.frostbiteOnHit.damageTakenPerStack,
+									record.frostbiteOnHit.statusId
+								)
+							end
+							if didApply and record.slowOnHit then
+								EnemySlowSystem.applySlow(
+									enemyId,
+									record.slowOnHit.duration,
+									record.slowOnHit.multiplier,
+									record.slowOnHit.impaleModelPath
+								)
+							end
+						end
 						if INVINCIBLE_ENEMY_DIAGNOSTICS then
 							if didApply then
 								invincibleDiagCounters.damageApplied += 1
@@ -1942,23 +2209,6 @@ function ProjectileService.step(dt: number)
 									nil
 								)
 							end
-						end
-						if didApply and record.frostbiteOnHit and DamageSystem.applyEnemyFrostbite then
-							DamageSystem.applyEnemyFrostbite(
-								enemyId,
-								record.frostbiteOnHit.stacks,
-								record.frostbiteOnHit.duration,
-								record.frostbiteOnHit.damageTakenPerStack,
-								record.frostbiteOnHit.statusId
-							)
-						end
-						if record.slowOnHit then
-							EnemySlowSystem.applySlow(
-								enemyId,
-								record.slowOnHit.duration,
-								record.slowOnHit.multiplier,
-								record.slowOnHit.impaleModelPath
-							)
 						end
 						if not record.beam then
 							record.hitSet[enemyId] = true
@@ -2063,6 +2313,22 @@ function ProjectileService.step(dt: number)
 		end
 		pendingImpacts[player] = nil
 	end
+	for player, payloads in pairs(pendingFreezes) do
+		if player and player.Parent == Players then
+			ProjectilesFreezeBatch:FireClient(player, payloads)
+		end
+		pendingFreezes[player] = nil
+	end
+	for player, payloads in pairs(pendingResumes) do
+		if player and player.Parent == Players then
+			ProjectilesResumeBatch:FireClient(player, payloads)
+		end
+		pendingResumes[player] = nil
+	end
+end
+
+function ProjectileService.setTemporalStasisSystem(temporalStasisSystem: any)
+	TemporalStasisSystem = temporalStasisSystem
 end
 
 function ProjectileService.isProjectileActive(projectileId: number): boolean

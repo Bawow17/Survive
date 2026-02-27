@@ -25,6 +25,15 @@ type PickupRecord = {
 	seekOnSpawn: boolean?,
 	visualOnly: boolean?,
 	claimed: boolean?,
+	itemId: string?,
+	modelPath: string?,
+	requiresInteract: boolean?,
+	interactionRadius: number?,
+	autoPickupRadius: number?,
+	spinPeriod: number?,
+	bobAmplitude: number?,
+	noDespawn: boolean?,
+	onCollect: ((any, Player, number) -> ())?,
 	recipients: {[Player]: boolean},
 }
 
@@ -121,6 +130,13 @@ local function buildSpawnPayload(record: PickupRecord): {[string]: any}
 		collectible = record.collectible ~= false,
 		seekOnSpawn = record.seekOnSpawn == true,
 		visualOnly = record.visualOnly == true,
+		itemId = record.itemId,
+		modelPath = record.modelPath,
+		requiresInteract = record.requiresInteract == true,
+		interactionRadius = record.interactionRadius,
+		autoPickupRadius = record.autoPickupRadius,
+		spinPeriod = record.spinPeriod,
+		bobAmplitude = record.bobAmplitude,
 	}
 end
 
@@ -386,7 +402,7 @@ function PickupService.init(worldRef: any, components: any, expSystemRef: any, g
 		if not record or record.claimed then
 			return
 		end
-		if record.expiresAt <= GameTimeSystem.getGameTime() then
+		if record.noDespawn ~= true and record.expiresAt <= GameTimeSystem.getGameTime() then
 			despawnPickupInternal(record)
 			return
 		end
@@ -404,7 +420,9 @@ function PickupService.init(worldRef: any, components: any, expSystemRef: any, g
 
 		local baseRadius, magnetRadius = buildPickupRadius(player)
 		local allowedRadius = baseRadius
-		if not record.isSink and isMagnetActive(playerEntity) then
+		if record.requiresInteract == true then
+			allowedRadius = record.interactionRadius or baseRadius
+		elseif not record.isSink and isMagnetActive(playerEntity) then
 			allowedRadius = math.max(allowedRadius, magnetRadius, GLOBAL_MAGNET_RADIUS)
 		end
 		allowedRadius = allowedRadius + REQUEST_DISTANCE_BUFFER
@@ -417,6 +435,13 @@ function PickupService.init(worldRef: any, components: any, expSystemRef: any, g
 		end
 
 		record.claimed = true
+
+		if record.onCollect then
+			local ok, err = pcall(record.onCollect, record, player, playerEntity)
+			if not ok then
+				warn(string.format("[PickupService] onCollect failed for pickup %d: %s", record.id, tostring(err)))
+			end
+		end
 
 		if ExpSystem then
 			local expMult = player:GetAttribute("ExpMultiplier") or 1.0
@@ -450,6 +475,7 @@ function PickupService.spawnPickup(position: Vector3, value: number, kind: strin
 	local seekOnSpawn = opts and opts.seekOnSpawn == true or false
 	local visualOnly = opts and opts.visualOnly == true or false
 	local allowMerge = not isSink and (opts and opts.allowMerge ~= false or opts == nil)
+	local noDespawn = opts and opts.noDespawn == true or false
 
 	if allowMerge then
 		local mergeTarget = findMergeTarget(kind, ownerEntity, position, now)
@@ -475,6 +501,15 @@ function PickupService.spawnPickup(position: Vector3, value: number, kind: strin
 		collectible = collectible,
 		seekOnSpawn = seekOnSpawn,
 		visualOnly = visualOnly,
+		itemId = if opts and typeof(opts.itemId) == "string" then opts.itemId else nil,
+		modelPath = if opts and typeof(opts.modelPath) == "string" then opts.modelPath else nil,
+		requiresInteract = if opts then opts.requiresInteract == true else nil,
+		interactionRadius = if opts and typeof(opts.interactionRadius) == "number" then opts.interactionRadius else nil,
+		autoPickupRadius = if opts and typeof(opts.autoPickupRadius) == "number" then opts.autoPickupRadius else nil,
+		spinPeriod = if opts and typeof(opts.spinPeriod) == "number" then opts.spinPeriod else nil,
+		bobAmplitude = if opts and typeof(opts.bobAmplitude) == "number" then opts.bobAmplitude else nil,
+		noDespawn = noDespawn,
+		onCollect = if opts and typeof(opts.onCollect) == "function" then opts.onCollect else nil,
 		recipients = {},
 	}
 	pickups[pickupId] = record
@@ -585,7 +620,7 @@ function PickupService.step(dt: number)
 	local now = GameTimeSystem.getGameTime()
 	local expiredIds = {}
 	for pickupId, record in pairs(pickups) do
-		if record.expiresAt <= now and not record.claimed then
+		if record.noDespawn ~= true and record.expiresAt <= now and not record.claimed then
 			table.insert(expiredIds, pickupId)
 		end
 	end

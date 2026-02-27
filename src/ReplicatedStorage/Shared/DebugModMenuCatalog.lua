@@ -4,20 +4,14 @@ local DebugModMenuCatalog = {}
 
 DebugModMenuCatalog.CategoryOrder = {
 	time = 1,
-	unlock = 2,
-	ability = 3,
-	passive = 4,
-	attribute = 5,
-	mobility = 6,
+	items = 2,
+	ultimate = 3,
 }
 
 DebugModMenuCatalog.CategoryLabels = {
 	time = "Time Controls",
-	unlock = "Ability Unlock",
-	ability = "Ability Upgrade",
-	passive = "Passive",
-	attribute = "Attribute",
-	mobility = "Mobility",
+	items = "Items",
+	ultimate = "Ultimate",
 }
 
 DebugModMenuCatalog.TimeOptions = {

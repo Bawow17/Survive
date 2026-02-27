@@ -18,7 +18,7 @@ local GameState = {
 
 -- Module state
 local currentState = GameState.LOBBY
-local playersInGame: {[Player]: {entity: number?, level: number, exp: number, upgrades: any?}} = {}
+local playersInGame: {[Player]: {entity: number?, level: number, exp: number}} = {}
 local gameStartTime = 0
 local privateGameCode: string? = nil
 local wipeData: {[Player]: {level: number, exp: number}}? = nil
@@ -356,7 +356,6 @@ function GameStateManager.addPlayerToGame(player: Player)
 		entity = playerEntity,
 		level = 1,
 		exp = 0,
-		upgrades = {},
 	}
 	
 	-- Notify client that game started
@@ -511,7 +510,6 @@ function handleContinuePurchased(player: Player)
 						entity = playerEntity,
 						level = data.level,
 						exp = data.exp,
-						upgrades = {},
 					}
 					
 					-- Notify client
@@ -656,13 +654,11 @@ function handleStartCleanup(player: Player)
 		ECSWorldService.DestroyEntity(entity)
 	end
 
-	-- Clear ALL ability attributes and rebuild stats so colors/stats reset on wipe
-	local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
+	-- Clear all ability attributes so temporary selections reset on wipe.
 	for player, data in pairs(playersInGame) do
 		if data and data.entity then
 			clearAfterimagesAttribute(data.entity)
 			clearAllAbilityAttributes(data.entity)
-			UpgradeSystem.rebuildPlayerStats(data.entity)
 		end
 	end
 	

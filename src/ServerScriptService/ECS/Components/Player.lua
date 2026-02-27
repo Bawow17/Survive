@@ -23,9 +23,6 @@ PlayerComponents.Spell = world:component()
 -- Cooldown component - Cooldown tracking
 PlayerComponents.Cooldown = world:component()
 
--- Upgrades component - Tracks player upgrade progress (ability and passive levels)
-PlayerComponents.Upgrades = world:component()
-
 -- AttributeSelections component - Tracks selected attributes per ability
 PlayerComponents.AttributeSelections = world:component()
 
@@ -65,9 +62,6 @@ PlayerComponents.PlayerPauseState = world:component()
 
 -- PendingLevelUps component - Queue of level ups when gaining multiple levels at once
 PlayerComponents.PendingLevelUps = world:component()
-
--- BankedHands component - Queue of level-up hands (no pause)
-PlayerComponents.BankedHands = world:component()
 
 -- PlayerPower component - Legacy adaptive-scaling data (currently unused runtime path)
 PlayerComponents.PlayerPower = world:component()

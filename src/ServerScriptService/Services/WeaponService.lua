@@ -1,11 +1,13 @@
 --!strict
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local Oathkeeper = require(game.ServerScriptService.Balance.Weapons.Oathkeeper)
+local CombatScaling = require(ReplicatedStorage.Shared.CombatScaling)
 
 local WeaponService = {}
 
@@ -13,6 +15,7 @@ local world: any = nil
 local Components: any = nil
 local PassiveEffectSystem: any = nil
 local DamageSystem: any = nil
+local TemporalStasisSystem: any = nil
 local getPlayerEntity: ((Player) -> number?)? = nil
 
 local primaryFireRequestRemote: RemoteEvent? = nil
@@ -29,6 +32,8 @@ local ENEMY_CANDIDATE_BASE_BUFFER = 30.0
 local ENEMY_CANDIDATE_HORIZONTAL_BUFFER = 18.0
 local DIAGONAL_VERTICAL_DELTA_THRESHOLD = 0.25
 local HITSCAN_THICKNESS = 0.5
+local HITSCAN_STASIS_VISUAL_HOLD_DISTANCE = 1.5
+local M2_CAST_ACTIVE_ATTRIBUTE = "WeaponM2CastActiveServer"
 
 local RAYCAST_PARAMS = RaycastParams.new()
 RAYCAST_PARAMS.FilterType = Enum.RaycastFilterType.Exclude
@@ -94,8 +99,18 @@ local function getEffectiveCooldown(playerEntity: number): number
 	return math.max(0.05, cooldown)
 end
 
-local function getEffectiveDamage(playerEntity: number): number
-	local damage = Oathkeeper.damage
+local function getPlayerLevel(playerEntity: number): number
+	if not world or not Components or not Components.Level then
+		return 1
+	end
+	local levelComponent = world:get(playerEntity, Components.Level)
+	if levelComponent and typeof(levelComponent.current) == "number" then
+		return math.max(1, math.floor(levelComponent.current))
+	end
+	return 1
+end
+
+local function applyDamageMultiplier(playerEntity: number, damage: number): number
 	if Oathkeeper.usesDamageMultiplier and PassiveEffectSystem and PassiveEffectSystem.getDamageMultiplier then
 		local mult = PassiveEffectSystem.getDamageMultiplier(playerEntity)
 		if typeof(mult) == "number" and mult > 0 then
@@ -103,6 +118,20 @@ local function getEffectiveDamage(playerEntity: number): number
 		end
 	end
 	return math.max(0, damage)
+end
+
+local function getEffectivePrimaryDamage(playerEntity: number): number
+	local level = getPlayerLevel(playerEntity)
+	local baseDamage = CombatScaling.getBaseDamageAtLevel(level)
+	local coefficient = math.max(0, Oathkeeper.primaryDamageCoefficient or 1)
+	return applyDamageMultiplier(playerEntity, baseDamage * coefficient)
+end
+
+local function getEffectiveSecondaryDamage(playerEntity: number): number
+	local level = getPlayerLevel(playerEntity)
+	local baseDamage = CombatScaling.getBaseDamageAtLevel(level)
+	local coefficient = math.max(0, Oathkeeper.secondaryDamageCoefficient or 1)
+	return applyDamageMultiplier(playerEntity, baseDamage * coefficient)
 end
 
 local function getEffectiveSharedLockout(playerEntity: number): number
@@ -199,6 +228,16 @@ local function distanceSq(a: Vector3, b: Vector3): number
 	local dy = a.Y - b.Y
 	local dz = a.Z - b.Z
 	return dx * dx + dy * dy + dz * dz
+end
+
+local function computeShortHoldPoint(origin: Vector3, target: Vector3, maxDistance: number): Vector3
+	local segment = target - origin
+	local segmentLength = segment.Magnitude
+	if segmentLength <= 1e-6 then
+		return target
+	end
+	local clampedDistance = math.clamp(maxDistance, 0, segmentLength)
+	return origin + (segment.Unit * clampedDistance)
 end
 
 local function gatherEnemyCandidates(segmentStart: Vector3, segmentEnd: Vector3, includeHorizontalFallback: boolean): {number}
@@ -339,6 +378,7 @@ local function buildShotResult(player: Player, targetPoint: Vector3): {[string]:
 		segmentEnd = blocker.Position
 		impactNormal = blocker.Normal
 	end
+	local pathEndNormal = impactNormal
 
 	local includeHorizontalFallback = math.abs(segmentEnd.Y - origin.Y) >= DIAGONAL_VERTICAL_DELTA_THRESHOLD
 	local candidates = gatherEnemyCandidates(origin, segmentEnd, includeHorizontalFallback)
@@ -378,9 +418,12 @@ local function buildShotResult(player: Player, targetPoint: Vector3): {[string]:
 	local impactPosition = hitEnemyPoint or segmentEnd
 	return {
 		origin = origin,
+		pathEndPosition = segmentEnd,
+		pathEndNormal = pathEndNormal,
 		impactPosition = impactPosition,
 		impactNormal = impactNormal,
 		hitEnemyEntity = hitEnemyEntity,
+		hitEnemyT = if hitEnemyEntity then nearestT else nil,
 		didHitEnemy = hitEnemyEntity ~= nil,
 	}
 end
@@ -529,16 +572,89 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 	end
 
 	local didApplyDamage = false
+	local deferredDamage = false
+	local procCoefficient = Oathkeeper.primaryProcCoefficient or 1.0
+	if DamageSystem and DamageSystem.notifyAttackAttempt then
+		DamageSystem.notifyAttackAttempt({
+			sourceEntity = playerEntity,
+			targetEntity = shot.hitEnemyEntity,
+			abilityId = "OathkeeperPrimary",
+			procCoefficient = procCoefficient,
+			aimPoint = targetPoint,
+		})
+	end
+	local stasisClip = TemporalStasisSystem and TemporalStasisSystem.clipHitscan and TemporalStasisSystem.clipHitscan(shot.origin, shot.impactPosition) or nil
+	local boundaryHoldImpact = stasisClip and stasisClip.holdImpactPosition or nil
+	local boundaryHoldPoint = if typeof(boundaryHoldImpact) == "Vector3" then boundaryHoldImpact else nil
+	local hasBoundaryHold = stasisClip and stasisClip.hasBoundaryHold == true
+	local shouldHoldTracer = stasisClip and stasisClip.active == true
+		and (stasisClip.touchesFrozenVolume == true or hasBoundaryHold or stasisClip.startInside == true or stasisClip.targetInside == true)
+	local visualHoldPoint = if shouldHoldTracer
+		then computeShortHoldPoint(shot.origin, shot.impactPosition, HITSCAN_STASIS_VISUAL_HOLD_DISTANCE)
+		else boundaryHoldPoint
+	local holdBoundaryDistance = if boundaryHoldPoint then (boundaryHoldPoint - shot.origin).Magnitude else nil
+	local stasisSessionId = stasisClip and stasisClip.sessionId or (TemporalStasisSystem and TemporalStasisSystem.getActiveSessionId and TemporalStasisSystem.getActiveSessionId() or nil)
+	local finalImpactForVfx = shot.impactPosition
+	local finalImpactNormalForVfx = shot.impactNormal
 	if shot.hitEnemyEntity then
-		local damageAmount = getEffectiveDamage(playerEntity)
-		local _, applied = DamageSystem.applyDamage(
-			shot.hitEnemyEntity,
-			damageAmount,
-			"weapon",
-			playerEntity,
-			"OathkeeperPrimary"
-		)
-		didApplyDamage = applied == true
+		local damageAmount = getEffectivePrimaryDamage(playerEntity)
+		local hitDistance = (shot.impactPosition - shot.origin).Magnitude
+		local hitPastBoundary = hasBoundaryHold
+			and typeof(holdBoundaryDistance) == "number"
+			and hitDistance > (holdBoundaryDistance + 1e-3)
+		local shouldDeferFrozenTarget = false
+		if TemporalStasisSystem and TemporalStasisSystem.shouldDeferDamage then
+			shouldDeferFrozenTarget = TemporalStasisSystem.shouldDeferDamage(shot.hitEnemyEntity, playerEntity) == true
+		end
+		if (hitPastBoundary or shouldDeferFrozenTarget) and TemporalStasisSystem and TemporalStasisSystem.deferDamagePacket then
+			local replaySegmentEnd = shot.pathEndPosition
+			if typeof(replaySegmentEnd) ~= "Vector3" then
+				replaySegmentEnd = shot.impactPosition
+			end
+			local deferred = TemporalStasisSystem.deferDamagePacket({
+				targetEntity = shot.hitEnemyEntity,
+				sourceEntity = playerEntity,
+				damageAmount = damageAmount,
+				damageType = "weapon",
+				abilityId = "OathkeeperPrimary",
+				procCoefficient = procCoefficient,
+				timestamp = now,
+				forceDefer = hitPastBoundary,
+				replayHitscan = true,
+				replayOrigin = shot.origin,
+				replayEnd = replaySegmentEnd,
+			})
+			deferredDamage = deferred == true
+			if deferredDamage and typeof(replaySegmentEnd) == "Vector3" then
+				finalImpactForVfx = replaySegmentEnd
+				finalImpactNormalForVfx = if typeof(shot.pathEndNormal) == "Vector3" then shot.pathEndNormal else shot.impactNormal
+			end
+		end
+
+		if (not deferredDamage) and TemporalStasisSystem and TemporalStasisSystem.submitEnemyHit then
+			local _, applied, deferred = TemporalStasisSystem.submitEnemyHit({
+				targetEntity = shot.hitEnemyEntity,
+				sourceEntity = playerEntity,
+				damageAmount = damageAmount,
+				damageType = "weapon",
+				abilityId = "OathkeeperPrimary",
+				procCoefficient = procCoefficient,
+				timestamp = now,
+			})
+			didApplyDamage = applied == true
+			deferredDamage = deferred == true
+		elseif not deferredDamage then
+			local _, applied, deferred = DamageSystem.applyDamage(
+				shot.hitEnemyEntity,
+				damageAmount,
+				"weapon",
+				playerEntity,
+				"OathkeeperPrimary",
+				{ procCoefficient = procCoefficient }
+			)
+			didApplyDamage = applied == true
+			deferredDamage = deferred == true
+		end
 	end
 
 	primaryShotRemote:FireAllClients({
@@ -546,10 +662,14 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 		weaponId = Oathkeeper.id,
 		clientShotId = clientShotId,
 		origin = shot.origin,
-		impactPosition = shot.impactPosition,
-		impactNormal = shot.impactNormal,
+		impactPosition = visualHoldPoint or shot.impactPosition,
+		holdImpactPosition = visualHoldPoint,
+		finalImpactPosition = finalImpactForVfx,
+		impactNormal = finalImpactNormalForVfx,
 		didHitEnemy = shot.didHitEnemy,
 		didApplyDamage = didApplyDamage,
+		timeStopDeferred = deferredDamage or shouldHoldTracer == true,
+		timeStopSessionId = stasisSessionId,
 		effectiveCooldown = effectiveCooldown,
 		tracerLifetime = Oathkeeper.tracerLifetime,
 		tracerFadeDuration = Oathkeeper.tracerFadeDuration,
@@ -598,6 +718,7 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 		effectiveSharedLockout = effectiveSharedLockout,
 	}
 	secondaryCastStateByPlayer[player] = castState
+	player:SetAttribute(M2_CAST_ACTIVE_ATTRIBUTE, true)
 
 	if PassiveEffectSystem and PassiveEffectSystem.setSprintIntent then
 		PassiveEffectSystem.setSprintIntent(playerEntity, false)
@@ -627,20 +748,87 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 			return
 		end
 
-		local damageAmount = getEffectiveDamage(livePlayerEntity) * math.max(0, Oathkeeper.m2DamageMultiplier or 1)
+		local damageAmount = getEffectiveSecondaryDamage(livePlayerEntity)
+		local procCoefficient = Oathkeeper.secondaryProcCoefficient or 1.0
+		local preferredSilverTarget: number? = nil
+		if #shot.enemyHits > 0 and typeof(shot.enemyHits[1]) == "table" then
+			preferredSilverTarget = shot.enemyHits[1].enemyEntity
+		end
+		if DamageSystem and DamageSystem.notifyAttackAttempt then
+			DamageSystem.notifyAttackAttempt({
+				sourceEntity = livePlayerEntity,
+				targetEntity = preferredSilverTarget,
+				abilityId = "OathkeeperSecondary",
+				procCoefficient = procCoefficient,
+				aimPoint = castState.targetPoint,
+			})
+		end
+		local stasisClip = TemporalStasisSystem and TemporalStasisSystem.clipHitscan and TemporalStasisSystem.clipHitscan(shot.origin, shot.impactPosition) or nil
+		local boundaryHoldImpact = stasisClip and stasisClip.holdImpactPosition or nil
+		local boundaryHoldPoint = if typeof(boundaryHoldImpact) == "Vector3" then boundaryHoldImpact else nil
+		local hasBoundaryHold = stasisClip and stasisClip.hasBoundaryHold == true
+		local shouldHoldTracer = stasisClip and stasisClip.active == true
+			and (stasisClip.touchesFrozenVolume == true or hasBoundaryHold or stasisClip.startInside == true or stasisClip.targetInside == true)
+		local visualHoldPoint = if shouldHoldTracer
+			then computeShortHoldPoint(shot.origin, shot.impactPosition, HITSCAN_STASIS_VISUAL_HOLD_DISTANCE)
+			else boundaryHoldPoint
+		local holdBoundaryDistance = if boundaryHoldPoint then (boundaryHoldPoint - shot.origin).Magnitude else nil
+		local stasisSessionId = stasisClip and stasisClip.sessionId or (TemporalStasisSystem and TemporalStasisSystem.getActiveSessionId and TemporalStasisSystem.getActiveSessionId() or nil)
+		local didAnyDeferred = false
 		local enemyHitPayload: {any} = {}
 		for _, hit in ipairs(shot.enemyHits) do
-			local _, applied = DamageSystem.applyDamage(
-				hit.enemyEntity,
-				damageAmount,
-				"weapon",
-				livePlayerEntity,
-				"OathkeeperSecondary"
-			)
+			local applied = false
+			local deferred = false
+			local hitDistance = (hit.hitPoint - shot.origin).Magnitude
+			local hitPastBoundary = hasBoundaryHold
+				and typeof(holdBoundaryDistance) == "number"
+				and hitDistance > (holdBoundaryDistance + 1e-3)
+			if hitPastBoundary and TemporalStasisSystem and TemporalStasisSystem.deferDamagePacket then
+				local didDefer = TemporalStasisSystem.deferDamagePacket({
+					targetEntity = hit.enemyEntity,
+					sourceEntity = livePlayerEntity,
+					damageAmount = damageAmount,
+					damageType = "weapon",
+					abilityId = "OathkeeperSecondary",
+					procCoefficient = procCoefficient,
+					timestamp = tick(),
+					forceDefer = true,
+				})
+				deferred = didDefer == true
+			end
+
+			if (not deferred) and TemporalStasisSystem and TemporalStasisSystem.submitEnemyHit then
+				local _, didApply, didDefer = TemporalStasisSystem.submitEnemyHit({
+					targetEntity = hit.enemyEntity,
+					sourceEntity = livePlayerEntity,
+					damageAmount = damageAmount,
+					damageType = "weapon",
+					abilityId = "OathkeeperSecondary",
+					procCoefficient = procCoefficient,
+					timestamp = tick(),
+				})
+				applied = didApply == true
+				deferred = didDefer == true
+			elseif not deferred then
+				local _, didApply, didDefer = DamageSystem.applyDamage(
+					hit.enemyEntity,
+					damageAmount,
+					"weapon",
+					livePlayerEntity,
+					"OathkeeperSecondary",
+					{ procCoefficient = procCoefficient }
+				)
+				applied = didApply == true
+				deferred = didDefer == true
+			end
+			if deferred then
+				didAnyDeferred = true
+			end
 			table.insert(enemyHitPayload, {
 				position = hit.hitPoint,
 				normal = hit.hitNormal,
 				didApplyDamage = applied == true,
+				timeStopDeferred = deferred,
 			})
 		end
 
@@ -650,10 +838,14 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 			shotKind = "M2",
 			clientShotId = castState.clientShotId,
 			origin = shot.origin,
-			impactPosition = shot.impactPosition,
+			impactPosition = visualHoldPoint or shot.impactPosition,
+			holdImpactPosition = visualHoldPoint,
+			finalImpactPosition = shot.impactPosition,
 			impactNormal = shot.impactNormal,
 			enemyHits = enemyHitPayload,
 			didHitEnemy = shot.didHitEnemy,
+			timeStopDeferred = didAnyDeferred or shouldHoldTracer == true,
+			timeStopSessionId = stasisSessionId,
 			tracerLifetime = Oathkeeper.tracerLifetime,
 			tracerFadeDuration = Oathkeeper.tracerFadeDuration,
 			castDuration = castDuration,
@@ -666,9 +858,15 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 	task.delay(castDuration, function()
 		local latestState = secondaryCastStateByPlayer[player]
 		if latestState ~= castState then
+			if latestState == nil and player.Parent then
+				player:SetAttribute(M2_CAST_ACTIVE_ATTRIBUTE, false)
+			end
 			return
 		end
 		secondaryCastStateByPlayer[player] = nil
+		if player.Parent then
+			player:SetAttribute(M2_CAST_ACTIVE_ATTRIBUTE, false)
+		end
 		sharedLockoutUntilByPlayer[player] = tick() + castState.effectiveSharedLockout
 	end)
 end
@@ -704,7 +902,12 @@ function WeaponService.init(options: {[string]: any})
 		nextFireAtByPlayer[player] = nil
 		sharedLockoutUntilByPlayer[player] = nil
 		secondaryCastStateByPlayer[player] = nil
+		player:SetAttribute(M2_CAST_ACTIVE_ATTRIBUTE, false)
 	end)
+end
+
+function WeaponService.setTemporalStasisSystem(temporalStasisSystem: any)
+	TemporalStasisSystem = temporalStasisSystem
 end
 
 return WeaponService

@@ -3105,6 +3105,9 @@ local function onMobilityKeyPressed()
 	if isPaused then
 		return
 	end
+	if player:GetAttribute("CooldownsFrozen") == true or player:GetAttribute("UltimateInputLocked") == true then
+		return
+	end
 	
 	if not equippedMobility then
 		return

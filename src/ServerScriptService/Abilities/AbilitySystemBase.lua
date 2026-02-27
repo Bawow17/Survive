@@ -8,7 +8,8 @@ local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGr
 local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
-local UpgradeDefs = require(game.ServerScriptService.Balance.Upgrades.UpgradeDefs)
+local CombatCaps = require(game.ServerScriptService.Balance.CombatCaps)
+local CombatScaling = require(game.ReplicatedStorage.Shared.CombatScaling)
 
 -- Targeting prediction tuning
 local PREDICTION_FACTOR = 0.6  -- Used only when targetingStats.enablePrediction is true.
@@ -144,6 +145,19 @@ function AbilitySystemBase.getAbilityStats(playerEntity: number, abilityId: stri
 			end
 		end
 	end
+
+	-- Coefficient-based damage path (opt-in per ability).
+	if typeof(stats.damageCoefficient) == "number" then
+		local playerLevel = 1
+		if Components.Level then
+			local levelComponent = world:get(playerEntity, Components.Level)
+			if levelComponent and typeof(levelComponent.current) == "number" then
+				playerLevel = levelComponent.current
+			end
+		end
+		local baseDamage = CombatScaling.getBaseDamageAtLevel(playerLevel)
+		stats.damage = math.max(0, baseDamage * math.max(0, stats.damageCoefficient))
+	end
 	
 	-- Apply passive effect multipliers
 	local passiveEffects = world:get(playerEntity, Components.PassiveEffects)
@@ -189,7 +203,7 @@ function AbilitySystemBase.getAbilityStats(playerEntity: number, abilityId: stri
 			local baseCount = baseBalance.projectileCount or stats.projectileCount
 			local rawBase = stats.projectileCountRaw or stats.projectileCount
 			local bonusMultiplier = stats.projectileCountMultiplier or 1
-			local maxCount = math.floor(baseCount * UpgradeDefs.SoftCaps.countMaxMultiplier + 0.0001)
+			local maxCount = math.floor(baseCount * CombatCaps.ProjectileCountMaxMultiplier + 0.0001)
 			local rawCount = rawBase + (passiveEffects.projectileCountBonus * bonusMultiplier)
 			if stats.projectileCountIgnoreCap or rawBase > maxCount then
 				stats.projectileCount = math.floor(rawCount + 0.0001)
@@ -781,6 +795,8 @@ function AbilitySystemBase.createProjectile(
 		stayHorizontal = balance.StayHorizontal or false,
 		alwaysStayHorizontal = balance.AlwaysStayHorizontal or false,
 		stickToPlayer = balance.StickToPlayer or false,
+		procCoefficient = balance.procCoefficient,
+		splitProcCoefficient = balance.splitProcCoefficient,
 	}
 
 	if extraConfig and type(extraConfig) == "table" then

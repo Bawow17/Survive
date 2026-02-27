@@ -16,6 +16,9 @@ local DirtyService: any
 local EnemyExpDropSystem: any  -- Reference to enemy drop system
 local StatusEffectSystem: any  -- Reference to status effect system
 local OverhealSystem: any  -- Reference to overheal system
+local UltimateSystem: any  -- Reference to ultimate charge system
+local TemporalStasisSystem: any  -- Reference to Tempus Gelidum stasis system
+local ItemSystem: any  -- Reference to run item trigger system
 local PlayerHitMarkerRemote: RemoteEvent? = nil
 
 -- Component references
@@ -166,6 +169,46 @@ end
 -- Set OverhealSystem reference (called after it's initialized)
 function DamageSystem.setOverhealSystem(overhealSystem: any)
 	OverhealSystem = overhealSystem
+end
+
+-- Set UltimateSystem reference (called after it's initialized)
+function DamageSystem.setUltimateSystem(ultimateSystem: any)
+	UltimateSystem = ultimateSystem
+end
+
+function DamageSystem.setTemporalStasisSystem(temporalStasisSystem: any)
+	TemporalStasisSystem = temporalStasisSystem
+end
+
+function DamageSystem.setItemSystem(itemSystemRef: any)
+	ItemSystem = itemSystemRef
+end
+
+local function notifyItemSystemResolved(data: {[string]: any})
+	if not ItemSystem or not ItemSystem.onDamageResolved then
+		return
+	end
+	local ok, err = pcall(ItemSystem.onDamageResolved, data)
+	if not ok then
+		warn(string.format("[DamageSystem] ItemSystem.onDamageResolved failed: %s", tostring(err)))
+	end
+end
+
+local function notifyItemSystemAttackAttempt(data: {[string]: any})
+	if not ItemSystem or not ItemSystem.onAttackAttempt then
+		return
+	end
+	local ok, err = pcall(ItemSystem.onAttackAttempt, data)
+	if not ok then
+		warn(string.format("[DamageSystem] ItemSystem.onAttackAttempt failed: %s", tostring(err)))
+	end
+end
+
+function DamageSystem.notifyAttackAttempt(data: {[string]: any})
+	if typeof(data) ~= "table" then
+		return
+	end
+	notifyItemSystemAttackAttempt(data)
 end
 
 -- Find the closest player to a given position
@@ -345,7 +388,14 @@ end
 -- Apply damage to an entity with all feedback effects
 -- sourceEntity: optional player entity that dealt the damage (for ability tracking)
 -- abilityId: optional ability identifier (for damage stat tracking)
-function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, damageType: string, sourceEntity: number?, abilityId: string?): boolean
+function DamageSystem.applyDamage(
+	targetEntity: number,
+	damageAmount: number,
+	damageType: string,
+	sourceEntity: number?,
+	abilityId: string?,
+	options: any?
+): (boolean, boolean, boolean?)
 	if not world then
 		if INVINCIBLE_ENEMY_DIAGNOSTICS then
 			enemyDiagCounters.enemyRejectedWorldMissing += 1
@@ -362,6 +412,10 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	end
 	damageAttemptCount += 1
 	local requestedDamageAmount = damageAmount
+	local procCoefficient: number? = nil
+	if options and typeof(options.procCoefficient) == "number" then
+		procCoefficient = options.procCoefficient
+	end
 
 	-- Get entity type to determine if this is a player or enemy
 	local entityType = world:get(targetEntity, EntityType)
@@ -424,6 +478,32 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 
 	if isEnemy and sourceEntity and isPlayerSourceEntity(sourceEntity) then
 		damageAmount = damageAmount * getEnemyFrostbiteMultiplier(targetEntity, tick())
+	end
+
+	local skipTemporalStasis = options and options.skipTemporalStasis == true
+	if isEnemy
+		and sourceEntity
+		and isPlayerSourceEntity(sourceEntity)
+		and not skipTemporalStasis
+		and TemporalStasisSystem
+		and TemporalStasisSystem.shouldDeferDamage
+		and TemporalStasisSystem.deferDamagePacket
+	then
+		local shouldDefer = TemporalStasisSystem.shouldDeferDamage(targetEntity, sourceEntity)
+		if shouldDefer then
+			local deferred = TemporalStasisSystem.deferDamagePacket({
+				targetEntity = targetEntity,
+				sourceEntity = sourceEntity,
+				abilityId = abilityId,
+				damageType = damageType,
+				damageAmount = damageAmount,
+				procCoefficient = procCoefficient,
+				timestamp = tick(),
+			})
+			if deferred then
+				return false, false, true
+			end
+		end
 	end
 	
 	-- CRITICAL: Check if player is Shield Bashing - absorb ALL damage and prevent death
@@ -501,6 +581,7 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 	local newHealth = math.max(health.current - remainingDamage, 0)
 	local died = newHealth <= 0
 	local healthBefore = health.current
+	local appliedHealthDamage = math.max(healthBefore - newHealth, 0)
 	
 	-- CUSTOM DEATH: Check if player died (< 0.0001 HP)
 	if isPlayer and newHealth <= 0.0001 then
@@ -521,7 +602,21 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 					humanoid.Health = 0.01
 				end
 			end
-			
+
+			notifyItemSystemResolved({
+				targetEntity = targetEntity,
+				sourceEntity = sourceEntity,
+				damageType = damageType,
+				abilityId = abilityId,
+				procCoefficient = procCoefficient,
+				targetIsPlayer = isPlayer,
+				targetIsEnemy = isEnemy,
+				applied = remainingDamage > 0,
+				appliedDamage = math.max(remainingDamage, 0),
+				died = true,
+				deferred = false,
+			})
+
 			return true  -- Player entered death state
 		end
 	end
@@ -555,7 +650,6 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 				humanoidMaxHealth = humanoid.MaxHealth
 			end
 		end
-		local appliedHealthDamage = math.max(healthBefore - newHealth, 0)
 		local lastHit = {
 			t = tick(),
 			targetEntity = targetEntity,
@@ -566,6 +660,7 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 			damageToOverheal = math.max(remainingDamage - appliedHealthDamage, 0),
 			damageType = damageType,
 			abilityId = abilityId,
+			procCoefficient = procCoefficient,
 			healthBefore = healthBefore,
 			healthAfter = newHealth,
 			maxHealth = health.max,
@@ -733,7 +828,10 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 		if PlayerHitMarkerRemote then
 			local sourceStats = world:get(sourceEntity, Components.PlayerStats)
 			if sourceStats and sourceStats.player then
-				PlayerHitMarkerRemote:FireClient(sourceStats.player)
+				PlayerHitMarkerRemote:FireClient(sourceStats.player, {
+					enemyEntityId = targetEntity,
+					damageApplied = appliedToTarget,
+				})
 			end
 		end
 
@@ -819,6 +917,19 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 				local SyncSystem = require(game.ServerScriptService.ECS.Systems.SyncSystem)
 				SyncSystem.queueDespawn(targetEntity)
 				EnemyPool.release(targetEntity)
+				notifyItemSystemResolved({
+					targetEntity = targetEntity,
+					sourceEntity = sourceEntity,
+					damageType = damageType,
+					abilityId = abilityId,
+					procCoefficient = procCoefficient,
+					targetIsPlayer = isPlayer,
+					targetIsEnemy = isEnemy,
+					applied = applied,
+					appliedDamage = if isEnemy then appliedToTarget else appliedHealthDamage,
+					died = died,
+					deferred = false,
+				})
 				return died, applied
 			end
 
@@ -838,6 +949,9 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 				if isPlayerSource then
 					local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
 					SessionStatsTracker.trackKill(sourceEntity)
+					if UltimateSystem and UltimateSystem.onEnemyKilledByPlayer then
+						UltimateSystem.onEnemyKilledByPlayer(sourceEntity)
+					end
 				end
 			end
 			
@@ -852,6 +966,20 @@ function DamageSystem.applyDamage(targetEntity: number, damageAmount: number, da
 		end
 	end
 	
+	notifyItemSystemResolved({
+		targetEntity = targetEntity,
+		sourceEntity = sourceEntity,
+		damageType = damageType,
+		abilityId = abilityId,
+		procCoefficient = procCoefficient,
+		targetIsPlayer = isPlayer,
+		targetIsEnemy = isEnemy,
+		applied = applied,
+		appliedDamage = if isEnemy then appliedToTarget else appliedHealthDamage,
+		died = died,
+		deferred = false,
+	})
+
 	return died, applied
 end
 

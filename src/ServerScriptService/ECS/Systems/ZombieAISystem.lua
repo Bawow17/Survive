@@ -38,6 +38,7 @@ local PlayerStats: any
 local Health: any
 local EntityTypeComponent: any
 local FacingDirection: any
+local EnemyTimeStopped: any
 
 local enemyLogAccumulator = 0
 
@@ -542,6 +543,7 @@ function ZombieAISystem.init(worldRef: any, components: any, dirtyService: any, 
 	Health = Components.Health
 	EntityTypeComponent = Components.EntityType
 	FacingDirection = Components.FacingDirection
+	EnemyTimeStopped = Components.EnemyTimeStopped
 	
 	-- Create cached queries for performance (CRITICAL FIX - was creating new queries every frame!)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing
@@ -577,6 +579,11 @@ local function cleanupInactiveEnemies()
 		-- CRITICAL: Skip enemies that are frozen due to player pause
 		local target = world:get(enemyEntity, Target)
 		local ai = world:get(enemyEntity, AI)
+
+		local stasis = EnemyTimeStopped and world:get(enemyEntity, EnemyTimeStopped)
+		if stasis and stasis.active == true then
+			continue
+		end
 		
 		-- Skip if enemy is frozen (speed = 0) and has a target
 		-- These are intentionally paused, not stuck
@@ -824,6 +831,14 @@ function ZombieAISystem.step(dt: number)
 		local damage = enemyData.damage or { amount = 0 }
 		local entityType = enemyData.entityType -- Pre-fetched, no world:get needed
 		local target = enemyData.target -- Pre-fetched, may be nil
+
+		local stasis = EnemyTimeStopped and world:get(enemyEntity, EnemyTimeStopped)
+		if stasis and stasis.active == true then
+			if enemyVelocity.x ~= 0 or enemyVelocity.y ~= 0 or enemyVelocity.z ~= 0 then
+				setVelocity(enemyEntity, { x = 0, y = 0, z = 0 })
+			end
+			continue
+		end
 
 		-- Check for knockback stun - still allow attacks, but skip movement
 		local knockback = world:get(enemyEntity, Components.Knockback)

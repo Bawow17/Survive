@@ -68,6 +68,9 @@ local activeIceTracerReplication: {[number]: {
 	castId: number?,
 	totalSegments: number,
 }} = {}
+local utilityCastTokenByUserId: {[number]: number} = {}
+
+local UTILITY_CAST_ACTIVE_ATTRIBUTE = "UtilityCastActiveServer"
 
 local ICE_TRACER_ALLOWED_BUFFER = 0.5
 local ICE_TRACER_MAX_SEGMENTS_PER_PACKET = 48
@@ -123,6 +126,28 @@ local function beginIceTracerReplicationWindow(player: Player, playerEntity: num
 		castId = nil,
 		totalSegments = 0,
 	}
+end
+
+local function beginUtilityCastWindow(player: Player, duration: number)
+	local safeDuration = math.max(duration, 0)
+	local userId = player.UserId
+	local nextToken = (utilityCastTokenByUserId[userId] or 0) + 1
+	utilityCastTokenByUserId[userId] = nextToken
+
+	if safeDuration <= 0 then
+		player:SetAttribute(UTILITY_CAST_ACTIVE_ATTRIBUTE, false)
+		return
+	end
+
+	player:SetAttribute(UTILITY_CAST_ACTIVE_ATTRIBUTE, true)
+	task.delay(safeDuration, function()
+		if utilityCastTokenByUserId[userId] ~= nextToken then
+			return
+		end
+		if player.Parent then
+			player:SetAttribute(UTILITY_CAST_ACTIVE_ATTRIBUTE, false)
+		end
+	end)
 end
 
 local function validateIceTracerSegment(rawSegment: any): (boolean, any?)
@@ -244,6 +269,14 @@ local function handleMobilityActivation(player: Player, mobilityId: string, vari
 	if not playerEntity then
 		return
 	end
+
+	-- Reject mobility activation while gameplay input is server-frozen.
+	if player:GetAttribute("CooldownsFrozen") == true or player:GetAttribute("UltimateInputLocked") == true then
+		if DEBUG then
+			print(string.format("[MobilitySystem] Reject mobility while frozen | player=%s mobility=%s", player.Name, tostring(mobilityId)))
+		end
+		return
+	end
 	
 	-- Reject mobility activation while player is paused
 	if PauseSystem and PauseSystem.isPlayerPaused(playerEntity) then
@@ -335,6 +368,7 @@ local function handleMobilityActivation(player: Player, mobilityId: string, vari
 
 	if mobilityId == "IceTracer" then
 		local castDuration = mobilityData.duration or config.duration or (35 / 60)
+		beginUtilityCastWindow(player, castDuration)
 		beginIceTracerReplicationWindow(player, playerEntity, currentTime, castDuration)
 	end
 	
@@ -677,6 +711,8 @@ function MobilitySystem.init(worldRef: any, components: any, dirtyService: any)
 
 	Players.PlayerRemoving:Connect(function(player: Player)
 		activeIceTracerReplication[player.UserId] = nil
+		utilityCastTokenByUserId[player.UserId] = nil
+		player:SetAttribute(UTILITY_CAST_ACTIVE_ATTRIBUTE, false)
 	end)
 end
 

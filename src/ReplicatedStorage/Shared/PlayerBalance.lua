@@ -4,9 +4,17 @@
 
 return {
 	-- Core Stats
+	BaseDamage = 12,
 	BaseMaxHealth = 100,
 	BaseWalkSpeed = 24,
 	BasePickupRange = 20.0,
+
+	-- RoR2-style linear level scaling
+	LevelScaling = {
+		damagePerLevel = 0.20,
+		maxHealthPerLevel = 0.30,
+		regenPerLevel = 0.20,
+	},
 
 	-- Combat Scaling Multipliers
 	BaseCooldownMultiplier = 1,

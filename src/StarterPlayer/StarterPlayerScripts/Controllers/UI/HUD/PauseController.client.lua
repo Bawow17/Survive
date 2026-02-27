@@ -53,7 +53,34 @@ player.CharacterAdded:Connect(function(newCharacter)
 end)
 
 -- Wait for GUI elements
-local gameGui = playerGui:WaitForChild("GameGui")
+local function resolveGameGui(): ScreenGui?
+	local existing = playerGui:FindFirstChild("GameGui")
+	if existing and existing:IsA("ScreenGui") then
+		return existing
+	end
+
+	local waited = playerGui:WaitForChild("GameGui", 30)
+	if waited and waited:IsA("ScreenGui") then
+		return waited
+	end
+
+	local starterGameGui = starterGui:FindFirstChild("GameGui")
+	if starterGameGui and starterGameGui:IsA("ScreenGui") then
+		local cloned = starterGameGui:Clone()
+		cloned.Name = "GameGui"
+		cloned.Parent = playerGui
+		return cloned
+	end
+
+	return nil
+end
+
+local gameGui = resolveGameGui()
+if not gameGui then
+	warn("[PauseController] GameGui not found; pause UI controller disabled")
+	return
+end
+
 local levelUpToggle = gameGui:FindFirstChild("LevelUpToggle")
 if not levelUpToggle then
 	local starterGameGui = starterGui:FindFirstChild("GameGui")
@@ -64,8 +91,33 @@ if not levelUpToggle then
 		levelUpToggle.Parent = gameGui
 	end
 end
-levelUpToggle = levelUpToggle or gameGui:WaitForChild("LevelUpToggle")
-local levelUpFrame = gameGui:WaitForChild("LevelUpFrame")
+if not levelUpToggle then
+	levelUpToggle = gameGui:WaitForChild("LevelUpToggle", 10)
+end
+if not levelUpToggle then
+	warn("[PauseController] LevelUpToggle missing; pause UI controller disabled")
+	return
+end
+levelUpToggle = levelUpToggle :: GuiButton
+
+local levelUpFrame = gameGui:FindFirstChild("LevelUpFrame")
+if not levelUpFrame then
+	local starterGameGui = starterGui:FindFirstChild("GameGui")
+	local starterFrame = starterGameGui and starterGameGui:FindFirstChild("LevelUpFrame")
+	if starterFrame then
+		levelUpFrame = starterFrame:Clone()
+		levelUpFrame.Name = "LevelUpFrame"
+		levelUpFrame.Parent = gameGui
+	else
+		levelUpFrame = gameGui:WaitForChild("LevelUpFrame", 10)
+	end
+end
+if not levelUpFrame then
+	warn("[PauseController] LevelUpFrame missing; pause UI controller disabled")
+	return
+end
+levelUpFrame = levelUpFrame :: Frame
+
 local titleLabel = levelUpFrame:WaitForChild("TitleLabel")
 local timerLabel = levelUpFrame:FindFirstChild("TimerLabel")
 local secondsLabel = levelUpFrame:FindFirstChild("SecondsLabel")
@@ -107,11 +159,29 @@ local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
 local GamePaused = remotes:WaitForChild("GamePaused") :: RemoteEvent
 local GameUnpaused = remotes:WaitForChild("GameUnpaused") :: RemoteEvent
 local RequestUnpause = remotes:WaitForChild("RequestUnpause") :: RemoteEvent
-local bankedFolder = remotes:WaitForChild("BankedHands")
-local BankedHandsUpdate = bankedFolder:WaitForChild("BankedHandsUpdate") :: RemoteEvent
-local BankedHandsShow = bankedFolder:WaitForChild("BankedHandsShow") :: RemoteEvent
-local BankedHandsOpen = bankedFolder:WaitForChild("BankedHandsOpen") :: RemoteEvent
-local BankedHandsSelect = bankedFolder:WaitForChild("BankedHandsSelect") :: RemoteEvent
+local bankedFolder = remotes:FindFirstChild("BankedHands")
+local BankedHandsUpdate: RemoteEvent? = nil
+local BankedHandsShow: RemoteEvent? = nil
+local BankedHandsOpen: RemoteEvent? = nil
+local BankedHandsSelect: RemoteEvent? = nil
+if bankedFolder and bankedFolder:IsA("Folder") then
+	local updateRemote = bankedFolder:FindFirstChild("BankedHandsUpdate")
+	if updateRemote and updateRemote:IsA("RemoteEvent") then
+		BankedHandsUpdate = updateRemote
+	end
+	local showRemote = bankedFolder:FindFirstChild("BankedHandsShow")
+	if showRemote and showRemote:IsA("RemoteEvent") then
+		BankedHandsShow = showRemote
+	end
+	local openRemote = bankedFolder:FindFirstChild("BankedHandsOpen")
+	if openRemote and openRemote:IsA("RemoteEvent") then
+		BankedHandsOpen = openRemote
+	end
+	local selectRemote = bankedFolder:FindFirstChild("BankedHandsSelect")
+	if selectRemote and selectRemote:IsA("RemoteEvent") then
+		BankedHandsSelect = selectRemote
+	end
+end
 local DebugPauseFlag = remotes:FindFirstChild("DebugPause") :: BoolValue
 local DebugGrantLevels = remotes:FindFirstChild("DebugGrantLevels") :: RemoteEvent
 local debugEnabled = DebugPauseFlag and DebugPauseFlag.Value or false
@@ -739,52 +809,56 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 end
 
 -- Banked hands updates (no pause)
-BankedHandsUpdate.OnClientEvent:Connect(function(data: any)
-	local count = data and data.count or 0
-	bankedPendingCount = count
-	
-	if count > 0 then
-		setLevelUpToggleVisible(true, not levelUpToggleVisible)
-	else
-		setLevelUpToggleVisible(false, false)
-		if uiMode == "banked" then
-			levelUpFrame.Visible = false
-			uiMode = nil
+if BankedHandsUpdate then
+	BankedHandsUpdate.OnClientEvent:Connect(function(data: any)
+		local count = data and data.count or 0
+		bankedPendingCount = count
+		
+		if count > 0 then
+			setLevelUpToggleVisible(true, not levelUpToggleVisible)
+		else
+			setLevelUpToggleVisible(false, false)
+			if uiMode == "banked" then
+				levelUpFrame.Visible = false
+				uiMode = nil
+			end
+			bankedOpen = false
 		end
-		bankedOpen = false
-	end
-end)
+	end)
+end
 
-BankedHandsShow.OnClientEvent:Connect(function(data: any)
-	if not data then
-		return
-	end
-	
-	uiMode = "banked"
-	bankedOpen = true
-	if typeof(data.pendingCount) == "number" then
-		bankedPendingCount = data.pendingCount
-	end
-	
-	local fromLevel = data.fromLevel or 1
-	local toLevel = data.toLevel or (fromLevel + 1)
-	titleLabel.Text = string.format("Level up: %d > %d!", fromLevel, toLevel)
-	
-	local choicesData = data.choices or {}
-	for i = 1, CHOICE_COUNT do
-		populateChoice(choices[i], choicesData[i], i)
-	end
-	
-	isTimerActive = false
-	if timerLabel then
-		timerLabel.Visible = false
-	end
-	if secondsLabel then
-		secondsLabel.Visible = false
-	end
-	
-	levelUpFrame.Visible = true
-end)
+if BankedHandsShow then
+	BankedHandsShow.OnClientEvent:Connect(function(data: any)
+		if not data then
+			return
+		end
+		
+		uiMode = "banked"
+		bankedOpen = true
+		if typeof(data.pendingCount) == "number" then
+			bankedPendingCount = data.pendingCount
+		end
+		
+		local fromLevel = data.fromLevel or 1
+		local toLevel = data.toLevel or (fromLevel + 1)
+		titleLabel.Text = string.format("Level up: %d > %d!", fromLevel, toLevel)
+		
+		local choicesData = data.choices or {}
+		for i = 1, CHOICE_COUNT do
+			populateChoice(choices[i], choicesData[i], i)
+		end
+		
+		isTimerActive = false
+		if timerLabel then
+			timerLabel.Visible = false
+		end
+		if secondsLabel then
+			secondsLabel.Visible = false
+		end
+		
+		levelUpFrame.Visible = true
+	end)
+end
 
 -- Toggle banked hands menu
 levelUpToggle.MouseButton1Click:Connect(function()
@@ -801,10 +875,14 @@ levelUpToggle.MouseButton1Click:Connect(function()
 			uiMode = nil
 			levelUpFrame.Visible = false
 		end
-		BankedHandsOpen:FireServer({ open = false })
+		if BankedHandsOpen then
+			BankedHandsOpen:FireServer({ open = false })
+		end
 	else
 		bankedOpen = true
-		BankedHandsOpen:FireServer({ open = true })
+		if BankedHandsOpen then
+			BankedHandsOpen:FireServer({ open = true })
+		end
 	end
 end)
 
@@ -1048,9 +1126,11 @@ end)
 -- Skip button handler
 skipButton.MouseButton1Click:Connect(function()
 	if uiMode == "banked" then
-		BankedHandsSelect:FireServer({
-			action = "skip",
-		})
+		if BankedHandsSelect then
+			BankedHandsSelect:FireServer({
+				action = "skip",
+			})
+		end
 		return
 	end
 	
@@ -1073,10 +1153,12 @@ for i, choiceFrame in ipairs(choices) do
 			local upgradeId = button:GetAttribute("UpgradeId")
 			if upgradeId then
 				if uiMode == "banked" then
-					BankedHandsSelect:FireServer({
-						action = "upgrade",
-						upgradeId = upgradeId,
-					})
+					if BankedHandsSelect then
+						BankedHandsSelect:FireServer({
+							action = "upgrade",
+							upgradeId = upgradeId,
+						})
+					end
 					return
 				end
 				

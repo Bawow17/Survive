@@ -14,6 +14,43 @@ local replicatedModels: {[string]: boolean} = {}
 local enemyHitboxData: {[string]: {size: Vector3, offset: Vector3, rotation: CFrame?}} = {}
 local enemyAttackboxData: {[string]: {size: Vector3, offset: Vector3, rotation: CFrame?}} = {}
 
+local function normalizeLookupKey(value: string): string
+	return string.lower((value:gsub("[%W_]+", "")))
+end
+
+local function getCommonItemsFolder(): Instance?
+	local contentDrawer = ServerStorage:FindFirstChild("ContentDrawer")
+	if not contentDrawer then
+		return nil
+	end
+	local itemModels = contentDrawer:FindFirstChild("ItemModels")
+	if not itemModels then
+		return nil
+	end
+	return itemModels:FindFirstChild("CommonItems")
+end
+
+function ModelReplicationService.resolveCommonItemName(itemModelName: string): string?
+	local commonItems = getCommonItemsFolder()
+	if not commonItems then
+		return nil
+	end
+
+	local exact = commonItems:FindFirstChild(itemModelName)
+	if exact and exact:IsA("Model") then
+		return exact.Name
+	end
+
+	local wanted = normalizeLookupKey(itemModelName)
+	for _, child in ipairs(commonItems:GetChildren()) do
+		if child:IsA("Model") and normalizeLookupKey(child.Name) == wanted then
+			return child.Name
+		end
+	end
+
+	return nil
+end
+
 local function findNamedPart(model: Model, name: string): BasePart?
 	local exact = model:FindFirstChild(name, true)
 	if exact and exact:IsA("BasePart") then
@@ -232,6 +269,32 @@ end
 function ModelReplicationService.replicateItem(itemType: string): boolean
 	local serverPath = "ContentDrawer.ItemModels." .. itemType
 	local replicatedPath = "ContentDrawer.ItemModels"
+	local success, _ = ModelReplicationService.replicateModel(serverPath, replicatedPath)
+	return success
+end
+
+function ModelReplicationService.replicateCommonItem(itemModelName: string): boolean
+	local resolvedName = ModelReplicationService.resolveCommonItemName(itemModelName)
+	if not resolvedName then
+		local commonItems = getCommonItemsFolder()
+		local available = {}
+		if commonItems then
+			for _, child in ipairs(commonItems:GetChildren()) do
+				if child:IsA("Model") then
+					table.insert(available, child.Name)
+				end
+			end
+		end
+		warn(string.format(
+			"[ModelReplicationService] Could not resolve common item model '%s'. Available: %s",
+			tostring(itemModelName),
+			if #available > 0 then table.concat(available, ", ") else "(none)"
+		))
+		return false
+	end
+
+	local serverPath = "ContentDrawer.ItemModels.CommonItems." .. resolvedName
+	local replicatedPath = "ContentDrawer.ItemModels.CommonItems"
 	local success, _ = ModelReplicationService.replicateModel(serverPath, replicatedPath)
 	return success
 end

@@ -7,6 +7,7 @@ local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local StatusEffectSystem = require(game.ServerScriptService.ECS.Systems.StatusEffectSystem)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
+local PassiveEffectSystem = require(game.ServerScriptService.ECS.Systems.PassiveEffectSystem)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
 local Prof = ProfilingConfig.ENABLED and require(ReplicatedStorage.Shared.ProfilingServer) or require(ReplicatedStorage.Shared.ProfilingStub)
@@ -23,7 +24,6 @@ local ExpSystem = {}
 local world: any
 local Components: any
 local DirtyService: any
-local BankedHandsService: any
 
 local Experience: any
 local Level: any
@@ -124,10 +124,6 @@ function ExpSystem.init(worldRef: any, components: any, dirtyService: any)
 			end
 		end)
 	end
-end
-
-function ExpSystem.setBankedHandsService(service: any)
-	BankedHandsService = service
 end
 
 local function getRoR2CurveConfig(): (number, number)
@@ -248,13 +244,11 @@ local function checkAndDeactivateCatchUp(playerEntity: number, player: Player, c
 end
 
 -- Handle level up event
-local function onLevelUp(playerEntity: number, newLevel: number, oldLevel: number)
-	if BankedHandsService and BankedHandsService.enqueueHand then
-		BankedHandsService.enqueueHand(playerEntity, oldLevel, newLevel)
-	end
+local function onLevelUp(playerEntity: number, _newLevel: number, _oldLevel: number)
 	-- Grant level-up buffs immediately (no level-up pause anymore)
 	StatusEffectSystem.grantInvincibility(playerEntity, 2.0, true, false, false)
 	StatusEffectSystem.grantSpeedBoost(playerEntity, 2.0, 1.15, "levelUp")
+	PassiveEffectSystem.applyToPlayer(playerEntity)
 end
 
 -- Apply exp directly to player (handles level ups)

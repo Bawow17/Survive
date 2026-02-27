@@ -4,9 +4,17 @@
 
 return {
 	-- Core Stats
+	BaseDamage = 12,  -- Base damage at level 1 before ability coefficients
 	BaseMaxHealth = 100,  -- Starting max health
 	BaseWalkSpeed = 24,  -- Base movement speed
 	BasePickupRange = 20.0,  -- Collection radius for both exp orbs and powerups
+
+	-- RoR2-style linear level scaling
+	LevelScaling = {
+		damagePerLevel = 0.20,
+		maxHealthPerLevel = 0.30,
+		regenPerLevel = 0.20,
+	},
 	
 	-- Combat Scaling Multipliers (applied before passive upgrades)
 	BaseCooldownMultiplier = 1,  -- Global cooldown scaling (lower = faster cooldowns)

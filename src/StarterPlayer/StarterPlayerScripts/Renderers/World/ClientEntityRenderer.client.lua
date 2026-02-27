@@ -57,6 +57,7 @@ local EntityUpdate = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild
 local EntityUpdateUnreliable = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):FindFirstChild("EntityUpdateUnreliable")
 local EntityDespawn = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):WaitForChild("EntityDespawn")
 local RequestInitialSync = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS"):WaitForChild("RequestInitialSync")
+local PlayerHitMarkerRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("PlayerHitMarker")
 
 local INTERPOLATION_WINDOW = 0.25 -- default window for slow movement
 local ENEMY_INTERPOLATION_WINDOW = 0.08 -- tighter interpolation to reduce perceived server-hitbox lead/lag
@@ -141,6 +142,19 @@ type RenderRecord = {
 	expectedScale: number?,
 	enemyTier: string?,
 	nextVisualInvariantCheck: number?,
+	enemyHealthData: any?,
+	enemySlowData: any?,
+	enemySlowExpiresAt: number?,
+	enemyHealthBillboard: BillboardGui?,
+	enemyHealthFill: GuiObject?,
+	enemyEliteBackground: GuiObject?,
+	enemyStatusContainer: GuiObject?,
+	enemyStatusSlot: GuiObject?,
+	enemyStatusEmojiLabel: TextLabel?,
+	enemyStatusStackLabel: TextLabel?,
+	enemyTimeStopped: boolean?,
+	stasisPausedAnimations: {[AnimationTrack]: {speed: number, timePosition: number, isPlaying: boolean}}?,
+	stasisPausedVfx: {[Instance]: {enabled: boolean, lifetime: NumberRange?}}?,
 }
 
 local renderedEntities: {[string]: RenderRecord} = {}
@@ -158,7 +172,11 @@ local bufferedUpdates: {[string]: {data: {[string]: any}, expiresAt: number}} = 
 local bufferedUpdateTotal = 0
 local MAX_BUFFERED_UPDATES = 5000
 local lastBufferedUpdateCleanup = 0
+local revealedEnemyIds: {[string]: true} = {}
 local handleEntityDespawn: (string | number, boolean?) -> ()
+local destroyEnemyHealthbar: (RenderRecord) -> ()
+local applyEnemyHealthbarVisibility: (string, RenderRecord, number) -> ()
+local revealEnemyHealthbarForEntity: (string | number) -> ()
 local lastProjectileCleanup = 0
 local lastExpOrbCleanup = 0
 local lastDeathCleanupCheck = 0
@@ -371,6 +389,125 @@ local function restoreModelTransparency(record: RenderRecord)
 	end
 end
 
+local function applyEnemyTimeStopState(record: RenderRecord, isFrozen: boolean)
+	if not record or record.entityType ~= "Enemy" then
+		return
+	end
+	if record.enemyTimeStopped == isFrozen then
+		return
+	end
+
+	local model = record.model
+	if not model or not model.Parent then
+		record.enemyTimeStopped = isFrozen
+		return
+	end
+
+	record.enemyTimeStopped = isFrozen
+
+	if isFrozen then
+		record.stasisPausedAnimations = {}
+		record.stasisPausedVfx = {}
+
+		for _, animator in ipairs(model:GetDescendants()) do
+			if animator:IsA("Animator") then
+				for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+					record.stasisPausedAnimations[track] = {
+						speed = track.Speed,
+						timePosition = track.TimePosition,
+						isPlaying = track.IsPlaying,
+					}
+					track:AdjustSpeed(0)
+				end
+			end
+		end
+
+		for _, desc in ipairs(model:GetDescendants()) do
+			if desc:IsA("ParticleEmitter") then
+				if desc.Enabled then
+					record.stasisPausedVfx[desc] = { enabled = true }
+					desc.Enabled = false
+				end
+			elseif desc:IsA("Trail") then
+				if desc.Enabled then
+					record.stasisPausedVfx[desc] = { enabled = true, lifetime = desc.Lifetime }
+					desc.Enabled = false
+				end
+			elseif desc:IsA("Beam") then
+				if desc.Enabled then
+					record.stasisPausedVfx[desc] = { enabled = true }
+					desc.Enabled = false
+				end
+			end
+		end
+		return
+	end
+
+	if record.stasisPausedAnimations then
+		for track, state in pairs(record.stasisPausedAnimations) do
+			if track and track.IsPlaying and state.isPlaying then
+				track.TimePosition = state.timePosition
+				track:AdjustSpeed(state.speed or 1)
+			end
+		end
+	end
+	record.stasisPausedAnimations = nil
+
+	if record.stasisPausedVfx then
+		for instance, state in pairs(record.stasisPausedVfx) do
+			if instance and instance.Parent and state.enabled then
+				if instance:IsA("ParticleEmitter") then
+					instance.Enabled = true
+				elseif instance:IsA("Trail") then
+					instance.Enabled = true
+					if state.lifetime then
+						instance.Lifetime = state.lifetime
+					end
+				elseif instance:IsA("Beam") then
+					instance.Enabled = true
+				end
+			end
+		end
+	end
+	record.stasisPausedVfx = nil
+end
+
+local function maintainEnemyTimeStopState(record: RenderRecord)
+	if not record or record.enemyTimeStopped ~= true then
+		return
+	end
+	local model = record.model
+	if not model or not model.Parent then
+		return
+	end
+	for _, animator in ipairs(model:GetDescendants()) do
+		if animator:IsA("Animator") then
+			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+				if track.Speed ~= 0 then
+					if record.stasisPausedAnimations then
+						record.stasisPausedAnimations[track] = record.stasisPausedAnimations[track] or {
+							speed = track.Speed,
+							timePosition = track.TimePosition,
+							isPlaying = track.IsPlaying,
+						}
+					end
+					track:AdjustSpeed(0)
+				end
+			end
+		end
+	end
+	for _, desc in ipairs(model:GetDescendants()) do
+		if desc:IsA("ParticleEmitter") or desc:IsA("Trail") or desc:IsA("Beam") then
+			if desc.Enabled then
+				if record.stasisPausedVfx then
+					record.stasisPausedVfx[desc] = record.stasisPausedVfx[desc] or { enabled = true }
+				end
+				desc.Enabled = false
+			end
+		end
+	end
+end
+
 local function forceEnemyVisible(record: RenderRecord)
 	if not record then
 		return
@@ -435,6 +572,10 @@ local function resetModelForPool(record: RenderRecord, model: Model)
 	local tierOutline = model:FindFirstChild("TierOutline")
 	if tierOutline and tierOutline:IsA("Highlight") then
 		tierOutline:Destroy()
+	end
+	local enemyHealthBillboard = model:FindFirstChild("EnemyHealthBillboard")
+	if enemyHealthBillboard and enemyHealthBillboard:IsA("BillboardGui") then
+		enemyHealthBillboard:Destroy()
 	end
 	pcall(function()
 		model:ScaleTo(1)
@@ -582,6 +723,415 @@ local function findModelByPath(modelPath: string): Instance?
 	return nil
 end
 
+do
+	local function findInstanceByPath(root: Instance, pathParts: {string}): Instance?
+		local current: Instance? = root
+		for _, partName in ipairs(pathParts) do
+			if not current then
+				return nil
+			end
+			current = current:FindFirstChild(partName)
+		end
+		return current
+	end
+
+	local function getEnemyHealthTemplateInstance(): Instance?
+		local current: Instance? = ReplicatedStorage
+		for _, partName in ipairs({"ContentDrawer", "UI", "EnemyHealth", "EnemyHealthExample"}) do
+			if not current then
+				return nil
+			end
+			current = current:FindFirstChild(partName)
+		end
+		return current
+	end
+
+	local function getEnemyUiAdornee(record: RenderRecord): BasePart?
+		local model = record.model
+		if not model then
+			return nil
+		end
+		local hitbox = model:FindFirstChild("Hitbox", true) or model:FindFirstChild("hitbox", true)
+		if hitbox and hitbox:IsA("BasePart") then
+			return hitbox
+		end
+		local primary = model.PrimaryPart
+		if primary then
+			return primary
+		end
+		local fallback = model:FindFirstChildWhichIsA("BasePart")
+		if fallback and fallback:IsA("BasePart") then
+			return fallback
+		end
+		return nil
+	end
+
+	local function getEnemyHealthBillboardFit(record: RenderRecord): (UDim2, Vector3)
+		local model = record.model
+		if not model then
+			return UDim2.fromOffset(140, 48), Vector3.new(0, 4.2, 0)
+		end
+
+		local extents = model:GetExtentsSize()
+		local horizontal = math.max(extents.X, extents.Z)
+		local sizeX = math.floor(math.clamp(104 + horizontal * 8, 128, 210))
+		local sizeY = math.floor(math.clamp(38 + extents.Y * 1.6, 44, 70))
+		local offsetY = math.clamp(extents.Y * 0.6 + 1.3, 3.2, 8.5)
+		return UDim2.fromOffset(sizeX, sizeY), Vector3.new(0, offsetY, 0)
+	end
+
+	local function createFallbackEnemyHealthBillboard(): BillboardGui
+		local billboard = Instance.new("BillboardGui")
+		billboard.Name = "EnemyHealthBillboard"
+		billboard.AlwaysOnTop = true
+		billboard.Size = UDim2.fromOffset(140, 48)
+		billboard.StudsOffsetWorldSpace = Vector3.new(0, 4.2, 0)
+		billboard.MaxDistance = 240
+		billboard.Enabled = true
+
+		local root = Instance.new("Frame")
+		root.Name = "Root"
+		root.BackgroundTransparency = 1
+		root.Size = UDim2.fromScale(1, 1)
+		root.Parent = billboard
+
+		local highlight = Instance.new("Frame")
+		highlight.Name = "Highlight"
+		highlight.BackgroundTransparency = 1
+		highlight.Size = UDim2.fromScale(1, 1)
+		highlight.Parent = root
+
+		local border = Instance.new("Frame")
+		border.Name = "Border"
+		border.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+		border.BackgroundTransparency = 0.2
+		border.Size = UDim2.fromOffset(118, 12)
+		border.Position = UDim2.fromOffset(11, 17)
+		border.Parent = highlight
+
+		local health = Instance.new("Frame")
+		health.Name = "Health"
+		health.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+		health.Size = UDim2.new(1, -2, 1, -2)
+		health.Position = UDim2.fromOffset(1, 1)
+		health.Parent = border
+
+		local fill = Instance.new("Frame")
+		fill.Name = "Fill"
+		fill.BackgroundColor3 = Color3.fromRGB(115, 235, 110)
+		fill.BorderSizePixel = 0
+		fill.Size = UDim2.fromScale(1, 1)
+		fill.Parent = health
+
+		local eliteType = Instance.new("Frame")
+		eliteType.Name = "EliteType"
+		eliteType.BackgroundTransparency = 1
+		eliteType.Size = UDim2.fromOffset(118, 12)
+		eliteType.Position = UDim2.fromOffset(11, 2)
+		eliteType.Parent = root
+
+		local eliteImage = Instance.new("ImageLabel")
+		eliteImage.Name = "ImageLabel"
+		eliteImage.BackgroundTransparency = 1
+		eliteImage.BorderSizePixel = 0
+		eliteImage.ImageTransparency = 1
+		eliteImage.Size = UDim2.fromScale(1, 1)
+		eliteImage.Parent = eliteType
+
+		local statusEffects = Instance.new("Frame")
+		statusEffects.Name = "StatusEffects"
+		statusEffects.BackgroundTransparency = 1
+		statusEffects.Size = UDim2.fromOffset(118, 12)
+		statusEffects.Position = UDim2.fromOffset(11, 32)
+		statusEffects.Parent = root
+
+		local statusSlot = Instance.new("ImageLabel")
+		statusSlot.Name = "StatusEffectExampleImageLabel"
+		statusSlot.BackgroundTransparency = 1
+		statusSlot.ImageTransparency = 1
+		statusSlot.Size = UDim2.fromOffset(22, 12)
+		statusSlot.Visible = false
+		statusSlot.Parent = statusEffects
+
+		local emojiLabel = Instance.new("TextLabel")
+		emojiLabel.Name = "EmojiText"
+		emojiLabel.BackgroundTransparency = 1
+		emojiLabel.Text = "❄️"
+		emojiLabel.Font = Enum.Font.GothamBold
+		emojiLabel.TextScaled = true
+		emojiLabel.Size = UDim2.fromOffset(12, 12)
+		emojiLabel.Position = UDim2.fromOffset(0, 0)
+		emojiLabel.Parent = statusSlot
+
+		local stackCount = Instance.new("TextLabel")
+		stackCount.Name = "StackCountExample"
+		stackCount.BackgroundTransparency = 1
+		stackCount.Text = ""
+		stackCount.Font = Enum.Font.GothamBold
+		stackCount.TextSize = 11
+		stackCount.TextXAlignment = Enum.TextXAlignment.Right
+		stackCount.TextColor3 = Color3.fromRGB(255, 255, 255)
+		stackCount.Size = UDim2.fromOffset(10, 12)
+		stackCount.Position = UDim2.fromOffset(12, 0)
+		stackCount.Visible = false
+		stackCount.Parent = statusSlot
+
+		return billboard
+	end
+
+	destroyEnemyHealthbar = function(record: RenderRecord)
+		local billboard = record.enemyHealthBillboard
+		if billboard and billboard.Parent then
+			billboard:Destroy()
+		end
+		record.enemyHealthBillboard = nil
+		record.enemyHealthFill = nil
+		record.enemyEliteBackground = nil
+		record.enemyStatusContainer = nil
+		record.enemyStatusSlot = nil
+		record.enemyStatusEmojiLabel = nil
+		record.enemyStatusStackLabel = nil
+	end
+
+	local function ensureEnemyHealthbar(record: RenderRecord)
+		if record.enemyHealthBillboard and record.enemyHealthBillboard.Parent then
+			local adornee = getEnemyUiAdornee(record)
+			if adornee then
+				record.enemyHealthBillboard.Adornee = adornee
+			end
+			return
+		end
+
+		local billboard: BillboardGui? = nil
+		local keepTemplateBillboardProperties = false
+		local template = getEnemyHealthTemplateInstance()
+		if template then
+			local cloned = template:Clone()
+			if cloned:IsA("BillboardGui") then
+				billboard = cloned
+				keepTemplateBillboardProperties = true
+			elseif cloned:IsA("GuiObject") then
+				billboard = Instance.new("BillboardGui")
+				local sourceBillboard = template:FindFirstAncestorWhichIsA("BillboardGui")
+				if sourceBillboard then
+					billboard.Size = sourceBillboard.Size
+					billboard.AlwaysOnTop = sourceBillboard.AlwaysOnTop
+					billboard.StudsOffsetWorldSpace = sourceBillboard.StudsOffsetWorldSpace
+					billboard.MaxDistance = sourceBillboard.MaxDistance
+					keepTemplateBillboardProperties = true
+				else
+					local fitSize, fitOffset = getEnemyHealthBillboardFit(record)
+					billboard.Size = fitSize
+					billboard.AlwaysOnTop = true
+					billboard.StudsOffsetWorldSpace = fitOffset
+					billboard.MaxDistance = 240
+				end
+				cloned.Size = UDim2.fromScale(1, 1)
+				cloned.Parent = billboard
+			end
+		end
+
+		if not billboard then
+			billboard = createFallbackEnemyHealthBillboard()
+			local fitSize, fitOffset = getEnemyHealthBillboardFit(record)
+			billboard.Size = fitSize
+			billboard.StudsOffsetWorldSpace = fitOffset
+		end
+		billboard.Name = "EnemyHealthBillboard"
+		billboard.Enabled = true
+		if not keepTemplateBillboardProperties then
+			-- Ensure non-template billboards sit and scale appropriately for the enemy model.
+			local fitSize, fitOffset = getEnemyHealthBillboardFit(record)
+			billboard.Size = fitSize
+			billboard.StudsOffsetWorldSpace = fitOffset
+		end
+
+		local adornee = getEnemyUiAdornee(record)
+		if adornee then
+			billboard.Adornee = adornee
+		end
+		billboard.Parent = record.model
+
+		local fillInstance = findInstanceByPath(billboard, {"Highlight", "Border", "Health", "Fill"})
+		if not fillInstance then
+			fillInstance = billboard:FindFirstChild("Fill", true)
+		end
+
+		local eliteInstance = findInstanceByPath(billboard, {"EliteType", "ImageLabel"})
+		if not eliteInstance then
+			eliteInstance = findInstanceByPath(billboard, {"EliteType"})
+		end
+		if not eliteInstance then
+			eliteInstance = billboard:FindFirstChild("ImageLabel", true)
+		end
+
+		local statusContainer = findInstanceByPath(billboard, {"StatusEffects"})
+		if not statusContainer then
+			statusContainer = billboard:FindFirstChild("StatusEffects", true)
+		end
+		local statusSlot = statusContainer and findInstanceByPath(statusContainer, {"StatusEffectExampleImageLabel"}) or nil
+		if not statusSlot and statusContainer then
+			for _, child in ipairs(statusContainer:GetChildren()) do
+				if child:IsA("GuiObject") then
+					statusSlot = child
+					break
+				end
+			end
+		end
+
+		local statusEmojiLabel: TextLabel? = nil
+		local statusStackLabel: TextLabel? = nil
+		if statusSlot and statusSlot:IsA("GuiObject") then
+			if statusSlot:IsA("ImageLabel") then
+				statusSlot.ImageTransparency = 1
+			end
+
+			local existingEmoji = statusSlot:FindFirstChild("EmojiText")
+			if existingEmoji and existingEmoji:IsA("TextLabel") then
+				statusEmojiLabel = existingEmoji
+			elseif statusSlot:IsA("TextLabel") then
+				statusEmojiLabel = statusSlot
+			else
+				local createdEmoji = Instance.new("TextLabel")
+				createdEmoji.Name = "EmojiText"
+				createdEmoji.BackgroundTransparency = 1
+				createdEmoji.Size = UDim2.fromOffset(12, 12)
+				createdEmoji.Position = UDim2.fromOffset(0, 0)
+				createdEmoji.Font = Enum.Font.GothamBold
+				createdEmoji.TextScaled = true
+				createdEmoji.Text = "❄️"
+				createdEmoji.Parent = statusSlot
+				statusEmojiLabel = createdEmoji
+			end
+
+			local existingStack = statusSlot:FindFirstChild("StackCountExample")
+			if existingStack and existingStack:IsA("TextLabel") then
+				statusStackLabel = existingStack
+			else
+				local createdStack = Instance.new("TextLabel")
+				createdStack.Name = "StackCountExample"
+				createdStack.BackgroundTransparency = 1
+				createdStack.Size = UDim2.fromOffset(10, 12)
+				createdStack.Position = UDim2.fromOffset(12, 0)
+				createdStack.Font = Enum.Font.GothamBold
+				createdStack.TextSize = 11
+				createdStack.TextXAlignment = Enum.TextXAlignment.Right
+				createdStack.TextColor3 = Color3.fromRGB(255, 255, 255)
+				createdStack.Visible = false
+				createdStack.Parent = statusSlot
+				statusStackLabel = createdStack
+			end
+		end
+
+		local healthRoot = findInstanceByPath(billboard, {"Highlight", "Border", "Health"})
+		if not healthRoot then
+			healthRoot = billboard:FindFirstChild("Health", true)
+		end
+		if healthRoot then
+			for _, descendant in ipairs(healthRoot:GetDescendants()) do
+				if descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
+					descendant.Visible = false
+				end
+			end
+		end
+
+		record.enemyHealthBillboard = billboard
+		record.enemyHealthFill = if fillInstance and fillInstance:IsA("GuiObject") then fillInstance else nil
+		record.enemyEliteBackground = if eliteInstance and eliteInstance:IsA("GuiObject") then eliteInstance else nil
+		record.enemyStatusContainer = if statusContainer and statusContainer:IsA("GuiObject") then statusContainer else nil
+		record.enemyStatusSlot = if statusSlot and statusSlot:IsA("GuiObject") then statusSlot else nil
+		record.enemyStatusEmojiLabel = statusEmojiLabel
+		record.enemyStatusStackLabel = statusStackLabel
+	end
+
+	local function updateEnemyHealthbar(record: RenderRecord, now: number)
+		if not record.enemyHealthBillboard or not record.enemyHealthBillboard.Parent then
+			return
+		end
+
+		record.enemyHealthBillboard.Enabled = not (record.isFadedOut == true)
+
+		local healthData = record.enemyHealthData
+		if record.enemyHealthFill and typeof(healthData) == "table" then
+			local current = tonumber(healthData.current) or 0
+			local maxHealth = tonumber(healthData.max) or 0
+			local percent = 0
+			if maxHealth > 0 then
+				percent = math.clamp(current / maxHealth, 0, 1)
+			end
+			local currentSize = record.enemyHealthFill.Size
+			record.enemyHealthFill.Size = UDim2.new(percent, 0, currentSize.Y.Scale, currentSize.Y.Offset)
+		end
+
+		if record.enemyEliteBackground then
+			local tier = record.enemyTier
+			if tier == "Super" then
+				record.enemyEliteBackground.BackgroundTransparency = 0
+				record.enemyEliteBackground.BackgroundColor3 = Color3.fromRGB(255, 220, 60)
+			elseif tier == "Elite" then
+				record.enemyEliteBackground.BackgroundTransparency = 0
+				record.enemyEliteBackground.BackgroundColor3 = Color3.fromRGB(255, 60, 60)
+			else
+				record.enemyEliteBackground.BackgroundTransparency = 1
+			end
+			if record.enemyEliteBackground:IsA("ImageLabel") then
+				record.enemyEliteBackground.ImageTransparency = 1
+			end
+		end
+
+		local slowActive = (record.enemySlowExpiresAt or 0) > now
+		if record.enemyStatusSlot then
+			record.enemyStatusSlot.Visible = slowActive
+			if record.enemyStatusSlot:IsA("ImageLabel") then
+				record.enemyStatusSlot.ImageTransparency = 1
+			end
+		end
+		if record.enemyStatusContainer then
+			record.enemyStatusContainer.Visible = slowActive
+		end
+		if record.enemyStatusEmojiLabel then
+			record.enemyStatusEmojiLabel.Visible = slowActive
+			record.enemyStatusEmojiLabel.Text = "❄️"
+		end
+		if record.enemyStatusStackLabel then
+			local stackCount = 1
+			if typeof(record.enemySlowData) == "table" then
+				stackCount = math.max(1, math.floor(tonumber(record.enemySlowData.stacks) or 1))
+			end
+			if slowActive and stackCount >= 2 then
+				record.enemyStatusStackLabel.Visible = true
+				record.enemyStatusStackLabel.Text = tostring(stackCount)
+			else
+				record.enemyStatusStackLabel.Visible = false
+				record.enemyStatusStackLabel.Text = ""
+			end
+		end
+	end
+
+	applyEnemyHealthbarVisibility = function(key: string, record: RenderRecord, now: number)
+		if record.entityType ~= "Enemy" then
+			return
+		end
+
+		if not revealedEnemyIds[key] then
+			destroyEnemyHealthbar(record)
+			return
+		end
+
+		ensureEnemyHealthbar(record)
+		updateEnemyHealthbar(record, now)
+	end
+
+	revealEnemyHealthbarForEntity = function(entityId: string | number)
+		local key = entityKey(entityId)
+		revealedEnemyIds[key] = true
+		local record = renderedEntities[key]
+		if record and record.entityType == "Enemy" then
+			applyEnemyHealthbarVisibility(key, record, tick())
+		end
+	end
+end
+
 local function getImpaleFolder(): Folder
 	local folder = Workspace:FindFirstChild("ImpaleEffects")
 	if not folder then
@@ -613,32 +1163,6 @@ local function buildImpaleParts(model: Model): {BasePart}
 		end
 	end
 	return parts
-end
-
-local function weldImpaleModel(model: Model, target: BasePart)
-    local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-    if not primary then
-        return
-    end
-    if not model.PrimaryPart then
-        model.PrimaryPart = primary
-    end
-
-    -- Weld internal parts to primary for stability
-    for _, part in ipairs(model:GetDescendants()) do
-        if part:IsA("BasePart") and part ~= primary then
-            local constraint = Instance.new("WeldConstraint")
-            constraint.Part0 = primary
-            constraint.Part1 = part
-            constraint.Parent = primary
-        end
-    end
-
-    local attach = Instance.new("WeldConstraint")
-    attach.Part0 = target
-    attach.Part1 = primary
-    attach.Parent = target
-    model:PivotTo(target.CFrame)
 end
 
 local function fadeImpaleModel(model: Model, parts: {BasePart}, duration: number, token: number)
@@ -706,44 +1230,6 @@ local CULL_TOGGLE_COOLDOWN = 0.75
 local CULL_OUT_DIST_SQ = CULL_OUT_DIST * CULL_OUT_DIST
 local CULL_IN_DIST_SQ = CULL_IN_DIST * CULL_IN_DIST
 local reduceFlashEnabled = false
-
-local function readNumberAttribute(attributeName: string, fallback: number, minimum: number, maximum: number): number
-	local raw = player:GetAttribute(attributeName)
-	if typeof(raw) == "number" then
-		return math.clamp(raw, minimum, maximum)
-	end
-	return fallback
-end
-
-local function readBoolAttribute(attributeName: string, fallback: boolean): boolean
-	local raw = player:GetAttribute(attributeName)
-	if typeof(raw) == "boolean" then
-		return raw
-	end
-	return fallback
-end
-
-local function applyRenderDistanceScale(scale: number)
-	local clampedScale = math.clamp(scale, 0.50, 10.00)
-	ENEMY_CULL_OUT_DIST = BASE_ENEMY_CULL_OUT_DIST * clampedScale
-	ENEMY_CULL_IN_DIST = BASE_ENEMY_CULL_IN_DIST * clampedScale
-	CULL_OUT_DIST = ENEMY_CULL_OUT_DIST
-	CULL_IN_DIST = ENEMY_CULL_IN_DIST
-	CULL_OUT_DIST_SQ = CULL_OUT_DIST * CULL_OUT_DIST
-	CULL_IN_DIST_SQ = CULL_IN_DIST * CULL_IN_DIST
-end
-
-local function readEnemyRenderScaleAttribute(): number
-	local explicit = player:GetAttribute(ATTR_ENEMY_RENDER_SCALE)
-	if typeof(explicit) == "number" then
-		return math.clamp(explicit, 0.50, 10.00)
-	end
-	local legacy = player:GetAttribute(ATTR_RENDER_SCALE_LEGACY)
-	if typeof(legacy) == "number" then
-		return math.clamp(legacy, 0.50, 10.00)
-	end
-	return 1.0
-end
 
 -- Status effect offsets per enemy subtype (forward = -Z in model space)
 STATUS_EFFECT_OFFSETS = {
@@ -1350,15 +1836,6 @@ local function handleHitFlash(model: Model, hitFlashData: any)
 	end
 end
 
-local function findRecordByModel(model: Model): RenderRecord?
-	for _, record in pairs(renderedEntities) do
-		if record.model == model then
-			return record
-		end
-	end
-	return nil
-end
-
 -- OPTIMIZED: Handle death fade animation using chunked fade system
 local function handleDeathAnimation(model: Model, deathData: any)
 	if not model or not deathData then
@@ -1381,7 +1858,7 @@ local function handleDeathAnimation(model: Model, deathData: any)
 	-- CRITICAL FIX: If we're receiving this late (e.g. after pause), start immediately
 	-- Check if model has been waiting for a while (stale data)
 	local modelAge = 0
-	local record = findRecordByModel(model)
+	local record = recordByModel[model]
 	if record and record.spawnTime then
 		modelAge = now - record.spawnTime
 	end
@@ -2498,10 +2975,6 @@ local function buildProjectileEntityData(spawnData: {[string]: any}): {[string]:
 	return data
 end
 
-local function buildOrbEntityData(spawnData: {[string]: any}): {[string]: any}?
-	return nil
-end
-
 local function ensureModelTransform(record: RenderRecord, position: Vector3?, velocityComponent: any, facingComponent: any)
 	local model = record.model
 	if not model then
@@ -2682,10 +3155,25 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	local visualData = entityData.Visual
 	local spawnScale = sanitizeEnemyScale((visualData and type(visualData) == "table") and visualData.scale or nil)
 	local spawnTier: string? = nil
+	local spawnHealth: any = nil
+	local spawnSlowData: any = nil
+	local spawnSlowExpiresAt: number? = nil
+	local spawnTimeStopped = false
 	if entityTypeName == "Enemy" then
 		local tierData = entityData.EnemyTier
 		if typeof(tierData) == "table" and typeof(tierData.tier) == "string" then
 			spawnTier = tierData.tier
+		end
+		if typeof(entityData.Health) == "table" then
+			spawnHealth = entityData.Health
+		end
+		if typeof(entityData.EnemySlow) == "table" then
+			spawnSlowData = entityData.EnemySlow
+			local duration = math.max(tonumber(entityData.EnemySlow.duration) or 0, 0)
+			spawnSlowExpiresAt = tick() + duration
+		end
+		if typeof(entityData.EnemyTimeStopped) == "table" and entityData.EnemyTimeStopped.active == true then
+			spawnTimeStopped = true
 		end
 	end
 	if entityTypeName == "Projectile" and visualData and type(visualData) == "table" and visualData.color then
@@ -2862,6 +3350,10 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			expectedScale = spawnScale,
 			enemyTier = spawnTier,
 			nextVisualInvariantCheck = 0,
+			enemyHealthData = spawnHealth,
+			enemySlowData = spawnSlowData,
+			enemySlowExpiresAt = spawnSlowExpiresAt,
+			enemyTimeStopped = false,
 		}
 	renderedEntities[key] = record
 	recordByModel[model] = record
@@ -2880,6 +3372,10 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	profInc("visualsCreated", 1)
 	model:SetAttribute("ECS_EntityId", key)
 	model:SetAttribute("ECS_LastUpdate", record.lastUpdate)
+	if entityTypeName == "Enemy" then
+		applyEnemyHealthbarVisibility(key, record, tick())
+		applyEnemyTimeStopState(record, spawnTimeStopped)
+	end
 	
 	-- OPTIMIZED: Fade in new enemies from transparent
 	if entityTypeName == "Enemy" then
@@ -3098,13 +3594,6 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	end
 end
 
-local function updateEntityType(record: RenderRecord, newType: any)
-	if typeof(newType) == "table" and newType.type then
-		record.entityType = newType.type
-		record.entitySubtype = newType.subtype
-	end
-end
-
 local function handleEntityUpdate(entityId: string | number, rawData: {[string]: any})
 	local key = entityKey(entityId)
 	local entityData = resolveEntityData(rawData)
@@ -3145,7 +3634,10 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 	end
 
 	if entityData.EntityType then
-		updateEntityType(record, entityData.EntityType)
+		if typeof(entityData.EntityType) == "table" and entityData.EntityType.type then
+			record.entityType = entityData.EntityType.type
+			record.entitySubtype = entityData.EntityType.subtype
+		end
 	end
 	if record.entityType == "Enemy" and entityData.EnemyTier then
 		local tierData = entityData.EnemyTier
@@ -3162,6 +3654,20 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 			record.model:ScaleTo(visualScale)
 		end)
 	end
+	if record.entityType == "Enemy" and typeof(entityData.Health) == "table" then
+		record.enemyHealthData = entityData.Health
+	end
+	if record.entityType == "Enemy" and typeof(entityData.EnemySlow) == "table" then
+		record.enemySlowData = entityData.EnemySlow
+		local duration = math.max(tonumber(entityData.EnemySlow.duration) or 0, 0)
+		record.enemySlowExpiresAt = tick() + duration
+	end
+	if record.entityType == "Enemy" then
+		if entityData.EnemyTimeStopped ~= nil then
+			local isFrozen = typeof(entityData.EnemyTimeStopped) == "table" and entityData.EnemyTimeStopped.active == true
+			applyEnemyTimeStopState(record, isFrozen)
+		end
+	end
 
 	-- Handle hit flash VFX
 	if entityData.HitFlash then
@@ -3176,6 +3682,9 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 	-- Handle enemy slow impale visual
 	if entityData.EnemySlow then
 		handleEnemySlow(record, entityData.EnemySlow)
+	end
+	if record.entityType == "Enemy" then
+		applyEnemyHealthbarVisibility(key, record, tick())
 	end
 	
 	-- Handle Visual component changes (for red orb teleportation)
@@ -3294,6 +3803,11 @@ end
 
 local function performDespawn(key: string, record: RenderRecord)
 	local model = record.model
+	if record.entityType == "Enemy" and record.enemyTimeStopped then
+		applyEnemyTimeStopState(record, false)
+	end
+	revealedEnemyIds[key] = nil
+	destroyEnemyHealthbar(record)
 	
 	-- Clean up active tween if exists (MEMORY LEAK FIX 1.4)
 	if model and activeEnemyTweens[model] then
@@ -3387,6 +3901,7 @@ end
 handleEntityDespawn = function(entityId: string | number, force: boolean?)
 	local key = entityKey(entityId)
 	knownEntityIds[key] = nil
+	revealedEnemyIds[key] = nil
 	local record = renderedEntities[key]
 	if not record then
 		if spawnQueueSet[key] then
@@ -3543,11 +4058,7 @@ local function processSpawnPayloads(entities: any, projectileSpawns: any, orbSpa
 	if typeof(orbSpawns) == "table" then
 		for _, spawnData in ipairs(orbSpawns) do
 			if typeof(spawnData) == "table" and spawnData.id then
-				local entityData = buildOrbEntityData(spawnData)
-				if entityData then
-					spawnCount += 1
-					enqueueSpawn(spawnData.id, entityData)
-				end
+				-- Orb spawn payload conversion is intentionally disabled in this renderer pass.
 			end
 		end
 	end
@@ -3726,6 +4237,17 @@ EntityDespawn.OnClientEvent:Connect(function(despawns)
 		handleEntityDespawn(despawns)
 	end
 end)
+
+if PlayerHitMarkerRemote and PlayerHitMarkerRemote:IsA("RemoteEvent") then
+	PlayerHitMarkerRemote.OnClientEvent:Connect(function(payload: any)
+		if typeof(payload) == "table" then
+			local enemyEntityId = payload.enemyEntityId
+			if typeof(enemyEntityId) == "number" or typeof(enemyEntityId) == "string" then
+				revealEnemyHealthbarForEntity(enemyEntityId)
+			end
+		end
+	end)
+end
 
 	RunService:BindToRenderStep("ECS.EntityLerp", Enum.RenderPriority.Camera.Value, function()
 		Prof.beginTimer("ClientEntityRenderer.Render")
@@ -3972,7 +4494,9 @@ end)
 		
 		-- OPTIMIZED: Handle distance-based fade out/in for enemies (not projectiles)
 		if record.entityType == "Enemy" then
+			applyEnemyHealthbarVisibility(key, record, now)
 			ensureEnemyVisualInvariants(record, now)
+			maintainEnemyTimeStopState(record)
 			if record.impaleModel and record.impaleFollowPart and record.impaleModel.Parent then
 				pcall(function()
 					local offsetCFrame = record.impaleFollowOffset or CFrame.new()
@@ -4159,10 +4683,27 @@ end)
 end)
 
 local function applyClientSettingsFromAttributes()
-	local renderScale = readEnemyRenderScaleAttribute()
-	applyRenderDistanceScale(renderScale)
+	local renderScale = 1.0
+	local explicitScale = player:GetAttribute(ATTR_ENEMY_RENDER_SCALE)
+	if typeof(explicitScale) == "number" then
+		renderScale = math.clamp(explicitScale, 0.50, 10.00)
+	else
+		local legacyScale = player:GetAttribute(ATTR_RENDER_SCALE_LEGACY)
+		if typeof(legacyScale) == "number" then
+			renderScale = math.clamp(legacyScale, 0.50, 10.00)
+		end
+	end
 
-	reduceFlashEnabled = readBoolAttribute(ATTR_REDUCE_FLASH, false)
+	local clampedScale = math.clamp(renderScale, 0.50, 10.00)
+	ENEMY_CULL_OUT_DIST = BASE_ENEMY_CULL_OUT_DIST * clampedScale
+	ENEMY_CULL_IN_DIST = BASE_ENEMY_CULL_IN_DIST * clampedScale
+	CULL_OUT_DIST = ENEMY_CULL_OUT_DIST
+	CULL_IN_DIST = ENEMY_CULL_IN_DIST
+	CULL_OUT_DIST_SQ = CULL_OUT_DIST * CULL_OUT_DIST
+	CULL_IN_DIST_SQ = CULL_IN_DIST * CULL_IN_DIST
+
+	local reduceFlashAttr = player:GetAttribute(ATTR_REDUCE_FLASH)
+	reduceFlashEnabled = if typeof(reduceFlashAttr) == "boolean" then reduceFlashAttr else false
 	for _, flashData in pairs(hitFlashHighlights) do
 		if flashData.highlight then
 			applyHitFlashStyle(flashData.highlight, flashData.isCrit == true)

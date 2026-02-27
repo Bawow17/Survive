@@ -11,7 +11,7 @@ local playerGui = localPlayer:WaitForChild("PlayerGui")
 
 local sharedFolder = ReplicatedStorage:WaitForChild("Shared")
 local PlayerBalance = require(sharedFolder:WaitForChild("PlayerBalance"))
-local UpgradeDefs = require(sharedFolder:WaitForChild("UpgradeDefs"))
+local CombatCaps = require(sharedFolder:WaitForChild("CombatCaps"))
 
 local remotes = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS")
 local entitySync = remotes:WaitForChild("EntitySync")
@@ -508,7 +508,7 @@ local function computeAbilityStats(abilityRecord: any, passiveEffects: any, buff
 			local baseCount = baseStats.projectileCount or stats.projectileCount
 			local rawBase = stats.projectileCountRaw or stats.projectileCount
 			local bonusMultiplier = stats.projectileCountMultiplier or 1
-			local maxCount = math.floor(baseCount * UpgradeDefs.SoftCaps.countMaxMultiplier + 0.0001)
+			local maxCount = math.floor(baseCount * CombatCaps.ProjectileCountMaxMultiplier + 0.0001)
 			local rawCount = rawBase + (projectileCountBonus * bonusMultiplier)
 			if rawBase > maxCount then
 				stats.projectileCountRaw = rawCount

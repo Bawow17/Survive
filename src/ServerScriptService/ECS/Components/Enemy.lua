@@ -54,4 +54,7 @@ EnemyComponents.EnemyTier = world:component()
 -- EnemyFrostbite component - Tracks Frostbite status stacks and expiry
 EnemyComponents.EnemyFrostbite = world:component()
 
+-- EnemyTimeStopped component - Tracks active Tempus Gelidum freeze state
+EnemyComponents.EnemyTimeStopped = world:component()
+
 return EnemyComponents

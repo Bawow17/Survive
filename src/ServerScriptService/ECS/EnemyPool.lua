@@ -56,6 +56,9 @@ local function resetEnemyEntity(entity: number, enemyType: string, position: Vec
 	if Components.EnemyFrostbite and world:has(entity, Components.EnemyFrostbite) then
 		world:remove(entity, Components.EnemyFrostbite)
 	end
+	if Components.EnemyTimeStopped and world:has(entity, Components.EnemyTimeStopped) then
+		world:remove(entity, Components.EnemyTimeStopped)
+	end
 
 	local posData = { x = position.X, y = position.Y, z = position.Z }
 	world:set(entity, Components.Position, posData)
@@ -249,6 +252,9 @@ function EnemyPool.release(entity: number)
 		end
 		if Components.EnemyFrostbite and world:has(entity, Components.EnemyFrostbite) then
 			world:remove(entity, Components.EnemyFrostbite)
+		end
+		if Components.EnemyTimeStopped and world:has(entity, Components.EnemyTimeStopped) then
+			world:remove(entity, Components.EnemyTimeStopped)
 		end
 		
 		-- Delay reuse slightly so clients process despawn before the same entity ID respawns.

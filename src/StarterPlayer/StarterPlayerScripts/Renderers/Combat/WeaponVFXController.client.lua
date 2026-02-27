@@ -10,6 +10,7 @@ local localPlayer = Players.LocalPlayer
 
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local weaponRemotesFolder = remotesFolder:WaitForChild("Weapons")
+local timeStopStateRemote = remotesFolder:WaitForChild("TimeStopState")
 local primaryShotRemote = weaponRemotesFolder:WaitForChild("PrimaryShot")
 local secondaryShotRemote = weaponRemotesFolder:WaitForChild("SecondaryShot")
 local playerScripts = localPlayer:FindFirstChild("PlayerScripts")
@@ -32,6 +33,7 @@ local InstancePath = require(localSharedFolder:WaitForChild("InstancePath"))
 local WEAPON_ID = "Oathkeeper"
 local DEFAULT_TRACER_LIFETIME = 2.0
 local DEFAULT_TRACER_FADE_DURATION = 0.5
+local DEFAULT_STASIS_VISUAL_HOLD_DISTANCE = 1.5
 local WEAPON_MUZZLE_PART_PATH = "OathkeeperModel.Barrel"
 local MUZZLE_FLASH_PATH = WEAPON_MUZZLE_PART_PATH .. ".MuzzleFlash"
 local M1_HIT_EFFECT_PATH = "HitEnd.HitEffect"
@@ -41,6 +43,8 @@ local warned: {[string]: boolean} = {}
 local predictedPrimaryShotIds: {[number]: number} = {}
 local predictedSecondaryShotIds: {[number]: number} = {}
 local PREDICTED_SHOT_ID_TTL = 4.0
+local heldTracersBySession: {[number]: {any}} = {}
+local heldTracersNoSession: {any} = {}
 
 local function warnOnce(key: string, message: string)
 	if warned[key] then
@@ -139,9 +143,16 @@ local function createAnchorPart(position: Vector3, parent: Instance, name: strin
 	return part, attachment
 end
 
-local function spawnTracer(origin: Vector3, impactPosition: Vector3, tracerTemplate: Instance?, lifetime: number, fadeDuration: number)
+local function spawnTracer(
+	origin: Vector3,
+	impactPosition: Vector3,
+	tracerTemplate: Instance?,
+	lifetime: number,
+	fadeDuration: number,
+	deferCleanup: boolean?
+): any
 	if not tracerTemplate then
-		return
+		return nil
 	end
 
 	local container = Instance.new("Folder")
@@ -197,25 +208,38 @@ local function spawnTracer(origin: Vector3, impactPosition: Vector3, tracerTempl
 		warnOnce("MissingTracerType", "[WeaponVFXController] Tracer template has no Beam/Trail.")
 	end
 
-	local fadeDelay = math.max(0, lifetime - fadeDuration)
-	task.delay(fadeDelay, function()
-		if not container.Parent then
-			return
-		end
-		fadeSequenceObjects(sequenceTargets, fadeDuration)
-	end)
+	local handle = {
+		container = container,
+		startPart = startPart,
+		endPart = endPart,
+		sequenceTargets = sequenceTargets,
+		lifetime = lifetime,
+		fadeDuration = fadeDuration,
+	}
 
-	task.delay(lifetime, function()
-		if startPart.Parent then
-			startPart:Destroy()
-		end
-		if endPart.Parent then
-			endPart:Destroy()
-		end
-		if container.Parent then
-			container:Destroy()
-		end
-	end)
+	if not deferCleanup then
+		local fadeDelay = math.max(0, lifetime - fadeDuration)
+		task.delay(fadeDelay, function()
+			if not container.Parent then
+				return
+			end
+			fadeSequenceObjects(sequenceTargets, fadeDuration)
+		end)
+
+		task.delay(lifetime, function()
+			if startPart.Parent then
+				startPart:Destroy()
+			end
+			if endPart.Parent then
+				endPart:Destroy()
+			end
+			if container.Parent then
+				container:Destroy()
+			end
+		end)
+	end
+
+	return handle
 end
 
 local function spawnImpactEffect(impactPosition: Vector3, impactNormal: Vector3, endpointTemplate: Instance?, hitEffectPath: string)
@@ -273,6 +297,24 @@ local function resolveLiveMuzzleOrigin(shooterUserId: number, fallbackOrigin: Ve
 	return fallbackOrigin
 end
 
+local function computeDeferredHoldImpact(
+	liveOrigin: Vector3,
+	finalImpact: Vector3,
+	requestedHoldDistance: number?
+): Vector3
+	local segment = finalImpact - liveOrigin
+	local segLen = segment.Magnitude
+	if segLen <= 1e-5 then
+		return finalImpact
+	end
+	local holdDistance = DEFAULT_STASIS_VISUAL_HOLD_DISTANCE
+	if typeof(requestedHoldDistance) == "number" then
+		holdDistance = math.max(0, requestedHoldDistance)
+	end
+	local clamped = math.min(segLen, holdDistance)
+	return liveOrigin + (segment.Unit * clamped)
+end
+
 local function consumePredictedShotId(predictedMap: {[number]: number}, clientShotId: number): boolean
 	local expiresAt = predictedMap[clientShotId]
 	if not expiresAt then
@@ -293,6 +335,78 @@ local function cleanupExpiredPredictedShotIds(predictedMap: {[number]: number})
 			predictedMap[shotId] = nil
 		end
 	end
+end
+
+local function queueHeldTracer(sessionId: number?, entry: any)
+	if typeof(sessionId) == "number" then
+		local list = heldTracersBySession[sessionId]
+		if not list then
+			list = {}
+			heldTracersBySession[sessionId] = list
+		end
+		table.insert(list, entry)
+		return
+	end
+	table.insert(heldTracersNoSession, entry)
+end
+
+local function finalizeHeldTracer(entry: any)
+	if typeof(entry) ~= "table" then
+		return
+	end
+	local handle = entry.handle
+	if typeof(handle) ~= "table" then
+		return
+	end
+	local container = handle.container
+	if not container or not container.Parent then
+		return
+	end
+
+	local endPart = handle.endPart
+	local finalImpact = entry.finalImpactPosition
+	if endPart and endPart.Parent and typeof(finalImpact) == "Vector3" then
+		endPart.CFrame = CFrame.new(finalImpact)
+	end
+
+	if typeof(finalImpact) == "Vector3" and typeof(entry.impactNormal) == "Vector3" and entry.endpointTemplate then
+		spawnImpactEffect(finalImpact, entry.impactNormal, entry.endpointTemplate, entry.hitEffectPath)
+	end
+
+	local fadeDuration = typeof(handle.fadeDuration) == "number" and handle.fadeDuration or 0
+	fadeSequenceObjects(handle.sequenceTargets or {}, fadeDuration)
+	task.delay(math.max(0.05, fadeDuration), function()
+		if handle.startPart and handle.startPart.Parent then
+			handle.startPart:Destroy()
+		end
+		if handle.endPart and handle.endPart.Parent then
+			handle.endPart:Destroy()
+		end
+		if container and container.Parent then
+			container:Destroy()
+		end
+	end)
+end
+
+local function releaseHeldSession(sessionId: number)
+	local list = heldTracersBySession[sessionId]
+	if not list then
+		return
+	end
+	heldTracersBySession[sessionId] = nil
+	for _, entry in ipairs(list) do
+		finalizeHeldTracer(entry)
+	end
+end
+
+local function releaseAllHeldTracers()
+	for sessionId in pairs(heldTracersBySession) do
+		releaseHeldSession(sessionId)
+	end
+	for i = 1, #heldTracersNoSession do
+		finalizeHeldTracer(heldTracersNoSession[i])
+	end
+	table.clear(heldTracersNoSession)
 end
 
 local function renderPrimaryShotVfx(payload: any, suppressCore: boolean)
@@ -331,13 +445,36 @@ local function renderPrimaryShotVfx(payload: any, suppressCore: boolean)
 	local endpointTemplate = InstancePath.findByPath(weaponFolder, "VFX.Endpoint")
 	local lifetime = typeof(payload.tracerLifetime) == "number" and payload.tracerLifetime or DEFAULT_TRACER_LIFETIME
 	local fadeDuration = typeof(payload.tracerFadeDuration) == "number" and payload.tracerFadeDuration or DEFAULT_TRACER_FADE_DURATION
+	local isDeferred = payload.timeStopDeferred == true
+	local serverHoldImpact = if typeof(payload.holdImpactPosition) == "Vector3" then payload.holdImpactPosition else payload.impactPosition
+	local finalImpact = if typeof(payload.finalImpactPosition) == "Vector3" then payload.finalImpactPosition else payload.impactPosition
 
 	if suppressCore then
 		return
 	end
 
 	emitMuzzleFlashForShot(shooterUserId)
-	spawnTracer(liveOrigin, payload.impactPosition, tracerTemplate, lifetime, fadeDuration)
+	if isDeferred then
+		local requestedHoldDistance: number? = nil
+		if typeof(payload.timeStopHoldDistance) == "number" then
+			requestedHoldDistance = payload.timeStopHoldDistance
+		elseif typeof(payload.origin) == "Vector3" and typeof(serverHoldImpact) == "Vector3" then
+			requestedHoldDistance = (serverHoldImpact - payload.origin).Magnitude
+		end
+		local holdImpact = computeDeferredHoldImpact(liveOrigin, finalImpact, requestedHoldDistance)
+		local handle = spawnTracer(liveOrigin, holdImpact, tracerTemplate, lifetime, fadeDuration, true)
+		if handle then
+			queueHeldTracer(if typeof(payload.timeStopSessionId) == "number" then payload.timeStopSessionId else nil, {
+				handle = handle,
+				finalImpactPosition = finalImpact,
+				impactNormal = impactNormal,
+				endpointTemplate = endpointTemplate,
+				hitEffectPath = M1_HIT_EFFECT_PATH,
+			})
+		end
+		return
+	end
+	spawnTracer(liveOrigin, payload.impactPosition, tracerTemplate, lifetime, fadeDuration, false)
 	spawnImpactEffect(payload.impactPosition, impactNormal, endpointTemplate, M1_HIT_EFFECT_PATH)
 end
 
@@ -377,17 +514,43 @@ local function renderSecondaryShotVfx(payload: any, suppressCore: boolean)
 	local endpointTemplate = InstancePath.findByPath(weaponFolder, "VFX.Endpoint")
 	local lifetime = typeof(payload.tracerLifetime) == "number" and payload.tracerLifetime or DEFAULT_TRACER_LIFETIME
 	local fadeDuration = typeof(payload.tracerFadeDuration) == "number" and payload.tracerFadeDuration or DEFAULT_TRACER_FADE_DURATION
+	local isDeferred = payload.timeStopDeferred == true
+	local serverHoldImpact = if typeof(payload.holdImpactPosition) == "Vector3" then payload.holdImpactPosition else payload.impactPosition
+	local finalImpact = if typeof(payload.finalImpactPosition) == "Vector3" then payload.finalImpactPosition else payload.impactPosition
 
 	if not suppressCore then
 		emitMuzzleFlashForShot(shooterUserId)
-		spawnTracer(liveOrigin, payload.impactPosition, tracerTemplate, lifetime, fadeDuration)
-		spawnImpactEffect(payload.impactPosition, impactNormal, endpointTemplate, M2_HIT_EFFECT_PATH)
+		if isDeferred then
+			local requestedHoldDistance: number? = nil
+			if typeof(payload.timeStopHoldDistance) == "number" then
+				requestedHoldDistance = payload.timeStopHoldDistance
+			elseif typeof(payload.origin) == "Vector3" and typeof(serverHoldImpact) == "Vector3" then
+				requestedHoldDistance = (serverHoldImpact - payload.origin).Magnitude
+			end
+			local holdImpact = computeDeferredHoldImpact(liveOrigin, finalImpact, requestedHoldDistance)
+			local handle = spawnTracer(liveOrigin, holdImpact, tracerTemplate, lifetime, fadeDuration, true)
+			if handle then
+				queueHeldTracer(if typeof(payload.timeStopSessionId) == "number" then payload.timeStopSessionId else nil, {
+					handle = handle,
+					finalImpactPosition = finalImpact,
+					impactNormal = impactNormal,
+					endpointTemplate = endpointTemplate,
+					hitEffectPath = M2_HIT_EFFECT_PATH,
+				})
+			end
+		else
+			spawnTracer(liveOrigin, payload.impactPosition, tracerTemplate, lifetime, fadeDuration, false)
+			spawnImpactEffect(payload.impactPosition, impactNormal, endpointTemplate, M2_HIT_EFFECT_PATH)
+		end
 	end
 
 	local enemyHits = payload.enemyHits
 	if typeof(enemyHits) == "table" then
 		for _, hit in ipairs(enemyHits) do
 			if typeof(hit) == "table" and typeof(hit.position) == "Vector3" then
+				if hit.timeStopDeferred == true then
+					continue
+				end
 				local hitNormal = if typeof(hit.normal) == "Vector3" then hit.normal else Vector3.new(0, 1, 0)
 				spawnImpactEffect(hit.position, hitNormal, endpointTemplate, M2_HIT_EFFECT_PATH)
 			end
@@ -441,4 +604,21 @@ secondaryShotRemote.OnClientEvent:Connect(function(payload: any)
 		return
 	end
 	renderSecondaryShotVfx(payload, false)
+end)
+
+timeStopStateRemote.OnClientEvent:Connect(function(payload: any)
+	if typeof(payload) ~= "table" then
+		return
+	end
+	if payload.active == true then
+		if typeof(payload.sessionId) == "number" then
+			for sessionId in pairs(heldTracersBySession) do
+				if sessionId ~= payload.sessionId then
+					releaseHeldSession(sessionId)
+				end
+			end
+		end
+		return
+	end
+	releaseAllHeldTracers()
 end)

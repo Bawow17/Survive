@@ -1,9 +1,10 @@
 --!strict
--- PickupRenderer - Client-side rendering + pickup requests for EXP pickups (no ECS entities).
+-- PickupRenderer - Client-side rendering + pickup requests for EXP orbs and interactable item drops.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
 
@@ -32,6 +33,9 @@ local CONTACT_DESPAWN_DISTANCE_SQ = CONTACT_DESPAWN_DISTANCE * CONTACT_DESPAWN_D
 local MAGNET_RADIUS_MULTIPLIER = 6
 local GLOBAL_MAGNET_RADIUS = 1000
 local ORB_TEMPLATE_PATH = {"ContentDrawer", "ItemModels", "OrbTemplate"}
+local DEFAULT_INTERACT_RADIUS = 10
+local DEFAULT_AUTO_PICKUP_RADIUS = 0
+local DEFAULT_SPIN_PERIOD = 8
 
 local COLOR_BY_KIND = {
 	expBlue = Color3.fromRGB(100, 150, 255),
@@ -60,11 +64,20 @@ type PickupRecord = {
 	collectible: boolean?,
 	seekOnSpawn: boolean?,
 	visualOnly: boolean?,
+	modelPath: string?,
+	itemId: string?,
+	requiresInteract: boolean?,
+	interactionRadius: number?,
+	autoPickupRadius: number?,
+	spinPeriod: number?,
+	bobAmplitude: number?,
+	visualKind: "part" | "orbModel" | "customModel",
 }
 
 local activePickups: {[number]: PickupRecord} = {}
 local partPool: {BasePart} = {}
 local modelPool: {Model} = {}
+local modelPoolByPath: {[string]: {Model}} = {}
 local MAX_POOL_SIZE = 300
 local orbTemplate: Model? = nil
 
@@ -117,7 +130,72 @@ local function findOrbTemplate(): Model?
 	return orbTemplate
 end
 
-local function acquireVisual(): (Instance, BasePart, {BasePart}?)
+local function findModelByPath(modelPath: string): Model?
+	local current: Instance? = game
+	for _, partName in ipairs(string.split(modelPath, ".")) do
+		if not current then
+			return nil
+		end
+		if partName == "ReplicatedStorage" then
+			current = ReplicatedStorage
+		else
+			current = current:FindFirstChild(partName)
+		end
+	end
+	if current and current:IsA("Model") then
+		return current
+	end
+	return nil
+end
+
+local function configureModel(model: Model): (BasePart, {BasePart})
+	local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+	if not primary then
+		primary = Instance.new("Part")
+		primary.Name = "PickupPivot"
+		primary.Size = Vector3.new(0.5, 0.5, 0.5)
+		primary.Transparency = 1
+		primary.Anchored = true
+		primary.CanCollide = false
+		primary.CanTouch = false
+		primary.CanQuery = false
+		primary.Parent = model
+	end
+	if not model.PrimaryPart then
+		model.PrimaryPart = primary
+	end
+
+	local parts = {}
+	for _, desc in ipairs(model:GetDescendants()) do
+		if desc:IsA("BasePart") then
+			desc.Anchored = true
+			desc.CanCollide = false
+			desc.CanTouch = false
+			desc.CanQuery = false
+			table.insert(parts, desc)
+		end
+	end
+
+	return model.PrimaryPart :: BasePart, parts
+end
+
+local function acquireVisual(modelPath: string?): (Instance, BasePart, {BasePart}?, "part" | "orbModel" | "customModel")
+	if typeof(modelPath) == "string" and modelPath ~= "" then
+		local pool = modelPoolByPath[modelPath]
+		local model = pool and table.remove(pool) or nil
+		if not model then
+			local template = findModelByPath(modelPath)
+			if template then
+				model = template:Clone()
+			end
+		end
+		if model then
+			model.Parent = pickupsFolder
+			local primary, parts = configureModel(model)
+			return model, primary, parts, "customModel"
+		end
+	end
+
 	local template = findOrbTemplate()
 	if template then
 		local model = table.remove(modelPool)
@@ -125,32 +203,8 @@ local function acquireVisual(): (Instance, BasePart, {BasePart}?)
 			model = template:Clone()
 		end
 		model.Parent = pickupsFolder
-		local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-		if not primary then
-			primary = Instance.new("Part")
-			primary.Size = Vector3.new(0.5, 0.5, 0.5)
-			primary.Anchored = true
-			primary.CanCollide = false
-			primary.CanTouch = false
-			primary.CanQuery = false
-			primary.Transparency = 1
-			primary.Name = "PickupPivot"
-			primary.Parent = model
-		end
-		if not model.PrimaryPart then
-			model.PrimaryPart = primary
-		end
-		local parts = {}
-		for _, descendant in ipairs(model:GetDescendants()) do
-			if descendant:IsA("BasePart") then
-				descendant.Anchored = true
-				descendant.CanCollide = false
-				descendant.CanTouch = false
-				descendant.CanQuery = false
-				table.insert(parts, descendant)
-			end
-		end
-		return model, primary, parts
+		local primary, parts = configureModel(model)
+		return model, primary, parts, "orbModel"
 	end
 
 	local part = table.remove(partPool)
@@ -158,16 +212,33 @@ local function acquireVisual(): (Instance, BasePart, {BasePart}?)
 		part = createPickupPart()
 	end
 	part.Parent = pickupsFolder
-	return part, part, nil
+	return part, part, nil, "part"
 end
 
-local function releaseVisual(instance: Instance)
+local function releaseVisual(record: PickupRecord)
+	local instance = record.instance
 	instance.Parent = nil
-	if instance:IsA("Model") then
+
+	if record.visualKind == "customModel" and record.modelPath and instance:IsA("Model") then
+		local pool = modelPoolByPath[record.modelPath]
+		if not pool then
+			pool = {}
+			modelPoolByPath[record.modelPath] = pool
+		end
+		if #pool < MAX_POOL_SIZE then
+			table.insert(pool, instance)
+		end
+		return
+	end
+
+	if record.visualKind == "orbModel" and instance:IsA("Model") then
 		if #modelPool < MAX_POOL_SIZE then
 			table.insert(modelPool, instance)
 		end
-	elseif instance:IsA("BasePart") then
+		return
+	end
+
+	if record.visualKind == "part" and instance:IsA("BasePart") then
 		if #partPool < MAX_POOL_SIZE then
 			table.insert(partPool, instance)
 		end
@@ -175,6 +246,10 @@ local function releaseVisual(instance: Instance)
 end
 
 local function applyVisual(record: PickupRecord)
+	if record.modelPath then
+		return
+	end
+
 	local color = COLOR_BY_KIND[record.kind] or COLOR_BY_KIND.expBlue
 	local scale = SCALE_BY_KIND[record.kind] or 1.0
 
@@ -191,6 +266,14 @@ local function applyVisual(record: PickupRecord)
 		local part = record.primary
 		part.Color = color
 		part.Size = Vector3.new(BASE_SIZE * scale, BASE_SIZE * scale, BASE_SIZE * scale)
+	end
+end
+
+local function setRecordCFrame(record: PickupRecord, cf: CFrame)
+	if record.instance:IsA("Model") then
+		(record.instance :: Model):PivotTo(cf)
+	else
+		record.primary.CFrame = cf
 	end
 end
 
@@ -237,7 +320,15 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			continue
 		end
 
+		local modelPath = if typeof(data.modelPath) == "string" then data.modelPath else nil
+
 		local existing = activePickups[id]
+		if existing and existing.modelPath ~= modelPath then
+			releaseVisual(existing)
+			activePickups[id] = nil
+			existing = nil
+		end
+
 		if existing then
 			existing.position = pos
 			existing.currentPos = pos
@@ -246,21 +337,21 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			existing.collectible = data.collectible ~= false
 			existing.seekOnSpawn = data.seekOnSpawn == true
 			existing.visualOnly = data.visualOnly == true
-			if existing.seekOnSpawn then
+			existing.itemId = if typeof(data.itemId) == "string" then data.itemId else existing.itemId
+			existing.requiresInteract = data.requiresInteract == true
+			existing.interactionRadius = if typeof(data.interactionRadius) == "number" then data.interactionRadius else existing.interactionRadius
+			existing.autoPickupRadius = if typeof(data.autoPickupRadius) == "number" then data.autoPickupRadius else existing.autoPickupRadius
+			existing.spinPeriod = if typeof(data.spinPeriod) == "number" then data.spinPeriod else existing.spinPeriod
+			existing.bobAmplitude = if typeof(data.bobAmplitude) == "number" then data.bobAmplitude else existing.bobAmplitude
+			if existing.seekOnSpawn and not existing.requiresInteract then
 				existing.seeking = true
 			end
 			applyVisual(existing)
-			existing.primary.CFrame = CFrame.new(pos)
+			setRecordCFrame(existing, CFrame.new(pos))
 			continue
 		end
 
-		local instance, primary, parts = acquireVisual()
-		if instance:IsA("Model") then
-			(instance :: Model):PivotTo(CFrame.new(pos))
-		else
-			(primary :: BasePart).CFrame = CFrame.new(pos)
-		end
-
+		local instance, primary, parts, visualKind = acquireVisual(modelPath)
 		local record: PickupRecord = {
 			id = id,
 			kind = data.kind or "expBlue",
@@ -274,12 +365,22 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			collectible = data.collectible ~= false,
 			seekOnSpawn = data.seekOnSpawn == true,
 			visualOnly = data.visualOnly == true,
+			modelPath = modelPath,
+			itemId = if typeof(data.itemId) == "string" then data.itemId else nil,
+			requiresInteract = data.requiresInteract == true,
+			interactionRadius = if typeof(data.interactionRadius) == "number" then data.interactionRadius else DEFAULT_INTERACT_RADIUS,
+			autoPickupRadius = if typeof(data.autoPickupRadius) == "number" then data.autoPickupRadius else DEFAULT_AUTO_PICKUP_RADIUS,
+			spinPeriod = if typeof(data.spinPeriod) == "number" then data.spinPeriod else DEFAULT_SPIN_PERIOD,
+			bobAmplitude = if typeof(data.bobAmplitude) == "number" then data.bobAmplitude else BOB_AMPLITUDE,
+			visualKind = visualKind,
 		}
-		if record.seekOnSpawn then
+		if record.seekOnSpawn and not record.requiresInteract then
 			record.seeking = true
 		end
+
 		activePickups[id] = record
 		applyVisual(record)
+		setRecordCFrame(record, CFrame.new(pos))
 	end
 end)
 
@@ -297,7 +398,7 @@ PickupsDespawnBatch.OnClientEvent:Connect(function(ids: any)
 		end
 		local record = activePickups[id]
 		if record then
-			releaseVisual(record.instance)
+			releaseVisual(record)
 			activePickups[id] = nil
 		end
 	end
@@ -340,6 +441,56 @@ local function getCharacterRoot(): BasePart?
 	return nil
 end
 
+local function requestPickup(record: PickupRecord, now: number)
+	if record.collectible == false or record.visualOnly == true then
+		return
+	end
+	if record.lastRequestAt and (now - record.lastRequestAt) < REQUEST_RETRY_DELAY then
+		return
+	end
+	record.lastRequestAt = now
+	PickupRequest:FireServer(record.id)
+end
+
+local function requestNearestInteractPickup(playerPos: Vector3, now: number)
+	local bestRecord: PickupRecord? = nil
+	local bestDistSq = math.huge
+
+	for _, record in pairs(activePickups) do
+		if not record.requiresInteract then
+			continue
+		end
+		if record.collectible == false or record.visualOnly == true then
+			continue
+		end
+		local radius = record.interactionRadius or DEFAULT_INTERACT_RADIUS
+		local delta = record.currentPos - playerPos
+		local distSq = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
+		if distSq <= radius * radius and distSq < bestDistSq then
+			bestRecord = record
+			bestDistSq = distSq
+		end
+	end
+
+	if bestRecord then
+		requestPickup(bestRecord, now)
+	end
+end
+
+UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+	if gameProcessed then
+		return
+	end
+	if input.KeyCode ~= Enum.KeyCode.E then
+		return
+	end
+	local hrp = getCharacterRoot()
+	if not hrp then
+		return
+	end
+	requestNearestInteractPickup(hrp.Position, tick())
+end)
+
 local checkAccumulator = 0
 
 RunService.Heartbeat:Connect(function(dt: number)
@@ -370,25 +521,47 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local instantDespawnIds = {}
 
 	for _, record in pairs(activePickups) do
-		if record.seeking then
-			local dir = playerPos - record.currentPos
-			local dist = dir.Magnitude
-			if dist > 0 then
-				local step = math.min(dist, SEEK_SPEED * dt)
-				record.currentPos = record.currentPos + dir.Unit * step
+		local isInteractItem = record.requiresInteract == true
+
+		if not isInteractItem then
+			if record.seeking then
+				local dir = playerPos - record.currentPos
+				local dist = dir.Magnitude
+				if dist > 0 then
+					local step = math.min(dist, SEEK_SPEED * dt)
+					record.currentPos = record.currentPos + dir.Unit * step
+				end
+			else
+				record.currentPos = record.position
 			end
 		else
 			record.currentPos = record.position
 		end
 
+		local bobAmplitude = isInteractItem and (record.bobAmplitude or BOB_AMPLITUDE) or BOB_AMPLITUDE
 		local bob = 0
 		if not record.seeking then
-			bob = math.sin((now + record.seed) * BOB_FREQUENCY) * BOB_AMPLITUDE
+			bob = math.sin((now + record.seed) * BOB_FREQUENCY) * bobAmplitude
 		end
-		if record.instance:IsA("Model") then
-			(record.instance :: Model):PivotTo(CFrame.new(record.currentPos + Vector3.new(0, bob, 0)))
+
+		if isInteractItem then
+			local spinPeriod = math.max(0.1, record.spinPeriod or DEFAULT_SPIN_PERIOD)
+			local angle = ((now + record.seed) / spinPeriod) * (math.pi * 2)
+			setRecordCFrame(record, CFrame.new(record.currentPos + Vector3.new(0, bob, 0)) * CFrame.Angles(0, angle, 0))
 		else
-			record.primary.CFrame = CFrame.new(record.currentPos + Vector3.new(0, bob, 0))
+			setRecordCFrame(record, CFrame.new(record.currentPos + Vector3.new(0, bob, 0)))
+		end
+
+		if isInteractItem then
+			if doCheck and record.collectible ~= false and record.visualOnly ~= true then
+				local delta = record.currentPos - playerPos
+				local distSq = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
+				local autoRadius = record.autoPickupRadius or DEFAULT_AUTO_PICKUP_RADIUS
+				if autoRadius > 0 and distSq <= autoRadius * autoRadius then
+					requestPickup(record, now)
+				end
+			end
+			continue
 		end
 
 		-- Despawn locally as soon as a seeking orb reaches the player.
@@ -396,11 +569,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 		local contactDistSq = contactDelta.X * contactDelta.X + contactDelta.Y * contactDelta.Y + contactDelta.Z * contactDelta.Z
 		if record.seeking and contactDistSq <= CONTACT_DESPAWN_DISTANCE_SQ then
 			if record.collectible ~= false then
-				if not record.lastRequestAt or (now - record.lastRequestAt) >= REQUEST_RETRY_DELAY then
-					record.lastRequestAt = now
-					record.seekStartAt = now
-					PickupRequest:FireServer(record.id)
-				end
+				requestPickup(record, now)
 			end
 			table.insert(instantDespawnIds, record.id)
 			continue
@@ -439,7 +608,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 	for _, pickupId in ipairs(instantDespawnIds) do
 		local record = activePickups[pickupId]
 		if record then
-			releaseVisual(record.instance)
+			releaseVisual(record)
 			activePickups[pickupId] = nil
 		end
 	end

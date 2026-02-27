@@ -3,6 +3,7 @@
 -- Modifies Humanoid properties (Health, WalkSpeed) and stores pickup range
 
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
+local CombatScaling = require(game.ReplicatedStorage.Shared.CombatScaling)
 
 local PassiveEffectSystem = {}
 
@@ -14,9 +15,9 @@ local StatusEffectSystem: any  -- Reference to status effect system
 local PassiveEffects: any
 local PlayerStats: any
 local Health: any
+local Level: any
 
 -- Default values (from PlayerBalance)
-local DEFAULT_MAX_HEALTH = PlayerBalance.BaseMaxHealth
 local DEFAULT_WALK_SPEED = PlayerBalance.BaseWalkSpeed
 local DEFAULT_PICKUP_RANGE = PlayerBalance.BasePickupRange
 local MOVEMENT_SPEED_TO_MOBILITY_WEIGHT = 0.2
@@ -38,6 +39,7 @@ function PassiveEffectSystem.init(worldRef: any, components: any, dirtyService: 
 	PassiveEffects = Components.PassiveEffects
 	PlayerStats = Components.PlayerStats
 	Health = Components.Health
+	Level = Components.Level
 	
 	-- Create cached query
 	playerQuery = world:query(Components.PlayerStats, Components.PassiveEffects):cached()
@@ -97,10 +99,15 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 	-- Apply health multiplier
 	local healthMult = effects.healthMultiplier or 1.0
 	local healthFlat = effects.healthFlatBonus or 0
-	local baseMaxHealth = player:GetAttribute("BaseMaxHealth")
-	if not baseMaxHealth or baseMaxHealth == 0 then
-		-- Use PlayerBalance default, not humanoid's current value
-		baseMaxHealth = DEFAULT_MAX_HEALTH
+	local playerLevel = 1
+	if Level then
+		local levelComponent = world:get(playerEntity, Level)
+		if levelComponent and typeof(levelComponent.current) == "number" then
+			playerLevel = levelComponent.current
+		end
+	end
+	local baseMaxHealth = CombatScaling.getBaseMaxHealthAtLevel(playerLevel, PlayerBalance)
+	if math.abs((player:GetAttribute("BaseMaxHealth") or 0) - baseMaxHealth) > 0.01 then
 		player:SetAttribute("BaseMaxHealth", baseMaxHealth)
 	end
 	

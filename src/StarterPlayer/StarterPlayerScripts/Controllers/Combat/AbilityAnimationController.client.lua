@@ -9,6 +9,10 @@ local localPlayer = Players.LocalPlayer
 local ATTR_LOCAL_RANGED_AIM_ACTIVE = "AbilityRangedAimActiveLocal"
 local ATTR_LOCAL_ABILITY_CAST_ACTIVE = "AbilityCastActiveLocal"
 local RANGED_VERTICAL_AIM_PROFILE = "ranged_left_head"
+local ICE_SHARD_LOCKED_ABILITIES: {[string]: boolean} = {
+	IceShard = true,
+	IceShardSpecial = true,
+}
 
 -- Animation state
 local currentAnimation: AnimationTrack? = nil
@@ -35,6 +39,195 @@ local isPaused = false
 local MAX_ANIMATION_SPEED = 3.8  -- Cap at 3.8x speed for natural look
 local MAX_ANIMATION_LOOPS = 7  -- Max number of animations to play per cast
 local LAST_SEGMENT_SLOW_FACTOR = 0.4  -- Slow the final segment, speed others up to keep total time
+local ICE_SHARD_PLAY_FADE = 0.03
+local ICE_SHARD_PLAY_WEIGHT = 5.0
+local animationSourceIdCache: {[string]: {[string]: string}} = {}
+local warnedMissingAnimationSource: {[string]: boolean} = {}
+local warnedInvalidAnimationSource: {[string]: boolean} = {}
+
+local function normalizeAnimationId(rawId: any): string?
+	if typeof(rawId) == "number" then
+		if rawId <= 0 then
+			return nil
+		end
+		return "rbxassetid://" .. tostring(math.floor(rawId))
+	end
+	if typeof(rawId) ~= "string" then
+		return nil
+	end
+
+	local trimmed = string.gsub(rawId, "^%s*(.-)%s*$", "%1")
+	if trimmed == "" then
+		return nil
+	end
+	if string.find(trimmed, "rbxassetid://", 1, true) == 1 then
+		return trimmed
+	end
+	if string.match(trimmed, "^%d+$") then
+		return "rbxassetid://" .. trimmed
+	end
+	return nil
+end
+
+local function resolveAnimationIdFromInstance(source: Instance?): string?
+	if not source then
+		return nil
+	end
+	if source:IsA("Animation") then
+		return normalizeAnimationId(source.AnimationId)
+	end
+	if source:IsA("StringValue") then
+		return normalizeAnimationId(source.Value)
+	end
+	if source:IsA("NumberValue") then
+		return normalizeAnimationId(source.Value)
+	end
+	return nil
+end
+
+local function findInstanceByDotPath(path: string): Instance?
+	if typeof(path) ~= "string" or path == "" then
+		return nil
+	end
+
+	local parts = string.split(path, ".")
+	local current: Instance? = game
+	local startIndex = 1
+	if parts[1] == "game" then
+		startIndex = 2
+	elseif parts[1] == "ReplicatedStorage" then
+		current = ReplicatedStorage
+		startIndex = 2
+	elseif parts[1] == "Workspace" then
+		current = game:GetService("Workspace")
+		startIndex = 2
+	end
+
+	for i = startIndex, #parts do
+		if not current then
+			return nil
+		end
+		current = current:FindFirstChild(parts[i])
+	end
+	return current
+end
+
+local function classifyAnimationSlot(name: string): string?
+	local lowered = string.lower(name)
+	if lowered == "first" or lowered == "start" then
+		return "first"
+	end
+	if lowered == "loop" or lowered == "middle" then
+		return "loop"
+	end
+	if lowered == "last" or lowered == "end" then
+		return "last"
+	end
+	return nil
+end
+
+local function resolveAnimationIdsFromSourcePath(sourcePath: string): {[string]: string}?
+	local cached = animationSourceIdCache[sourcePath]
+	if cached then
+		return cached
+	end
+
+	local source = findInstanceByDotPath(sourcePath)
+	if not source then
+		if not warnedMissingAnimationSource[sourcePath] then
+			warn(string.format("[AbilityAnimationController] Animation source not found: %s", sourcePath))
+			warnedMissingAnimationSource[sourcePath] = true
+		end
+		return nil
+	end
+
+	local firstSource: Instance? = nil
+	local loopSource: Instance? = nil
+	local lastSource: Instance? = nil
+	local allSources: {Instance} = {}
+
+	local function addCandidate(candidate: Instance)
+		if not (candidate:IsA("Animation") or candidate:IsA("StringValue") or candidate:IsA("NumberValue")) then
+			return
+		end
+		table.insert(allSources, candidate)
+
+		local slot = classifyAnimationSlot(candidate.Name)
+		if slot == "first" then
+			firstSource = firstSource or candidate
+		elseif slot == "loop" then
+			loopSource = loopSource or candidate
+		elseif slot == "last" then
+			lastSource = lastSource or candidate
+		end
+	end
+
+	addCandidate(source)
+	for _, desc in ipairs(source:GetDescendants()) do
+		addCandidate(desc)
+	end
+
+	table.sort(allSources, function(a: Instance, b: Instance)
+		return a:GetFullName() < b:GetFullName()
+	end)
+
+	local firstId = resolveAnimationIdFromInstance(firstSource or allSources[1])
+	local loopId = resolveAnimationIdFromInstance(loopSource or allSources[2]) or firstId
+	local lastId = resolveAnimationIdFromInstance(lastSource or allSources[3]) or loopId or firstId
+	if not firstId and not loopId and not lastId then
+		if not warnedInvalidAnimationSource[sourcePath] then
+			warn(string.format("[AbilityAnimationController] No valid animation ids in source: %s", sourcePath))
+			warnedInvalidAnimationSource[sourcePath] = true
+		end
+		return nil
+	end
+
+	local resolved = {
+		first = firstId or loopId or lastId,
+		loop = loopId or firstId or lastId,
+		last = lastId or loopId or firstId,
+	}
+	animationSourceIdCache[sourcePath] = resolved
+	return resolved
+end
+
+local function resolveAnimationData(animationData: any): any?
+	if typeof(animationData) ~= "table" then
+		return nil
+	end
+
+	if typeof(animationData.animationIds) ~= "table" then
+		animationData.animationIds = {}
+	end
+	local animationIds = animationData.animationIds
+	animationIds.first = normalizeAnimationId(animationIds.first)
+	animationIds.loop = normalizeAnimationId(animationIds.loop)
+	animationIds.last = normalizeAnimationId(animationIds.last)
+
+	local sourcePath = if typeof(animationData.sourcePath) == "string" then animationData.sourcePath else nil
+	if sourcePath then
+		local sourceIds = resolveAnimationIdsFromSourcePath(sourcePath)
+		if sourceIds then
+			animationIds.first = animationIds.first or sourceIds.first
+			animationIds.loop = animationIds.loop or sourceIds.loop
+			animationIds.last = animationIds.last or sourceIds.last
+		end
+	end
+
+	local hasAny = false
+	for _, key in ipairs({"first", "loop", "last"}) do
+		local value = animationIds[key]
+		if value and value ~= "" and value ~= "rbxassetid://" then
+			hasAny = true
+			break
+		end
+	end
+	if not hasAny then
+		return nil
+	end
+
+	return animationData
+end
 
 local function setRangedAimActive(active: boolean)
 	local character = localPlayer.Character
@@ -50,6 +243,10 @@ local function setAbilityCastActive(active: boolean)
 		return
 	end
 	character:SetAttribute(ATTR_LOCAL_ABILITY_CAST_ACTIVE, active)
+end
+
+local function isIceShardLockedAbility(abilityId: string?): boolean
+	return abilityId ~= nil and ICE_SHARD_LOCKED_ABILITIES[abilityId] == true
 end
 
 local function clearRangedAimForCast(castId: number)
@@ -137,6 +334,10 @@ end
 
 -- Calculate animation priority based on damage stats
 local function calculatePriority(abilityId: string, damageStats: {[string]: number}): number
+	if abilityId == "TempusGelidum" then
+		return 0
+	end
+
 	if not damageStats or typeof(damageStats) ~= "table" then
 		return 2  -- Default low priority
 	end
@@ -201,7 +402,7 @@ local function playAnimationSegment(
 		-- Final animation plays full duration at normal speed when no target duration is provided
 		speedScale = 1.0
 		waitTime = animationData.duration
-	elseif isSingleProjectileFastCooldown and animationData.cooldownDuration then
+	elseif isSingleProjectileFastCooldown and typeof(animationData.cooldownDuration) == "number" and animationData.cooldownDuration > 0 then
 		-- Single-projectile fast cooldown: speed up to fit within cooldown
 		local uncappedSpeed = naturalLoopTime / animationData.cooldownDuration
 		speedScale = math.min(uncappedSpeed, MAX_ANIMATION_SPEED)
@@ -219,11 +420,21 @@ local function playAnimationSegment(
 	end
 	
 	-- Play animation
-	track.Priority = animationData.animationPriority
-	track:Play()
+	if isIceShardLockedAbility(abilityId) then
+		-- Force top-priority + heavier blend weight so left-arm keys win over
+		-- same-priority action tracks without suppressing whole-body animation.
+		track.Priority = Enum.AnimationPriority.Action4
+	else
+		track.Priority = animationData.animationPriority
+	end
+	currentAnimation = track
+	if isIceShardLockedAbility(abilityId) then
+		track:Play(ICE_SHARD_PLAY_FADE, ICE_SHARD_PLAY_WEIGHT, 1)
+	else
+		track:Play()
+	end
 	track:AdjustSpeed(speedScale)
 	
-	currentAnimation = track
 	isPlayingSegment = true
 	
 	-- Wait for animation to complete (pause-aware)
@@ -287,6 +498,25 @@ local function playAbilityCast(
 	
 	-- Check if we should interrupt current animation
 	if isAnimating then
+		if currentAbilityId == "TempusGelidum" and abilityId ~= "TempusGelidum" then
+			-- Ultimate cast owns the animation channel while active.
+			return
+		end
+		if isIceShardLockedAbility(currentAbilityId) and abilityId ~= currentAbilityId then
+			-- IceShard cast owns left-arm action channel while active.
+			return
+		end
+		if isIceShardLockedAbility(abilityId) and abilityId ~= currentAbilityId then
+			-- IceShard should replace any currently playing action animation.
+			while isPlayingSegment do
+				task.wait(0.01)
+			end
+			if currentAnimation then
+				currentAnimation:Stop()
+				currentAnimation = nil
+			end
+		end
+
 		if priority > currentAnimationPriority then
 			-- Lower priority, don't interrupt
 			return
@@ -348,7 +578,7 @@ local function playAbilityCast(
 		-- Check if this is a single-projectile ability with fast cooldown
 		-- If cooldown is shorter than animation, just replay "first" animation
 		local isSingleProjectileFastCooldown = false
-		if projectileCount == 1 and animationData.cooldownDuration then
+		if projectileCount == 1 and typeof(animationData.cooldownDuration) == "number" and animationData.cooldownDuration > 0 then
 			-- Calculate natural animation duration
 			local frameRatio = animationData.loopFrame / animationData.totalFrames
 			local naturalAnimDuration = animationData.duration * frameRatio
@@ -502,6 +732,9 @@ local abilityCastRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitFor
 abilityCastRemote.OnClientEvent:Connect(function(abilityId: string, cooldownDuration: number, abilityName: string?, castData: any?)
 	-- Validate cast data
 	if not castData or typeof(castData) ~= "table" then
+		if abilityId == "TempusGelidum" then
+			warn("[AbilityAnimationController] Tempus cast missing castData")
+		end
 		return
 	end
 	
@@ -513,10 +746,17 @@ abilityCastRemote.OnClientEvent:Connect(function(abilityId: string, cooldownDura
 	
 	-- Only animate if server provided animation data
 	if not animationData then
+		if abilityId == "TempusGelidum" then
+			warn("[AbilityAnimationController] Tempus cast missing animationData")
+		end
 		return
 	end
-	
-	if not animationData.animationIds then
+
+	animationData = resolveAnimationData(animationData)
+	if not animationData then
+		if abilityId == "TempusGelidum" then
+			warn("[AbilityAnimationController] Tempus cast has no playable animation ids (after sourcePath resolution)")
+		end
 		return
 	end
 	

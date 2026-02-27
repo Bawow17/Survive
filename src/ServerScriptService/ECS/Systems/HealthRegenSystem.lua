@@ -3,6 +3,7 @@
 -- Regenerates health after a delay following damage
 
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
+local CombatScaling = require(game.ReplicatedStorage.Shared.CombatScaling)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 
 local HealthRegenSystem = {}
@@ -15,6 +16,7 @@ local Health: any
 local HealthRegen: any
 local PassiveEffects: any
 local _PlayerStats: any
+local Level: any
 
 -- Cached query for players
 local playerQuery: any
@@ -28,6 +30,7 @@ function HealthRegenSystem.init(worldRef: any, components: any, dirtyService: an
 	HealthRegen = Components.HealthRegen
 	PassiveEffects = Components.PassiveEffects
 	_PlayerStats = Components.PlayerStats
+	Level = Components.Level
 	
 	-- Create cached query
 	playerQuery = world:query(Components.Health, Components.HealthRegen, Components.PlayerStats, Components.PassiveEffects):cached()
@@ -132,9 +135,18 @@ function HealthRegenSystem.step(dt: number)
 		end
 		
 		-- Apply regeneration with multiplier + flat bonus
+		local playerLevel = 1
+		if Level then
+			local levelComponent = world:get(playerEntity, Level)
+			if levelComponent and typeof(levelComponent.current) == "number" then
+				playerLevel = levelComponent.current
+			end
+		end
+
 		local passiveRegenMult = passiveEffects and passiveEffects.regenMultiplier or 1.0
 		local regenFlat = passiveEffects and passiveEffects.regenFlatBonus or 0
-		local regenRate = (PlayerBalance.HealthRegenRate * passiveRegenMult) + regenFlat
+		local baseRegen = CombatScaling.getBaseRegenAtLevel(playerLevel, PlayerBalance)
+		local regenRate = (baseRegen * passiveRegenMult) + regenFlat
 		if regenRate <= 0 then
 			continue
 		end

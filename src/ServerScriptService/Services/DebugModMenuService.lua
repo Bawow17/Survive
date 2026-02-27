@@ -5,16 +5,18 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local RunItems = require(game.ServerScriptService.Balance.RunItems)
 local DebugModMenuCatalog = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("DebugModMenuCatalog"))
+local UltimateSystem = require(game.ServerScriptService.ECS.Systems.UltimateSystem)
 
 local DebugModMenuService = {}
 
 local world: any
 local Components: any
-local UpgradeSystem: any
 local GameTimeSystem: any
 local DifficultyCoeff: any
 local GameSessionTimer: any
+local ItemSystem: any
 
 local openStateRemote: RemoteEvent
 local applyEntryRemote: RemoteEvent
@@ -27,20 +29,20 @@ local timeCooldowns: {[number]: number} = {}
 
 local APPLY_COOLDOWN = 0.1
 local TIME_COOLDOWN = 0.25
+local ULTIMATE_MAX_CHARGE_ENTRY_ID = "ultimate:max_charge"
 
-local CATEGORY_ORDER = DebugModMenuCatalog.CategoryOrder
-local CATEGORY_LABELS = DebugModMenuCatalog.CategoryLabels
-
-local function getPlayerEntity(player: Player): number?
-	if not world or not Components or not Components.PlayerStats then
-		return nil
-	end
-	for entity, stats in world:query(Components.PlayerStats) do
-		if stats and stats.player == player then
-			return entity
+local function ensureRemoteEvent(parent: Instance, name: string): RemoteEvent
+	local existing = parent:FindFirstChild(name)
+	if existing then
+		if existing:IsA("RemoteEvent") then
+			return existing
 		end
+		existing:Destroy()
 	end
-	return nil
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = name
+	remote.Parent = parent
+	return remote
 end
 
 local function getModMenuConfig(): any
@@ -95,81 +97,49 @@ local function fireAck(player: Player, ok: boolean, message: string)
 	end
 end
 
-local function normalizeIconId(iconId: any): string?
-	if iconId == nil then
+local function getPlayerEntity(player: Player): number?
+	if not world or not Components or not Components.PlayerStats then
 		return nil
 	end
-	local text = tostring(iconId)
-	if text == "" then
-		return nil
-	end
-	if string.match(text, "^%d+$") then
-		return "rbxassetid://" .. text
-	end
-	return text
-end
 
-local function buildCatalogPayload(playerEntity: number): {any}
-	local entries = UpgradeSystem.getDebugCatalog(playerEntity)
-	local payload = {}
-	local iconsModule = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UpgradeIcons"))
-	for _, entry in ipairs(entries) do
-		local iconId = nil
-		if entry.iconKey then
-			iconId = iconsModule[entry.iconKey]
+	for entity, stats in world:query(Components.PlayerStats) do
+		if stats and stats.player == player then
+			return entity
 		end
-		if (not iconId or iconId == "") and entry.category == "attribute" and entry.entryId then
-			local _, abilityId = tostring(entry.entryId):match("^(attribute):([^:]+)")
-			if abilityId then
-				iconId = iconsModule[abilityId]
-			end
-		end
-		table.insert(payload, {
-			entryId = tostring(entry.entryId),
-			category = tostring(entry.category),
-			categoryLabel = CATEGORY_LABELS[entry.category] or tostring(entry.category),
-			categoryOrder = CATEGORY_ORDER[entry.category] or 99,
-			name = tostring(entry.name or entry.entryId),
-			subtitle = tostring(entry.subtitle or ""),
-			iconId = normalizeIconId(iconId),
-		})
 	end
-	table.sort(payload, function(a, b)
-		if a.categoryOrder ~= b.categoryOrder then
-			return a.categoryOrder < b.categoryOrder
-		end
-		if a.name ~= b.name then
-			return a.name < b.name
-		end
-		return a.entryId < b.entryId
-	end)
-	return payload
+
+	return nil
 end
 
 local function sendOpenState(player: Player)
 	local allowed = isAllowed(player)
-	local catalog = {}
-	if allowed then
-		local playerEntity = getPlayerEntity(player)
-		if playerEntity then
-			catalog = buildCatalogPayload(playerEntity)
-		end
+	local catalog = {
+		{
+			entryId = ULTIMATE_MAX_CHARGE_ENTRY_ID,
+			category = "ultimate",
+			categoryLabel = "Ultimate",
+			categoryOrder = DebugModMenuCatalog.CategoryOrder.ultimate or 2,
+			name = "Fill Ultimate",
+			subtitle = "Set ultimate charge to max",
+			iconId = nil,
+		},
+	}
+	for _, itemDef in ipairs(RunItems.getOrderedDefinitions()) do
+		table.insert(catalog, {
+			entryId = itemDef.entryId,
+			category = "items",
+			categoryLabel = DebugModMenuCatalog.CategoryLabels.items or "Items",
+			categoryOrder = DebugModMenuCatalog.CategoryOrder.items or 2,
+			name = itemDef.displayName,
+			subtitle = itemDef.description,
+			iconId = nil,
+		})
 	end
 	openStateRemote:FireClient(player, {
 		allowed = allowed,
-		catalog = catalog,
+		catalog = if allowed then catalog else {},
 		timeOptions = DebugModMenuCatalog.TimeOptions,
 	})
-end
-
-local function catalogHasEntry(playerEntity: number, entryId: string): boolean
-	local catalog = UpgradeSystem.getDebugCatalog(playerEntity)
-	for _, entry in ipairs(catalog) do
-		if tostring(entry.entryId) == entryId then
-			return true
-		end
-	end
-	return false
 end
 
 local function canRunWithCooldown(map: {[number]: number}, player: Player, cooldown: number): boolean
@@ -182,7 +152,7 @@ local function canRunWithCooldown(map: {[number]: number}, player: Player, coold
 	return true
 end
 
-local function onApplyEntry(player: Player, data: any)
+local function onApplyEntry(player: Player, _data: any)
 	if not isAllowed(player) then
 		fireAck(player, false, "Not allowed")
 		return
@@ -190,8 +160,29 @@ local function onApplyEntry(player: Player, data: any)
 	if not canRunWithCooldown(applyCooldowns, player, APPLY_COOLDOWN) then
 		return
 	end
-	if type(data) ~= "table" or type(data.entryId) ~= "string" then
+
+	if type(_data) ~= "table" or type(_data.entryId) ~= "string" then
 		fireAck(player, false, "Invalid payload")
+		return
+	end
+
+	if _data.entryId ~= ULTIMATE_MAX_CHARGE_ENTRY_ID then
+		local isItemEntry = string.sub(_data.entryId, 1, 5) == "item:"
+		if isItemEntry then
+			if not ItemSystem or not ItemSystem.spawnDebugDropForPlayer then
+				fireAck(player, false, "ItemSystem unavailable")
+				sendOpenState(player)
+				return
+			end
+			local itemId = string.sub(_data.entryId, 6)
+			local ok, message = ItemSystem.spawnDebugDropForPlayer(player, itemId)
+			fireAck(player, ok, message)
+			sendOpenState(player)
+			return
+		end
+
+		fireAck(player, false, "Entry disabled")
+		sendOpenState(player)
 		return
 	end
 
@@ -201,19 +192,13 @@ local function onApplyEntry(player: Player, data: any)
 		return
 	end
 
-	if not catalogHasEntry(playerEntity, data.entryId) then
-		fireAck(player, false, "Entry not available")
-		sendOpenState(player)
-		return
-	end
-
-	local ok = UpgradeSystem.applyDebugEntry(playerEntity, data.entryId)
+	local ok = UltimateSystem.debugSetMaxCharge(playerEntity)
 	if ok then
-		fireAck(player, true, "Applied: " .. data.entryId)
-		sendOpenState(player)
+		fireAck(player, true, "Ultimate charge set to max")
 	else
-		fireAck(player, false, "Apply failed: " .. data.entryId)
+		fireAck(player, false, "Failed to set ultimate charge")
 	end
+	sendOpenState(player)
 end
 
 local function onAddSessionTime(player: Player, data: any)
@@ -250,13 +235,13 @@ local function onAddSessionTime(player: Player, data: any)
 	sendOpenState(player)
 end
 
-function DebugModMenuService.init(worldRef: any, components: any, upgradeSystemRef: any, gameTimeSystemRef: any, difficultyCoeffRef: any, gameSessionTimerRef: any)
+function DebugModMenuService.init(worldRef: any, components: any, gameTimeSystemRef: any, difficultyCoeffRef: any, gameSessionTimerRef: any, itemSystemRef: any?)
 	world = worldRef
 	Components = components
-	UpgradeSystem = upgradeSystemRef
 	GameTimeSystem = gameTimeSystemRef
 	DifficultyCoeff = difficultyCoeffRef
 	GameSessionTimer = gameSessionTimerRef
+	ItemSystem = itemSystemRef
 
 	local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 	local folder = remotesFolder:FindFirstChild("DebugModMenu") :: Folder
@@ -266,33 +251,10 @@ function DebugModMenuService.init(worldRef: any, components: any, upgradeSystemR
 		folder.Parent = remotesFolder
 	end
 
-	openStateRemote = folder:FindFirstChild("OpenState") :: RemoteEvent
-	if not openStateRemote then
-		openStateRemote = Instance.new("RemoteEvent")
-		openStateRemote.Name = "OpenState"
-		openStateRemote.Parent = folder
-	end
-
-	applyEntryRemote = folder:FindFirstChild("ApplyEntry") :: RemoteEvent
-	if not applyEntryRemote then
-		applyEntryRemote = Instance.new("RemoteEvent")
-		applyEntryRemote.Name = "ApplyEntry"
-		applyEntryRemote.Parent = folder
-	end
-
-	addSessionTimeRemote = folder:FindFirstChild("AddSessionTime") :: RemoteEvent
-	if not addSessionTimeRemote then
-		addSessionTimeRemote = Instance.new("RemoteEvent")
-		addSessionTimeRemote.Name = "AddSessionTime"
-		addSessionTimeRemote.Parent = folder
-	end
-
-	ackRemote = folder:FindFirstChild("Ack") :: RemoteEvent
-	if not ackRemote then
-		ackRemote = Instance.new("RemoteEvent")
-		ackRemote.Name = "Ack"
-		ackRemote.Parent = folder
-	end
+	openStateRemote = ensureRemoteEvent(folder, "OpenState")
+	applyEntryRemote = ensureRemoteEvent(folder, "ApplyEntry")
+	addSessionTimeRemote = ensureRemoteEvent(folder, "AddSessionTime")
+	ackRemote = ensureRemoteEvent(folder, "Ack")
 
 	sessionTimerUpdateRemote = remotesFolder:FindFirstChild("SessionTimerUpdate") :: RemoteEvent?
 
@@ -314,6 +276,10 @@ function DebugModMenuService.init(worldRef: any, components: any, upgradeSystemR
 			sendOpenState(player)
 		end)
 	end
+end
+
+function DebugModMenuService.setItemSystem(itemSystemRef: any)
+	ItemSystem = itemSystemRef
 end
 
 return DebugModMenuService

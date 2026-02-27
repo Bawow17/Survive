@@ -21,6 +21,8 @@ end
 local ProjectilesSpawnBatch = waitForProjectileRemote("ProjectilesSpawnBatch")
 local ProjectilesDespawnBatch = waitForProjectileRemote("ProjectilesDespawnBatch")
 local ProjectilesImpactBatch = waitForProjectileRemote("ProjectilesImpactBatch")
+local ProjectilesFreezeBatch = waitForProjectileRemote("ProjectilesFreezeBatch")
+local ProjectilesResumeBatch = waitForProjectileRemote("ProjectilesResumeBatch")
 
 local ModelPaths = require(ReplicatedStorage.Shared.ModelPaths)
 
@@ -54,6 +56,7 @@ type HomingPayload = {
 	strengthDeg: number?,
 	maxAngleDeg: number?,
 	maxTurnDeg: number?,
+	targetEntity: number?,
 	stayHorizontal: boolean?,
 	alwaysStayHorizontal: boolean?,
 }
@@ -117,6 +120,7 @@ type ProjectileRecord = {
 	lastOwnerPos: Vector3?,
 	stickOffset: Vector3?,
 	isSplitChild: boolean?,
+	timeStopFrozen: boolean?,
 	model: Model?,
 	parts: {BasePart}?,
 	primary: BasePart?,
@@ -138,8 +142,15 @@ local PETAL_MIN_SEPARATION = 30
 local PETAL_TARGET_REFRESH = 0.05
 local petalTargetCache: {[number]: {time: number, range: number, closest: Vector3?, toughest: Vector3?}} = {}
 
+type EnemySnapshotEntry = {
+	pos: Vector3,
+	entityId: number?,
+	model: Model?,
+}
+
 local enemiesFolder: Folder? = workspace:FindFirstChild("Enemies") :: Folder?
-local enemySnapshot: {{pos: Vector3}} = {}
+local enemySnapshot: {EnemySnapshotEntry} = {}
+local enemyModelsByEntityId: {[number]: Model} = {}
 local lastEnemySnapshot = 0
 
 local refractionsTemplate: Instance? = nil
@@ -183,6 +194,19 @@ local function toVector3(value: any): Vector3?
 	return nil
 end
 
+local function toEntityId(value: any): number?
+	if typeof(value) == "number" then
+		return value
+	end
+	if typeof(value) == "string" then
+		local parsed = tonumber(value)
+		if parsed then
+			return parsed
+		end
+	end
+	return nil
+end
+
 local function resolveModelPath(kind: string, provided: any): string?
 	if typeof(provided) == "string" then
 		return provided
@@ -206,6 +230,21 @@ local function findModelByPath(modelPath: string): Model?
 		return current
 	end
 	return nil
+end
+
+local function isCommonItemModelPath(modelPath: string?): boolean
+	if typeof(modelPath) ~= "string" then
+		return false
+	end
+	return string.find(modelPath, "ItemModels.CommonItems.", 1, true) ~= nil
+end
+
+local function disableModelHighlights(model: Model)
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("Highlight") then
+			descendant.Enabled = false
+		end
+	end
 end
 
 local function configureModel(model: Model): (BasePart?, {BasePart})
@@ -327,6 +366,9 @@ local function acquireModel(modelPath: string?): (Model?, BasePart?, {BasePart}?
 	end
 	model.Parent = projectilesFolder
 	model:SetAttribute("RecordProjectile", true)
+	if isCommonItemModelPath(modelPath) then
+		disableModelHighlights(model)
+	end
 	local primary, parts = configureModel(model)
 	return model, primary, parts
 end
@@ -346,6 +388,9 @@ local function acquireImpactModel(modelPath: string?): Model?
 	end
 	model.Parent = projectilesFolder
 	model:SetAttribute("RecordProjectile", true)
+	if isCommonItemModelPath(modelPath) then
+		disableModelHighlights(model)
+	end
 	configureModel(model)
 	return model
 end
@@ -778,6 +823,7 @@ local function refreshEnemySnapshot(now: number)
 		enemiesFolder = workspace:FindFirstChild("Enemies") :: Folder?
 	end
 	table.clear(enemySnapshot)
+	table.clear(enemyModelsByEntityId)
 	if not enemiesFolder then
 		return
 	end
@@ -785,8 +831,14 @@ local function refreshEnemySnapshot(now: number)
 		if model:IsA("Model") then
 			local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
 			if primary then
+				local entityId = toEntityId(model:GetAttribute("ECS_EntityId"))
+				if entityId then
+					enemyModelsByEntityId[entityId] = model
+				end
 				table.insert(enemySnapshot, {
 					pos = primary.Position,
+					entityId = entityId,
+					model = model,
 				})
 			end
 		end
@@ -857,8 +909,29 @@ local function resolveInitialVisualSpawnPosition(kind: string, ownerUserId: numb
 	return fallback
 end
 
-local function findNearestEnemy(position: Vector3, radius: number): Vector3?
+local function findEnemyPositionByEntityId(entityId: number): Vector3?
+	local model = enemyModelsByEntityId[entityId]
+	if model and model.Parent then
+		local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+		if primary then
+			return primary.Position
+		end
+	end
+	for _, entry in ipairs(enemySnapshot) do
+		if entry.entityId == entityId and entry.model and entry.model.Parent then
+			local primary = entry.model.PrimaryPart or entry.model:FindFirstChildWhichIsA("BasePart")
+			if primary then
+				enemyModelsByEntityId[entityId] = entry.model
+				return primary.Position
+			end
+		end
+	end
+	return nil
+end
+
+local function findNearestEnemy(position: Vector3, radius: number): (Vector3?, number?)
 	local closest: Vector3? = nil
+	local closestEntityId: number? = nil
 	local radiusSq = radius * radius
 	for _, entry in ipairs(enemySnapshot) do
 		local delta = entry.pos - position
@@ -866,9 +939,10 @@ local function findNearestEnemy(position: Vector3, radius: number): Vector3?
 		if distSq <= radiusSq then
 			radiusSq = distSq
 			closest = entry.pos
+			closestEntityId = entry.entityId
 		end
 	end
-	return closest
+	return closest, closestEntityId
 end
 
 local function updateHoming(record: ProjectileRecord, dt: number, now: number)
@@ -883,7 +957,15 @@ local function updateHoming(record: ProjectileRecord, dt: number, now: number)
 
 	local currentPos = record.lastPos or record.origin
 	local acquireRadius = homing.acquireRadius or 80
-	local targetPos = findNearestEnemy(currentPos, acquireRadius)
+	local targetPos: Vector3? = nil
+	if typeof(homing.targetEntity) == "number" then
+		targetPos = findEnemyPositionByEntityId(homing.targetEntity)
+	end
+	if not targetPos then
+		local nearestPos, nearestEntityId = findNearestEnemy(currentPos, acquireRadius)
+		targetPos = nearestPos
+		homing.targetEntity = nearestEntityId
+	end
 	if not targetPos then
 		return
 	end
@@ -900,6 +982,7 @@ local function updateHoming(record: ProjectileRecord, dt: number, now: number)
 	local dot = math.clamp(currentDir:Dot(desired), -1, 1)
 	local angle = math.acos(dot)
 	if homing.maxAngleDeg and angle > math.rad(homing.maxAngleDeg) then
+		homing.targetEntity = nil
 		return
 	end
 	if angle <= 0.0001 then
@@ -1177,6 +1260,7 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 				lastOwnerPos = nil,
 				stickOffset = nil,
 				isSplitChild = isSplitChild,
+				timeStopFrozen = data.frozen == true,
 			}
 			activeProjectiles[id] = record
 		else
@@ -1203,6 +1287,7 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			record.lastOwnerPos = nil
 			record.stickOffset = nil
 			record.isSplitChild = isSplitChild
+			record.timeStopFrozen = data.frozen == true
 		end
 
 		if record.orbit and not record.orbit.ownerUserId then
@@ -1277,6 +1362,67 @@ ProjectilesImpactBatch.OnClientEvent:Connect(function(payloads: any)
 	end
 end)
 
+ProjectilesFreezeBatch.OnClientEvent:Connect(function(payloads: any)
+	if typeof(payloads) ~= "table" then
+		return
+	end
+	for _, entry in ipairs(payloads) do
+		if typeof(entry) ~= "table" then
+			continue
+		end
+		local id = entry.id
+		if typeof(id) ~= "number" then
+			continue
+		end
+		local record = activeProjectiles[id]
+		if not record then
+			continue
+		end
+		record.timeStopFrozen = true
+		local freezePos = toVector3(entry.pos)
+		if freezePos then
+			record.lastPos = freezePos
+			if record.beam and record.beamVisual then
+				updateBeamTransform(record, freezePos, record.direction)
+			else
+				updateModelTransform(record, freezePos, record.direction)
+			end
+		end
+	end
+end)
+
+ProjectilesResumeBatch.OnClientEvent:Connect(function(payloads: any)
+	if typeof(payloads) ~= "table" then
+		return
+	end
+	for _, entry in ipairs(payloads) do
+		if typeof(entry) ~= "table" then
+			continue
+		end
+		local id = entry.id
+		if typeof(id) ~= "number" then
+			continue
+		end
+		local record = activeProjectiles[id]
+		if not record then
+			continue
+		end
+		record.timeStopFrozen = false
+		local frozenDuration = if typeof(entry.frozenDuration) == "number" then math.max(entry.frozenDuration, 0) else 0
+		if frozenDuration > 0 then
+			if record.spawnTime then
+				record.spawnTime += frozenDuration
+			end
+			if record.expiresAt then
+				record.expiresAt += frozenDuration
+			end
+			if record.lastHomingUpdate then
+				record.lastHomingUpdate += frozenDuration
+			end
+		end
+	end
+end)
+
 local pauseProjectiles = false -- Projectiles keep moving during pause unless explicitly frozen.
 local pauseStartTime = 0
 
@@ -1322,6 +1468,10 @@ RunService.Heartbeat:Connect(function(dt: number)
 	refreshEnemySnapshot(now)
 
 	for id, record in pairs(activeProjectiles) do
+		if record.timeStopFrozen then
+			continue
+		end
+
 		local lifetime = record.lifetime
 		if lifetime and (now - record.spawnTime) > lifetime then
 			despawnProjectile(id)

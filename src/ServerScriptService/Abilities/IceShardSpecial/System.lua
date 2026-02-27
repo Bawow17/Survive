@@ -218,6 +218,7 @@ local function buildExtraProjectileConfig(stats: any): any?
 		extraConfig.splitOnHit = {
 			count = splitCount,
 			damageMultiplier = splitDamageMultiplier,
+			procCoefficient = stats.splitProcCoefficient or stats.procCoefficient,
 			scaleMultiplier = splitScaleMultiplier,
 			maxSpreadDeg = splitMaxSpreadDeg,
 			targetingAngle = stats.targetingAngle,

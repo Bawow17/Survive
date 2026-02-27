@@ -55,7 +55,7 @@ local DEFAULTS = {
 	oppositeBrakeAccel = 72,
 	turnResponse = 7.5,
 	turnSpeedLossPerSecond = 0.01,
-	bhopLinearDecel = 0.0, -- 0 => derived from landingCarryLinearDecel / 3
+	bhopLinearDecel = 0.0, -- 0 => derived from landingCarryLinearDecel / 5
 	airDirectionalFightAccel = 260.0,
 	airControlAccelToWalkSpeed = 42.0,
 	airMisalignedBrakeAccel = 18.0,
@@ -704,10 +704,10 @@ local function applyAirMomentumStep(dt: number)
 		speed = speed * math.pow(CONFIG.noInputRetentionPerSecond, stepDt)
 	end
 
-	-- Bhop deceleration: never zero, and by default 3x less than ground carry friction.
+	-- Bhop deceleration: never zero, and by default 5x less than ground carry friction.
 	local bhopDecel = CONFIG.bhopLinearDecel
 	if bhopDecel <= 0 then
-		bhopDecel = math.max(0, CONFIG.landingCarryLinearDecel / 3)
+		bhopDecel = math.max(0, CONFIG.landingCarryLinearDecel / 5)
 	end
 	speed = math.max(0, speed - (bhopDecel * stepDt))
 

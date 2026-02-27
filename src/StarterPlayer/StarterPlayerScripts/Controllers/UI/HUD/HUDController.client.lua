@@ -38,7 +38,8 @@ else
 end
 
 local topBarFrame = mainHud:WaitForChild("TopBarFrame")
-local hpFrame = topBarFrame:WaitForChild("HPFrame")
+local bottomBarFrame = mainHud:WaitForChild("BottomBarFrame")
+local hpFrame = bottomBarFrame:WaitForChild("HPFrame")
 local hpFill = hpFrame:WaitForChild("HPFill") :: Frame
 local healthLabelInstance = hpFrame:FindFirstChild("HealthLabel")
 local healthLabel = if healthLabelInstance and healthLabelInstance:IsA("TextLabel")
@@ -47,7 +48,7 @@ local healthLabel = if healthLabelInstance and healthLabelInstance:IsA("TextLabe
 local warnedMissingHealthLabel = false
 if not healthLabel then
 	warnedMissingHealthLabel = true
-	warn("[HUDController] MainHUD.TopBarFrame.HPFrame.HealthLabel not found; numeric health display disabled")
+	warn("[HUDController] MainHUD.BottomBarFrame.HPFrame.HealthLabel not found; numeric health display disabled")
 end
 
 -- Remove any existing overheal fill (in case of reload)
@@ -67,7 +68,7 @@ overhealFill.Position = UDim2.new(0, 0, 0, 0)  -- Initial position
 overhealFill.Size = UDim2.new(0, 0, 1, 0)  -- Start at 0 width
 overhealFill.ZIndex = hpFill.ZIndex + 1  -- Render ABOVE health bar
 overhealFill.Visible = false
--- CRITICAL: Parent to HPFrame (becomes PlayerGui.MainHUD.TopBarFrame.HPFrame at runtime)
+-- CRITICAL: Parent to HPFrame (becomes PlayerGui.MainHUD.BottomBarFrame.HPFrame at runtime)
 overhealFill.Parent = hpFrame
 
 -- Match rounded corners with HP fill for seamless rounded UI
@@ -80,8 +81,7 @@ end
 
 local expBarFrame = topBarFrame:FindFirstChild("ExpBarFrame")
 if not expBarFrame then
-	local bottomBarFrame = mainHud:FindFirstChild("BottomBarFrame")
-	expBarFrame = if bottomBarFrame then bottomBarFrame:FindFirstChild("ExpBarFrame") else nil
+	expBarFrame = bottomBarFrame:FindFirstChild("ExpBarFrame")
 end
 if not expBarFrame then
 	expBarFrame = topBarFrame:WaitForChild("ExpBarFrame")

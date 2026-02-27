@@ -12,6 +12,7 @@ local localPlayer = Players.LocalPlayer
 
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local weaponRemotesFolder = remotesFolder:WaitForChild("Weapons")
+local timeStopStateRemote = remotesFolder:WaitForChild("TimeStopState")
 local primaryFireRequestRemote = weaponRemotesFolder:WaitForChild("PrimaryFireRequest")
 local primaryShotRemote = weaponRemotesFolder:WaitForChild("PrimaryShot")
 local secondaryFireRequestRemote = weaponRemotesFolder:WaitForChild("SecondaryFireRequest")
@@ -62,6 +63,7 @@ local secondaryShotSequence = 0
 local localSharedLockoutUntil = 0
 local localM2CastToken = 0
 local secondaryCastStartedAtByShotId: {[number]: number} = {}
+local isTimeStopActive = false
 
 local aimRayParams = RaycastParams.new()
 aimRayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -289,7 +291,7 @@ local function attemptPrimaryFire()
 	})
 
 	local predictedOrigin, predictedImpact, predictedNormal = buildPredictedShot(aimPoint)
-	if predictedOrigin and predictedImpact and predictedNormal then
+	if (not isTimeStopActive) and predictedOrigin and predictedImpact and predictedNormal then
 		local character = localPlayer.Character
 		local tracerLifetime = readWeaponNumberAttribute(character, ATTR_WEAPON_TRACER_LIFETIME, DEFAULT_TRACER_LIFETIME, 0)
 		local tracerFadeDuration = readWeaponNumberAttribute(character, ATTR_WEAPON_TRACER_FADE_DURATION, DEFAULT_TRACER_FADE_DURATION, 0)
@@ -344,6 +346,9 @@ local function attemptSecondaryFire()
 		if not startedAt then
 			return
 		end
+		if isTimeStopActive then
+			return
+		end
 		local predictedOrigin, predictedImpact, predictedNormal = buildPredictedShot(aimPoint)
 		if not predictedOrigin or not predictedImpact or not predictedNormal then
 			return
@@ -395,6 +400,13 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 	if input.UserInputType == Enum.UserInputType.MouseButton2 then
 		attemptSecondaryFire()
 	end
+end)
+
+timeStopStateRemote.OnClientEvent:Connect(function(payload: any)
+	if typeof(payload) ~= "table" then
+		return
+	end
+	isTimeStopActive = payload.active == true
 end)
 
 UserInputService.InputEnded:Connect(function(input: InputObject, _gameProcessed: boolean)

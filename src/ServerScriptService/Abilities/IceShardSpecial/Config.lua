@@ -17,7 +17,8 @@ return {
 	modelPath = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard.IceShard",
 
 	-- Core stats
-	damage = 120,
+	damageCoefficient = 8.0,
+	procCoefficient = 1.0,
 	projectileSpeed = 214.5,
 	penetration = 0,
 	duration = 15,
@@ -57,7 +58,8 @@ return {
 
 	-- Special behavior configuration
 	splitCount = 6,
-	splitDamageMultiplier = 0.15,
+	splitDamageMultiplier = 1.25,
+	splitProcCoefficient = 1.0,
 	splitScaleMultiplier = 0.55,
 	splitMaxSpreadDeg = 70,
 	frostbiteStacksPerHit = 1,

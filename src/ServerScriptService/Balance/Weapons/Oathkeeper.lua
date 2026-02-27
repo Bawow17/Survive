@@ -2,13 +2,15 @@
 
 return {
 	id = "Oathkeeper",
-	damage = 38,
+	primaryDamageCoefficient = 3.0,
+	secondaryDamageCoefficient = 20.0,
+	primaryProcCoefficient = 1.0,
+	secondaryProcCoefficient = 1.0,
 	range = 1500,
 	baseCooldown = 0.33,
 	m2CastDuration = 0.60,
 	m2FireDelay = 8 / 60,
 	m2SharedLockout = 3.0,
-	m2DamageMultiplier = 4.0,
 	activeWalkWindow = 5,
 	tracerLifetime = 0.6,
 	tracerFadeDuration = 0.5,

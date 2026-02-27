@@ -37,6 +37,7 @@ local FacingDirection
 local _EntityTypeComponent
 local _Target
 local _PlayerStats
+local _EnemyTimeStopped
 
 -- State constants
 local S_APPROACH = 1
@@ -250,6 +251,7 @@ function ChargerAISystem.init(worldRef: any, components: any, dirtyService: any)
 	_EntityTypeComponent = Components.EntityType
 	_Target = Components.Target
 	_PlayerStats = Components.PlayerStats
+	_EnemyTimeStopped = Components.EnemyTimeStopped
 	
 	-- Create cached queries for performance (JECS best practice)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing
@@ -630,6 +632,12 @@ function ChargerAISystem.step(dt: number)
 		-- Get balance data
 		local balance = ai.balance
 		if not balance then continue end
+
+		local stasis = _EnemyTimeStopped and world:get(entity, _EnemyTimeStopped)
+		if stasis and stasis.active == true then
+			setVelocity(entity, { x = 0, y = 0, z = 0 })
+			continue
+		end
 		
 		-- CRITICAL: Check if frozen by pause system
 		if ai.speed == 0 then

@@ -73,6 +73,7 @@ local EnemySpawner = require(game.ServerScriptService.ECS.Systems.EnemySpawner)
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
+local ItemSystem = require(game.ServerScriptService.ECS.Systems.ItemSystem)
 local HitFlashSystem = require(game.ServerScriptService.ECS.Systems.HitFlashSystem)
 local DeathAnimationSystem = require(game.ServerScriptService.ECS.Systems.DeathAnimationSystem)
 local DeathSystem = require(game.ServerScriptService.ECS.Systems.DeathSystem)
@@ -106,7 +107,7 @@ local EnemyExpDropSystem = require(game.ServerScriptService.ECS.Systems.EnemyExp
 local PauseSystem = require(game.ServerScriptService.ECS.Systems.PauseSystem)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local PickupService = require(game.ServerScriptService.Services.PickupService)
-local BankedHandsService = require(game.ServerScriptService.Services.BankedHandsService)
+local MobilityLoadoutService = require(game.ServerScriptService.Services.MobilityLoadoutService)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
 local WeaponService = require(game.ServerScriptService.Services.WeaponService)
 local LoopGameService = require(game.ServerScriptService.Services.LoopGameService)
@@ -116,8 +117,6 @@ local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff
 local GameSessionTimer = require(game.ServerScriptService.ECS.Systems.GameSessionTimer)
 local ChunkGenerationService = require(game.ServerScriptService.WorldGen.ChunkGenerationService)
 
--- Upgrade Systems
-local UpgradeSystem = require(game.ServerScriptService.ECS.Systems.UpgradeSystem)
 local PassiveEffectSystem = require(game.ServerScriptService.ECS.Systems.PassiveEffectSystem)
 
 -- Status Effect System
@@ -130,6 +129,8 @@ local MagnetPullSystem = require(game.ServerScriptService.ECS.Systems.MagnetPull
 
 -- Mobility System
 local MobilitySystem = require(game.ServerScriptService.ECS.Systems.MobilitySystem)
+local UltimateSystem = require(game.ServerScriptService.ECS.Systems.UltimateSystem)
+local TemporalStasisSystem = require(game.ServerScriptService.ECS.Systems.TemporalStasisSystem)
 
 -- Afterimage Clone System (for Afterimages attribute)
 local AfterimageCloneSystem = require(game.ServerScriptService.ECS.Systems.AfterimageCloneSystem)
@@ -182,7 +183,6 @@ local AttackCooldown = Components.AttackCooldown
 local Target = Components.Target
 local Experience = Components.Experience
 local Level = Components.Level
-local Upgrades = Components.Upgrades
 local PassiveEffectsComp = Components.PassiveEffects
 local StatusEffects = Components.StatusEffects
 
@@ -505,6 +505,10 @@ function ECSWorldService.Initialize()
 	-- Create commonly-used remotes before heavy startup work so clients do not
 	-- stall waiting for events during initial join.
 	local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
+	local staleBankedHandsFolder = remotesFolder:FindFirstChild("BankedHands")
+	if staleBankedHandsFolder then
+		staleBankedHandsFolder:Destroy()
+	end
 	ensureRemoteEvent(remotesFolder, "PlayerDied")
 	ensureRemoteEvent(remotesFolder, "PlayerRespawned")
 	ensureRemoteEvent(remotesFolder, "PlayerBodyFade")
@@ -573,6 +577,8 @@ function ECSWorldService.Initialize()
 	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesSpawnBatch")
 	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesDespawnBatch")
 	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesImpactBatch")
+	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesFreezeBatch")
+	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesResumeBatch")
 	
 	-- Initialize model replication first (clones models from ServerStorage to ReplicatedStorage)
 	ModelReplicationService.init()
@@ -628,9 +634,9 @@ function ECSWorldService.Initialize()
 	-- Initialize Game Time system (after PauseSystem, before systems that use scaling)
 	GameTimeSystem.init()
 	
-	-- Initialize Upgrade systems (before ExpSystem, as it depends on them)
-	UpgradeSystem.init(world, Components, DirtyService)
+	-- Initialize systems that apply player multipliers.
 	PassiveEffectSystem.init(world, Components, DirtyService)
+	MobilityLoadoutService.init(world, Components, DirtyService)
 	
 	-- Initialize Status Effect system (before ExpSystem, as it depends on it)
 	StatusEffectSystem.init(world, Components, DirtyService)
@@ -657,6 +663,7 @@ function ECSWorldService.Initialize()
 	GameStateManager.init(world, Components, DirtyService, ECSWorldService)
 	GameStateManager.setStatusEffectSystem(StatusEffectSystem)
 	GameStateManager.setPauseSystem(PauseSystem)
+	UltimateSystem.init(world, Components, DirtyService)
 	
 	-- Initialize Session Stats Tracker
 	local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
@@ -680,8 +687,6 @@ function ECSWorldService.Initialize()
 	
 	-- Initialize EXP/Leveling systems
 	ExpSystem.init(world, Components, DirtyService)
-	BankedHandsService.init(world, Components, DirtyService, UpgradeSystem, ExpSystem, PassiveEffectSystem)
-	ExpSystem.setBankedHandsService(BankedHandsService)
 	PickupService.init(world, Components, ExpSystem, function(player)
 		return playerEntities[player]
 	end)
@@ -703,11 +708,25 @@ function ECSWorldService.Initialize()
 	
 	-- Initialize combat systems
 	DamageSystem.init(world, Components, DirtyService)
+	TemporalStasisSystem.init(world, Components, DirtyService, {
+		DamageSystem = DamageSystem,
+	})
+	TemporalStasisSystem.setDamageSystem(DamageSystem)
+	DamageSystem.setUltimateSystem(UltimateSystem)
+	DamageSystem.setTemporalStasisSystem(TemporalStasisSystem)
+	UltimateSystem.setTemporalStasisSystem(TemporalStasisSystem)
 	DamageSystem.setEnemyExpDropSystem(EnemyExpDropSystem)  -- Set reference for enemy death drops
 	DamageSystem.setStatusEffectSystem(StatusEffectSystem)  -- Set reference for invincibility checks
 	ProjectileService.init(world, Components, function(entityId)
 		return entityToPlayer[entityId]
 	end)
+	ItemSystem.init(world, Components, {
+		PickupService = PickupService,
+		ProjectileService = ProjectileService,
+		ModelReplicationService = ModelReplicationService,
+	})
+	ProjectileService.setTemporalStasisSystem(TemporalStasisSystem)
+	DamageSystem.setItemSystem(ItemSystem)
 	WeaponService.init({
 		world = world,
 		Components = Components,
@@ -722,8 +741,9 @@ function ECSWorldService.Initialize()
 		SecondaryShot = secondaryShotRemote,
 		SprintForceOff = sprintForceOffRemote,
 	})
+	WeaponService.setTemporalStasisSystem(TemporalStasisSystem)
 	LoopGameService.init(world, Components, ExpSystem)
-	DebugModMenuService.init(world, Components, UpgradeSystem, GameTimeSystem, DifficultyCoeff, GameSessionTimer)
+	DebugModMenuService.init(world, Components, GameTimeSystem, DifficultyCoeff, GameSessionTimer, ItemSystem)
 	PlayerSettingsService.init()
 	HitFlashSystem.init(world, Components)
 	DeathAnimationSystem.init(world, Components, ECSWorldService)
@@ -1140,6 +1160,54 @@ function ECSWorldService.CreateItem(itemType: string, position: Vector3, value: 
 	return entity
 end
 
+local function buildStarterAbilityState(): ({[string]: any}, {[string]: any})
+	local abilities = {}
+	local cooldowns = {}
+
+	for _, ability in pairs(AbilityRegistry.getAll()) do
+		if ability.balance.StartWith then
+			replicateAbilityModelForPlayer(ability)
+			abilities[ability.id] = {
+				enabled = true,
+				level = 1,
+				Name = ability.name,
+				name = ability.name,
+			}
+			cooldowns[ability.id] = {
+				remaining = 0,
+				max = ability.balance.cooldown,
+			}
+		end
+	end
+
+	return abilities, cooldowns
+end
+
+local function resetPlayerProgressionToBaseline(playerEntity: number)
+	if world:has(playerEntity, Components.AttributeSelections) then
+		world:remove(playerEntity, Components.AttributeSelections)
+		DirtyService.mark(playerEntity, "AttributeSelections")
+	end
+
+	local abilities, cooldowns = buildStarterAbilityState()
+	if next(abilities) then
+		setComponent(playerEntity, Components.Ability, {}, "Ability")
+		setComponent(playerEntity, Components.AbilityData, { abilities = abilities }, "AbilityData")
+		setComponent(playerEntity, Components.AbilityCooldown, { cooldowns = cooldowns }, "AbilityCooldown")
+	else
+		if world:has(playerEntity, Components.AbilityData) then
+			world:remove(playerEntity, Components.AbilityData)
+			DirtyService.mark(playerEntity, "AbilityData")
+		end
+		if world:has(playerEntity, Components.AbilityCooldown) then
+			world:remove(playerEntity, Components.AbilityCooldown)
+			DirtyService.mark(playerEntity, "AbilityCooldown")
+		end
+	end
+
+	MobilityLoadoutService.equipStarterMobility(playerEntity)
+end
+
 function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 	local existingEntity = playerEntities[player]
 	local spawnPosition = { x = position.X, y = position.Y, z = position.Z }
@@ -1171,82 +1239,7 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 			max = 1.0  -- Per-ability cooldown, not a base value
 		}, "AttackCooldown")
 
-		-- Ensure BankedHands component exists (preserve queue on reconnect)
-		local existingHands = world:get(existingEntity, Components.BankedHands)
-		if not existingHands then
-			setComponent(existingEntity, Components.BankedHands, {
-				queue = {},
-				nextId = 1,
-			}, "BankedHands")
-		end
-		
-		-- Ensure player has starting abilities
-		local abilityData = world:get(existingEntity, Components.AbilityData)
-		if not abilityData then
-			-- Give player all abilities marked with StartWith = true
-			local abilities = {}
-			local cooldowns = {}
-			
-			for abilityId, ability in pairs(AbilityRegistry.getAll()) do
-				if ability.balance.StartWith then
-					-- Replicate ability model to client on-demand
-					replicateAbilityModelForPlayer(ability)
-					
-					-- Add to abilities table
-					abilities[ability.id] = {
-				enabled = true,
-				level = 1,
-						Name = ability.name,
-						name = ability.name,
-					}
-					
-					-- Add to cooldowns table
-					cooldowns[ability.id] = {
-						remaining = 0,
-						max = ability.balance.cooldown,
-					}
-				end
-			end
-			
-			-- Only set components if we have at least one ability
-			if next(abilities) then
-				setComponent(existingEntity, Components.Ability, {}, "Ability")
-				setComponent(existingEntity, Components.AbilityData, {
-					abilities = abilities
-			}, "AbilityData")
-			setComponent(existingEntity, Components.AbilityCooldown, {
-					cooldowns = cooldowns
-			}, "AbilityCooldown")
-			end
-		end
-		-- Ensure Ability marker exists whenever AbilityData exists (needed for ability systems)
-		if abilityData and not world:has(existingEntity, Components.Ability) then
-			setComponent(existingEntity, Components.Ability, {}, "Ability")
-		end
-		
-		-- CRITICAL FIX: Preserve mobility upgrades on reconnect (issue: mobility can reset incorrectly)
-		-- Only restore starter mobility if player has NEVER had a mobility upgrade (should not happen after level 15)
-		local mobilityData = world:get(existingEntity, Components.MobilityData)
-		local upgrades = world:get(existingEntity, Components.Upgrades)
-		
-		-- Check if player should have a mobility upgrade (level 15+) based on their upgrades
-		local hasSelectedMobility = false
-		if upgrades and upgrades.abilities then
-			-- Player has made upgrades, so they passed level 15 and could have a mobility choice
-			-- In this case, NEVER reset to starter mobility even if MobilityData is missing
-			hasSelectedMobility = true
-		end
-		
-		-- Only equip starter mobility if:
-		-- 1. Player has no MobilityData AND
-		-- 2. Player hasn't reached level 15+ (no upgrades yet)
-		if not mobilityData and not hasSelectedMobility then
-			UpgradeSystem.equipStarterDash(existingEntity)
-		elseif not mobilityData and hasSelectedMobility then
-			-- This shouldn't happen - player lost their mobility data on reconnect!
-			-- Log this as a warning but don't reset their mobility
-			warn(string.format("[Bootstrap] WARNING: Player %s reconnected without MobilityData (had upgrades). This is a sync issue.", player.Name))
-		end
+		resetPlayerProgressionToBaseline(existingEntity)
 		
 		playerEntities[player] = existingEntity
 		entityToPlayer[existingEntity] = player
@@ -1285,21 +1278,6 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		total = PlayerBalance.StartingExperience
 	}, "Experience")
 
-	-- Initialize BankedHands component (queue for level-up hands)
-	setComponent(entity, Components.BankedHands, {
-		queue = {},
-		nextId = 1,
-	}, "BankedHands")
-	
-	-- Initialize Upgrades component (tracks upgrade progress)
-	setComponent(entity, Upgrades, {
-		abilities = {},
-		passives = {
-			stats = {},
-			counts = {},
-		},
-	}, "Upgrades")
-	
 	-- Initialize PassiveEffects component (computed passive multipliers)
 	-- Start with PlayerBalance base multipliers
 	setComponent(entity, PassiveEffectsComp, {
@@ -1341,44 +1319,7 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		isRegenerating = false,
 	}, "HealthRegen")
 	
-	-- Give player all starting abilities
-	local abilities = {}
-	local cooldowns = {}
-	
-	for abilityId, ability in pairs(AbilityRegistry.getAll()) do
-		if ability.balance.StartWith then
-			-- Replicate ability model to client on-demand
-			replicateAbilityModelForPlayer(ability)
-			
-			-- Add to abilities table
-			abilities[ability.id] = {
-		enabled = true,
-		level = 1,
-				Name = ability.name,
-				name = ability.name,
-			}
-			
-			-- Add to cooldowns table
-			cooldowns[ability.id] = {
-				remaining = 0,
-				max = ability.balance.cooldown,
-			}
-		end
-	end
-	
-	-- Only set components if we have at least one ability
-	if next(abilities) then
-		setComponent(entity, Components.Ability, {}, "Ability")
-		setComponent(entity, Components.AbilityData, {
-			abilities = abilities
-	}, "AbilityData")
-	setComponent(entity, Components.AbilityCooldown, {
-			cooldowns = cooldowns
-	}, "AbilityCooldown")
-	end
-	
-	-- Equip starter mobility for all new players
-	UpgradeSystem.equipStarterDash(entity)
+	resetPlayerProgressionToBaseline(entity)
 
 	playerEntities[player] = entity
 	entityToPlayer[entity] = player
@@ -1410,6 +1351,9 @@ function ECSWorldService.DestroyEntity(entity: number)
 	EnemyRepulsionSystem.cleanupEntity(entity)
 	SpatialGridSystem.cleanupEntity(entity)  -- Clean up from spatial grid (memory leak prevention)
 	ExpSinkSystem.cleanupEntity(entity)  -- Clean up from sink system (if it was a sink)
+	if ItemSystem and ItemSystem.onEntityRemoved then
+		ItemSystem.onEntityRemoved(entity)
+	end
 	world:delete(entity)
 	entityCount -= 1
 	if entityCount < 0 then
@@ -1654,6 +1598,11 @@ local function stepWorld(dt: number)
 	debug.profileend()
 
 	-- Enemy slow debuffs (expire/cleanup before AI)
+	debug.profilebegin("TemporalStasis")
+	TemporalStasisSystem.step(dt)
+	debug.profileend()
+
+	-- Enemy slow debuffs (expire/cleanup before AI)
 	debug.profilebegin("EnemySlow")
 	EnemySlowSystem.step(dt)
 	debug.profileend()
@@ -1694,6 +1643,10 @@ local function stepWorld(dt: number)
 	debug.profilebegin("PickupService")
 	PickupService.step(dt)
 	debug.profileend()
+
+	debug.profilebegin("ItemSystem")
+	ItemSystem.step(dt)
+	debug.profileend()
 	
 	-- Pause system (for individual pause timeout checking)
 	debug.profilebegin("PauseSystem")
@@ -1703,6 +1656,10 @@ local function stepWorld(dt: number)
 	-- Game State Manager (check continue timer)
 	debug.profilebegin("GameStateManager")
 	GameStateManager.step(dt)
+	debug.profileend()
+
+	debug.profilebegin("UltimateSystem")
+	UltimateSystem.step(dt)
 	debug.profileend()
 
 	debug.profilebegin("LoopGameService")
@@ -1871,10 +1828,6 @@ local function stepWorld(dt: number)
 	-- Passive effect system (applies passive multipliers to humanoid properties)
 	debug.profilebegin("PassiveEffects")
 	PassiveEffectSystem.step(dt)
-	debug.profileend()
-
-	debug.profilebegin("UpgradeRebuild")
-	UpgradeSystem.step(dt)
 	debug.profileend()
 
 	-- Network synchronization

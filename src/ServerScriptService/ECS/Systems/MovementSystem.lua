@@ -27,6 +27,7 @@ local _ChargerState: any
 local _DesiredVelocity: any
 local _RepulsionVelocity: any
 local _Knockback: any
+local _EnemyTimeStopped: any
 
 local CHARGER_DASH_STATE = 3
 local ENEMY_DISPLACEMENT_MULT = 2.5
@@ -338,6 +339,7 @@ function MovementSystem.init(worldRef: any, components: any, dirtyService: any)
 	_DesiredVelocity = Components.DesiredVelocity
 	_RepulsionVelocity = Components.RepulsionVelocity
 	_Knockback = Components.Knockback
+	_EnemyTimeStopped = Components.EnemyTimeStopped
 	
 	-- Create cached query for performance
 	movingQuery = world:query(Components.Position, Components.Velocity, Components.EntityType):cached()
@@ -461,6 +463,13 @@ function MovementSystem.step(dt: number)
 		
 		-- Derive effective velocity (Desired + External) for enemies
 		if entityType and entityType.type == "Enemy" then
+			local timeStopped = _EnemyTimeStopped and world:get(entity, _EnemyTimeStopped)
+			if timeStopped and timeStopped.active == true then
+				velocity = { x = 0, y = 0, z = 0 }
+				DirtyService.setIfChanged(world, entity, _Velocity, velocity, "Velocity")
+				continue
+			end
+
 			local desired = _DesiredVelocity and world:get(entity, _DesiredVelocity) or nil
 			local dvx = desired and (desired.x or desired.X or 0) or (velocity.x or 0)
 			local dvy = desired and (desired.y or desired.Y or 0) or (velocity.y or 0)
