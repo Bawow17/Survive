@@ -19,6 +19,7 @@ local OverhealSystem: any  -- Reference to overheal system
 local UltimateSystem: any  -- Reference to ultimate charge system
 local TemporalStasisSystem: any  -- Reference to Tempus Gelidum stasis system
 local ItemSystem: any  -- Reference to run item trigger system
+local EnemyFrostSystem: any  -- Reference to Lesser/Greater Frost system
 local PlayerHitMarkerRemote: RemoteEvent? = nil
 
 -- Component references
@@ -33,6 +34,7 @@ local EnemyAggro: any
 local AttackCooldown: any
 local EnemyTier: any
 local EnemyFrostbite: any
+local EnemyArmor: any
 
 local RNG = Random.new()
 
@@ -124,6 +126,29 @@ local function normalizeCritChance(rawChance: number?): number
 	return math.clamp(critChance, 0, 1)
 end
 
+local function sanitizeArmorValue(rawArmor: any): number
+	if typeof(rawArmor) ~= "number" then
+		return 0
+	end
+	if rawArmor ~= rawArmor or rawArmor == math.huge or rawArmor == -math.huge then
+		return 0
+	end
+	return math.clamp(rawArmor, -100000, 100000)
+end
+
+local function getArmorDamageMultiplier(armorValue: number): number
+	local armor = sanitizeArmorValue(armorValue)
+	if armor == 0 then
+		return 1
+	end
+	if armor > 0 then
+		return 100 / (100 + armor)
+	end
+	return 2 - (100 / (100 - armor))
+end
+
+DamageSystem.getArmorDamageMultiplier = getArmorDamageMultiplier
+
 -- Pseudo-random distribution to smooth crit streaks without changing average rate.
 local critAccumulators: {[number]: number} = {}
 
@@ -143,6 +168,7 @@ function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	AttackCooldown = Components.AttackCooldown
 	EnemyTier = Components.EnemyTier
 	EnemyFrostbite = Components.EnemyFrostbite
+	EnemyArmor = Components.EnemyArmor
 
 	local remotesFolder = ReplicatedStorage:FindFirstChild("RemoteEvents")
 	if not remotesFolder then
@@ -182,6 +208,10 @@ end
 
 function DamageSystem.setItemSystem(itemSystemRef: any)
 	ItemSystem = itemSystemRef
+end
+
+function DamageSystem.setEnemyFrostSystem(enemyFrostSystem: any)
+	EnemyFrostSystem = enemyFrostSystem
 end
 
 local function notifyItemSystemResolved(data: {[string]: any})
@@ -416,6 +446,7 @@ function DamageSystem.applyDamage(
 	if options and typeof(options.procCoefficient) == "number" then
 		procCoefficient = options.procCoefficient
 	end
+	local skipFrostExecuteCheck = options and options.skipFrostExecuteCheck == true
 
 	-- Get entity type to determine if this is a player or enemy
 	local entityType = world:get(targetEntity, EntityType)
@@ -444,16 +475,21 @@ function DamageSystem.applyDamage(
 		return false, false  -- Damage blocked by invincibility
 	end
 
-	-- Apply player defensive modifiers (armor)
+	-- Apply shared RoR2-style armor to the target.
 	if isPlayer then
 		local targetEffects = world:get(targetEntity, PassiveEffects)
+		local playerArmor = PlayerBalance.BaseArmor or 0
 		if targetEffects then
-			local armorReduction = math.clamp(targetEffects.armorReduction or 0, 0, 0.6)
-			if armorReduction > 0 then
-				local effectiveArmor = armorReduction * armorReduction
-				damageAmount = damageAmount * (1 - effectiveArmor)
-			end
+			playerArmor += sanitizeArmorValue(targetEffects.armor)
 		end
+		damageAmount = damageAmount * getArmorDamageMultiplier(playerArmor)
+	elseif isEnemy then
+		local enemyArmorData = EnemyArmor and world:get(targetEntity, EnemyArmor)
+		local enemyArmor = 0
+		if enemyArmorData and typeof(enemyArmorData) == "table" then
+			enemyArmor = sanitizeArmorValue(enemyArmorData.current)
+		end
+		damageAmount = damageAmount * getArmorDamageMultiplier(enemyArmor)
 	end
 
 	-- Apply player offensive modifiers (crit)
@@ -844,27 +880,24 @@ function DamageSystem.applyDamage(
 		end
 	end
 	
-	-- Trigger hit flash VFX (skip for nuke)
+	-- Trigger hit flash VFX
 	local currentTime = tick()
-	local flashEndTime = currentTime
-	if damageType ~= "nuke" then
-		local existingFlash = world:get(targetEntity, HitFlash)
-		local hitCount = existingFlash and existingFlash.hitCount or 0
-		flashEndTime = currentTime + HIT_FLASH_DURATION
-		if existingFlash and typeof(existingFlash.endTime) == "number" then
-			flashEndTime = math.max(flashEndTime, existingFlash.endTime)
-		end
-		
-		DirtyService.setIfChanged(world, targetEntity, HitFlash, {
-			endTime = flashEndTime,
-			hitCount = hitCount + 1,
-			crit = wasCrit,
-		}, "HitFlash")
+	local existingFlash = world:get(targetEntity, HitFlash)
+	local hitCount = existingFlash and existingFlash.hitCount or 0
+	local flashEndTime = currentTime + HIT_FLASH_DURATION
+	if existingFlash and typeof(existingFlash.endTime) == "number" then
+		flashEndTime = math.max(flashEndTime, existingFlash.endTime)
 	end
+	
+	DirtyService.setIfChanged(world, targetEntity, HitFlash, {
+		endTime = flashEndTime,
+		hitCount = hitCount + 1,
+		crit = wasCrit,
+	}, "HitFlash")
 	
 	-- Apply knockback (if not already in death animation)
 	local deathAnim = world:get(targetEntity, DeathAnimation)
-	if not deathAnim and damageType ~= "nuke" then
+	if not deathAnim then
 		local entityPos = world:get(targetEntity, Position)
 		if entityPos then
 			local position = Vector3.new(entityPos.x, entityPos.y, entityPos.z)
@@ -904,35 +937,6 @@ function DamageSystem.applyDamage(
 		-- For players: Let Roblox handle death/respawn, ECS cleanup happens in CharacterAdded
 		-- For enemies: Trigger death animation and exp drop
 		if not isPlayer then
-			-- Nuke kills: no hit/death animation, despawn immediately after exp drop
-			if damageType == "nuke" then
-				if EnemyExpDropSystem then
-					local entityPos = world:get(targetEntity, Position)
-					if entityPos then
-						local pos = Vector3.new(entityPos.x, entityPos.y, entityPos.z)
-						EnemyExpDropSystem.onEnemyDeath(targetEntity, pos, health.max)
-					end
-				end
-				local EnemyPool = require(game.ServerScriptService.ECS.EnemyPool)
-				local SyncSystem = require(game.ServerScriptService.ECS.Systems.SyncSystem)
-				SyncSystem.queueDespawn(targetEntity)
-				EnemyPool.release(targetEntity)
-				notifyItemSystemResolved({
-					targetEntity = targetEntity,
-					sourceEntity = sourceEntity,
-					damageType = damageType,
-					abilityId = abilityId,
-					procCoefficient = procCoefficient,
-					targetIsPlayer = isPlayer,
-					targetIsEnemy = isEnemy,
-					applied = applied,
-					appliedDamage = if isEnemy then appliedToTarget else appliedHealthDamage,
-					died = died,
-					deferred = false,
-				})
-				return died, applied
-			end
-
 			-- Death animation starts AFTER hit flash completes
 			local deathStartTime = flashEndTime + DEATH_ANIMATION_BUFFER
 			DirtyService.setIfChanged(world, targetEntity, DeathAnimation, {
@@ -979,6 +983,10 @@ function DamageSystem.applyDamage(
 		died = died,
 		deferred = false,
 	})
+
+	if applied and isEnemy and not skipFrostExecuteCheck and EnemyFrostSystem and EnemyFrostSystem.onEnemyDamaged then
+		EnemyFrostSystem.onEnemyDamaged(targetEntity, sourceEntity)
+	end
 
 	return died, applied
 end

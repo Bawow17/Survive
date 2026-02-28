@@ -11,7 +11,6 @@ local ATTR_LOCAL_ABILITY_CAST_ACTIVE = "AbilityCastActiveLocal"
 local RANGED_VERTICAL_AIM_PROFILE = "ranged_left_head"
 local ICE_SHARD_LOCKED_ABILITIES: {[string]: boolean} = {
 	IceShard = true,
-	IceShardSpecial = true,
 }
 
 -- Animation state

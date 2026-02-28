@@ -30,7 +30,6 @@ local ProjectileSubtypes = {
 
 -- Item subtypes for model loading
 local ItemSubtypes = {
-    POWERUP = "Powerup",
     EXPERIENCE = "Experience",
     COIN = "Coin",
 }

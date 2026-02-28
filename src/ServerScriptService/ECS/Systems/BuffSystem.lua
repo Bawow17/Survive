@@ -2,7 +2,6 @@
 -- BuffSystem - Manages temporary buffs that stack with passive effects
 -- Buffs are multiplicative with passives and each other
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 
 local BuffSystem = {}
@@ -13,11 +12,6 @@ local DirtyService: any
 local PassiveEffectSystem: any
 
 local BuffState: any
-local PlayerStats: any
-
--- Remote for buff duration updates
-local BuffDurationUpdate: RemoteEvent
-
 -- Cached query for players with buffs
 local buffQuery: any
 
@@ -27,14 +21,8 @@ function BuffSystem.init(worldRef: any, components: any, dirtyService: any)
 	DirtyService = dirtyService
 	
 	BuffState = Components.BuffState
-	PlayerStats = Components.PlayerStats
-	
 	-- Create cached query
 	buffQuery = world:query(Components.BuffState, Components.PlayerStats):cached()
-	
-	-- Get remote
-	local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
-	BuffDurationUpdate = remotes:WaitForChild("BuffDurationUpdate")
 end
 
 -- Set PassiveEffectSystem reference (called after it's initialized)
@@ -86,21 +74,6 @@ function BuffSystem.addBuff(
 		PassiveEffectSystem.applyToPlayer(playerEntity)
 	end
 	
-	-- Broadcast to buff duration tracker (only for Cloak and ArcaneRune from powerups)
-	local playerStats = world:get(playerEntity, PlayerStats)
-	if playerStats and playerStats.player and (buffId == "Cloak" or buffId == "ArcaneRune") then
-		local PowerupBalance = require(game.ServerScriptService.Balance.PowerupBalance)
-		local config = PowerupBalance.PowerupTypes[buffId]
-		if config then
-			BuffDurationUpdate:FireClient(playerStats.player, {
-				buffId = buffId,
-				displayName = config.displayName or buffId,
-				duration = duration,
-				healthPercent = nil,
-				overhealPercent = nil,
-			})
-		end
-	end
 end
 
 -- PUBLIC API: Remove a buff from a player

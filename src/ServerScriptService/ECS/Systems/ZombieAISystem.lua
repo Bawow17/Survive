@@ -10,6 +10,7 @@ local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local EnemyRegistry = require(game.ServerScriptService.Enemies.EnemyRegistry)
 local ObstacleRaycastCache = require(game.ServerScriptService.ECS.Systems.ObstacleRaycastCache)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
+local EnemyFrostSystem = require(game.ServerScriptService.ECS.Systems.EnemyFrostSystem)
 local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
@@ -39,6 +40,7 @@ local Health: any
 local EntityTypeComponent: any
 local FacingDirection: any
 local EnemyTimeStopped: any
+local EnemyFreeze: any
 
 local enemyLogAccumulator = 0
 
@@ -544,6 +546,7 @@ function ZombieAISystem.init(worldRef: any, components: any, dirtyService: any, 
 	EntityTypeComponent = Components.EntityType
 	FacingDirection = Components.FacingDirection
 	EnemyTimeStopped = Components.EnemyTimeStopped
+	EnemyFreeze = Components.EnemyFreeze
 	
 	-- Create cached queries for performance (CRITICAL FIX - was creating new queries every frame!)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing
@@ -582,6 +585,10 @@ local function cleanupInactiveEnemies()
 
 		local stasis = EnemyTimeStopped and world:get(enemyEntity, EnemyTimeStopped)
 		if stasis and stasis.active == true then
+			continue
+		end
+		local freezeData = EnemyFreeze and world:get(enemyEntity, EnemyFreeze)
+		if freezeData and (freezeData.endTime or 0) > tick() then
 			continue
 		end
 		
@@ -963,7 +970,8 @@ function ZombieAISystem.step(dt: number)
 			local baseSpeed = (ai and ai.speed) or (ai and ai.balance and ai.balance.baseSpeed) or 8
 			local finalSpeed = baseSpeed
 			local slowMultiplier = EnemySlowSystem.getSlowMultiplier(enemyEntity)
-			finalSpeed = finalSpeed * slowMultiplier
+			local frostMultiplier = EnemyFrostSystem.getFrostMovementMultiplier(enemyEntity)
+			finalSpeed = finalSpeed * math.min(slowMultiplier, frostMultiplier)
 			
 			-- Base direction towards player
 			local baseDirectionX = dx / distance

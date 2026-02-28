@@ -6,6 +6,7 @@ return {
 	-- Core Stats
 	BaseDamage = 12,  -- Base damage at level 1 before ability coefficients
 	BaseMaxHealth = 100,  -- Starting max health
+	BaseArmor = 0,  -- Starting armor (RoR2-style additive armor points)
 	BaseWalkSpeed = 24,  -- Base movement speed
 	BasePickupRange = 20.0,  -- Collection radius for both exp orbs and powerups
 

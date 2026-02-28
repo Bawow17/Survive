@@ -13,6 +13,7 @@ return {
 	-- RoR2-like baseline (Lemurian/Beetle-range):
 	baseHealth = 95,
 	baseDamage = 14,
+	baseArmor = 0,
 	baseSpeed = 11,
 	
 	-- AI behavior

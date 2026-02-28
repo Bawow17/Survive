@@ -32,11 +32,28 @@ local function replicateAbilityModelForPlayer(ability: any)
 
 	local modelPath = ability.balance and ability.balance.modelPath or nil
 	if typeof(modelPath) == "string" and modelPath ~= "" then
-		local serverPath: string? = nil
 		if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
-			serverPath = modelPath:sub(#"ReplicatedStorage." + 1)
-		elseif modelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
-			serverPath = modelPath:sub(#"ServerStorage." + 1)
+			local current: Instance? = game
+			for _, partName in ipairs(string.split(modelPath, ".")) do
+				if not current then
+					break
+				end
+				current = current:FindFirstChild(partName)
+			end
+			if current and current:IsA("Model") then
+				return
+			end
+		end
+
+		local sourcePath = ability.balance and ability.balance.replicationSourcePath or nil
+		if typeof(sourcePath) ~= "string" or sourcePath == "" then
+			sourcePath = modelPath
+		end
+		local serverPath: string? = nil
+		if sourcePath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
+			serverPath = sourcePath:sub(#"ReplicatedStorage." + 1)
+		elseif sourcePath:sub(1, #"ServerStorage.") == "ServerStorage." then
+			serverPath = sourcePath:sub(#"ServerStorage." + 1)
 		end
 
 		if serverPath then
@@ -80,6 +97,7 @@ local DeathSystem = require(game.ServerScriptService.ECS.Systems.DeathSystem)
 local DeathBodyFadeSystem = require(game.ServerScriptService.ECS.Systems.DeathBodyFadeSystem)
 local KnockbackSystem = require(game.ServerScriptService.ECS.Systems.KnockbackSystem)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
+local EnemyFrostSystem = require(game.ServerScriptService.ECS.Systems.EnemyFrostSystem)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local GlobalBalance = require(game.ServerScriptService.Balance.GlobalBalance)
 local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
@@ -125,7 +143,6 @@ local StatusEffectSystem = require(game.ServerScriptService.ECS.Systems.StatusEf
 local OverhealSystem = require(game.ServerScriptService.ECS.Systems.OverhealSystem)
 local BuffSystem = require(game.ServerScriptService.ECS.Systems.BuffSystem)
 local HealthRegenSystem = require(game.ServerScriptService.ECS.Systems.HealthRegenSystem)
-local MagnetPullSystem = require(game.ServerScriptService.ECS.Systems.MagnetPullSystem)
 
 -- Mobility System
 local MobilitySystem = require(game.ServerScriptService.ECS.Systems.MobilitySystem)
@@ -682,7 +699,6 @@ function ECSWorldService.Initialize()
 	
 	-- Initialize Health Regen system
 	HealthRegenSystem.init(world, Components, DirtyService)
-	MagnetPullSystem.init(world, Components, DirtyService)
 	DamageSystem.setOverhealSystem(OverhealSystem)
 	
 	-- Initialize EXP/Leveling systems
@@ -708,12 +724,19 @@ function ECSWorldService.Initialize()
 	
 	-- Initialize combat systems
 	DamageSystem.init(world, Components, DirtyService)
-	TemporalStasisSystem.init(world, Components, DirtyService, {
+	EnemyFrostSystem.init(world, Components, DirtyService, {
 		DamageSystem = DamageSystem,
 	})
+	TemporalStasisSystem.init(world, Components, DirtyService, {
+		DamageSystem = DamageSystem,
+		EnemyFrostSystem = EnemyFrostSystem,
+	})
 	TemporalStasisSystem.setDamageSystem(DamageSystem)
+	TemporalStasisSystem.setEnemyFrostSystem(EnemyFrostSystem)
+	EnemyFrostSystem.setDamageSystem(DamageSystem)
 	DamageSystem.setUltimateSystem(UltimateSystem)
 	DamageSystem.setTemporalStasisSystem(TemporalStasisSystem)
+	DamageSystem.setEnemyFrostSystem(EnemyFrostSystem)
 	UltimateSystem.setTemporalStasisSystem(TemporalStasisSystem)
 	DamageSystem.setEnemyExpDropSystem(EnemyExpDropSystem)  -- Set reference for enemy death drops
 	DamageSystem.setStatusEffectSystem(StatusEffectSystem)  -- Set reference for invincibility checks
@@ -869,6 +892,7 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 		* (EnemyBalance.DamageMultiplier or 1)
 		* scalingDamage
 	local baseSpeed = enemyConfig.baseSpeed * scalingSpeed
+	local baseArmor = enemyConfig.baseArmor or 0
 
 	local visualScale = (scaling and scaling.visualScale) or 1.0
 	local enemyTier = (scaling and scaling.tier) or "Normal"
@@ -897,6 +921,7 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 	setComponent(entity, Visual, { modelPath = visualPath, visible = true, scale = visualScale }, "Visual")
 	setComponent(entity, Target, { id = owner }, "Target")
 	setComponent(entity, Components.EnemyTier, { tier = enemyTier, scale = visualScale }, "EnemyTier")
+	setComponent(entity, Components.EnemyArmor, { current = baseArmor }, "EnemyArmor")
 	local collisionRadius = 2.5
 	local enemyHitbox = ModelReplicationService.getEnemyHitbox(enemyType or "Zombie")
 	if not enemyHitbox then
@@ -1299,7 +1324,7 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		regenDelayMultiplier = 1.0,
 		critChance = 0,
 		critDamage = 0,
-		armorReduction = 0,
+		armor = 0,
 		lifesteal = 0,
 		luck = 0,
 		powerupChance = 0,
@@ -1607,6 +1632,10 @@ local function stepWorld(dt: number)
 	EnemySlowSystem.step(dt)
 	debug.profileend()
 
+	debug.profilebegin("EnemyFrost")
+	EnemyFrostSystem.step(dt)
+	debug.profileend()
+
 	debug.profilebegin("ZombieAI")
 	zombieAIAccumulator += dt
 	if zombieAIAccumulator >= ZOMBIE_AI_INTERVAL then
@@ -1743,12 +1772,7 @@ local function stepWorld(dt: number)
 	end
 	debug.profileend()
 
-	-- Magnet pull system (before movement)
-	debug.profilebegin("MagnetPull")
-	MagnetPullSystem.step(dt)
-	debug.profileend()
-
-	-- Core simulation systems (after homing/magnet so movement uses updated velocities)
+	-- Core simulation systems
 	debug.profilebegin("Movement")
 	MovementSystem.step(dt)
 	debug.profileend()

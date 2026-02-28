@@ -12,6 +12,7 @@ local world: any
 local Components: any
 local DirtyService: any
 local DamageSystemRef: any
+local EnemyFrostSystemRef: any
 
 local Position: any
 local EntityType: any
@@ -21,6 +22,9 @@ local Knockback: any
 local DeathAnimation: any
 local EnemySlow: any
 local EnemyFrostbite: any
+local EnemyLesserFrost: any
+local EnemyGreaterFrost: any
+local EnemyFreeze: any
 local EnemyTimeStopped: any
 
 local enemyQuery: any
@@ -61,6 +65,7 @@ type DeferredSortPacket = {
 
 type ActiveSession = {
 	sessionId: number,
+	casterEntity: number?,
 	startTime: number,
 	endTime: number,
 	fields: {TimeStopField},
@@ -254,6 +259,34 @@ local function shiftEnemyTimedState(enemyEntity: number, frozenDuration: number)
 		end
 	end
 
+	if EnemyLesserFrost then
+		local lesserFrost = world:get(enemyEntity, EnemyLesserFrost)
+		if lesserFrost and typeof(lesserFrost) == "table" then
+			local updated = table.clone(lesserFrost)
+			if typeof(updated.startTime) == "number" then
+				updated.startTime += frozenDuration
+			end
+			if typeof(updated.endTime) == "number" then
+				updated.endTime += frozenDuration
+			end
+			DirtyService.setIfChanged(world, enemyEntity, EnemyLesserFrost, updated, "EnemyLesserFrost")
+		end
+	end
+
+	if EnemyFreeze then
+		local freezeData = world:get(enemyEntity, EnemyFreeze)
+		if freezeData and typeof(freezeData) == "table" and freezeData.pauseDuringTimeStop == true then
+			local updated = table.clone(freezeData)
+			if typeof(updated.startTime) == "number" then
+				updated.startTime += frozenDuration
+			end
+			if typeof(updated.endTime) == "number" then
+				updated.endTime += frozenDuration
+			end
+			DirtyService.setIfChanged(world, enemyEntity, EnemyFreeze, updated, "EnemyFreeze")
+		end
+	end
+
 	if Knockback then
 		local knockback = world:get(enemyEntity, Knockback)
 		if knockback and typeof(knockback) == "table" and typeof(knockback.endTime) == "number" then
@@ -278,6 +311,11 @@ local function freezeEnemy(enemyEntity: number, now: number, sessionId: number)
 			startedAt = now,
 			active = true,
 		}, "EnemyTimeStopped")
+	end
+	if EnemyFrostSystemRef and EnemyFrostSystemRef.applyGreaterFrost then
+		local session = activeSession
+		local casterEntity = session and session.casterEntity or nil
+		EnemyFrostSystemRef.applyGreaterFrost(enemyEntity, casterEntity, 1, 10.0)
 	end
 end
 
@@ -306,7 +344,16 @@ local function applyQueuedSideEffect(targetEntity: number, effect: any)
 		return
 	end
 	local kind = effect.kind
-	if kind == "frostbite" then
+	if kind == "lesserFrost" then
+		if EnemyFrostSystemRef and EnemyFrostSystemRef.applyLesserFrost then
+			EnemyFrostSystemRef.applyLesserFrost(
+				targetEntity,
+				effect.sourceEntity,
+				math.max(math.floor((effect.stacks or 0) + 0.0001), 0),
+				math.max(effect.duration or 0, 0)
+			)
+		end
+	elseif kind == "frostbite" then
 		if DamageSystemRef and DamageSystemRef.applyEnemyFrostbite then
 			DamageSystemRef.applyEnemyFrostbite(
 				targetEntity,
@@ -581,9 +628,13 @@ function TemporalStasisSystem.init(worldRef: any, components: any, dirtyService:
 	DeathAnimation = Components.DeathAnimation
 	EnemySlow = Components.EnemySlow
 	EnemyFrostbite = Components.EnemyFrostbite
+	EnemyLesserFrost = Components.EnemyLesserFrost
+	EnemyGreaterFrost = Components.EnemyGreaterFrost
+	EnemyFreeze = Components.EnemyFreeze
 	EnemyTimeStopped = Components.EnemyTimeStopped
 
 	DamageSystemRef = services and services.DamageSystem or DamageSystemRef
+	EnemyFrostSystemRef = services and services.EnemyFrostSystem or EnemyFrostSystemRef
 
 	enemyQuery = world:query(EntityType, Position):cached()
 
@@ -594,6 +645,10 @@ end
 
 function TemporalStasisSystem.setDamageSystem(damageSystem: any)
 	DamageSystemRef = damageSystem
+end
+
+function TemporalStasisSystem.setEnemyFrostSystem(enemyFrostSystem: any)
+	EnemyFrostSystemRef = enemyFrostSystem
 end
 
 function TemporalStasisSystem.isActive(): boolean
@@ -725,6 +780,7 @@ function TemporalStasisSystem.beginField(
 		sessionIdCounter += 1
 		activeSession = {
 			sessionId = sessionIdCounter,
+			casterEntity = casterEntity,
 			startTime = fieldStart,
 			endTime = fieldEnd,
 			fields = {},

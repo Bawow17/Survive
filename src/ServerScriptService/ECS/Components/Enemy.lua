@@ -54,7 +54,19 @@ EnemyComponents.EnemyTier = world:component()
 -- EnemyFrostbite component - Tracks Frostbite status stacks and expiry
 EnemyComponents.EnemyFrostbite = world:component()
 
+-- EnemyLesserFrost component - Tracks Lesser Frost stacks and expiry
+EnemyComponents.EnemyLesserFrost = world:component()
+
+-- EnemyGreaterFrost component - Tracks Greater Frost stacks, expiry, and delayed burst
+EnemyComponents.EnemyGreaterFrost = world:component()
+
+-- EnemyFreeze component - Shared true-freeze state used by Lesser/Greater Frost
+EnemyComponents.EnemyFreeze = world:component()
+
 -- EnemyTimeStopped component - Tracks active Tempus Gelidum freeze state
 EnemyComponents.EnemyTimeStopped = world:component()
+
+-- EnemyArmor component - Tracks additive armor points used by DamageSystem
+EnemyComponents.EnemyArmor = world:component()
 
 return EnemyComponents

@@ -7,6 +7,20 @@ local AbilityRegistry = {}
 local abilitiesFolder = script.Parent
 local registeredAbilities: {[string]: any} = {}
 
+local function findModelByPath(modelPath: string): Model?
+	local current: Instance? = game
+	for _, partName in ipairs(string.split(modelPath, ".")) do
+		if not current then
+			return nil
+		end
+		current = current:FindFirstChild(partName)
+	end
+	if current and current:IsA("Model") then
+		return current
+	end
+	return nil
+end
+
 local function replicateAbilityModelForGrant(modelReplicationService: any, abilityId: string, abilityBalance: any)
 	if not modelReplicationService then
 		return
@@ -14,11 +28,19 @@ local function replicateAbilityModelForGrant(modelReplicationService: any, abili
 
 	local modelPath = abilityBalance and abilityBalance.modelPath or nil
 	if typeof(modelPath) == "string" and modelPath ~= "" then
+		if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." and findModelByPath(modelPath) then
+			return
+		end
+
+		local sourcePath = abilityBalance and abilityBalance.replicationSourcePath or nil
+		if typeof(sourcePath) ~= "string" or sourcePath == "" then
+			sourcePath = modelPath
+		end
 		local serverPath: string? = nil
-		if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
-			serverPath = modelPath:sub(#"ReplicatedStorage." + 1)
-		elseif modelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
-			serverPath = modelPath:sub(#"ServerStorage." + 1)
+		if sourcePath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
+			serverPath = sourcePath:sub(#"ReplicatedStorage." + 1)
+		elseif sourcePath:sub(1, #"ServerStorage.") == "ServerStorage." then
+			serverPath = sourcePath:sub(#"ServerStorage." + 1)
 		end
 
 		if serverPath then
@@ -114,6 +136,9 @@ local function discoverAbilities()
 		
 		-- Skip template folders
 		if child.Name:sub(1, 1) == "_" then
+			continue
+		end
+		if #child:GetChildren() == 0 then
 			continue
 		end
 		

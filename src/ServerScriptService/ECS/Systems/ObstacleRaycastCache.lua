@@ -44,19 +44,6 @@ local function rebuildCache()
 		end
 	end
 
-	local powerupsFolder = Workspace:FindFirstChild("Powerups")
-	if powerupsFolder then
-		for _, powerupModel in pairs(powerupsFolder:GetChildren()) do
-			if powerupModel:IsA("Model") then
-				for _, part in pairs(powerupModel:GetDescendants()) do
-					if part:IsA("BasePart") then
-						table.insert(exclusionCache, part)
-					end
-				end
-			end
-		end
-	end
-
 	local projectilesFolder = Workspace:FindFirstChild("Projectiles")
 	if projectilesFolder then
 		for _, projectileModel in pairs(projectilesFolder:GetChildren()) do

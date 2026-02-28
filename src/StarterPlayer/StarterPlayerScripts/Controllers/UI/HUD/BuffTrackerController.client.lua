@@ -1,6 +1,5 @@
 --!strict
--- BuffTrackerController - Displays active buff durations in the bottom-right HUD
--- Shows: Nuke, Magnet, Health, Invincibility, Cloak, ArcaneRune
+-- BuffTrackerController - Displays active buff durations in the bottom-right HUD.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -45,9 +44,6 @@ type BuffRow = {
 	startedAt: number,
 	buffId: string,
 	displayName: string,
-	isHealthPopup: boolean,
-	healthPercent: number?,
-	overhealPercent: number?,
 }
 
 local buffRows: {[string]: BuffRow} = {}
@@ -63,35 +59,10 @@ local function formatSeconds(seconds: number): string
 end
 
 local function updateRowDisplay(row: BuffRow)
-	-- Special display for Health powerup
-	if row.isHealthPopup then
-		local healthText = ""
-		if row.healthPercent and row.healthPercent > 0 then
-			healthText = string.format("+%d%% Health", row.healthPercent)
-		end
-		if row.overhealPercent and row.overhealPercent > 0 then
-			if healthText ~= "" then
-				healthText = healthText .. ", "
-			end
-			healthText = healthText .. string.format("+%d%% Overheal", row.overhealPercent)
-		end
-		if healthText == "" then
-			healthText = "+45% Health"  -- Fallback
-		end
-		row.buffLabel.Text = healthText
-		row.timeLabel.Text = ""  -- No time display for health
-		
-		-- Expand buffLabel to full width for Health popup (no time display)
-		row.buffLabel.Size = UDim2.new(0.92, 0, 0.8, 0)  -- Use full width
-		row.timeLabel.Visible = false
-	else
-		row.buffLabel.Text = row.displayName
-		row.timeLabel.Text = formatSeconds(math.max(row.remaining, 0))
-		
-		-- Normal width for other buffs (with time display)
-		row.buffLabel.Size = UDim2.new(0.7, 0, 0.8, 0)
-		row.timeLabel.Visible = true
-	end
+	row.buffLabel.Text = row.displayName
+	row.timeLabel.Text = formatSeconds(math.max(row.remaining, 0))
+	row.buffLabel.Size = UDim2.new(0.7, 0, 0.8, 0)
+	row.timeLabel.Visible = true
 
 	-- Keep constant transparency until 0.5s remaining, then fade out
 	local fadeAlpha = 1
@@ -109,7 +80,7 @@ local function updateRowDisplay(row: BuffRow)
 	row.timeLabel.TextTransparency = 1 - fadeAlpha
 end
 
-local function createRow(buffId: string, displayName: string, duration: number, healthPercent: number?, overhealPercent: number?): BuffRow
+local function createRow(buffId: string, displayName: string, duration: number): BuffRow
 	-- Clone the template frame
 	local frame = templateFrame:Clone() :: Frame
 	frame.Name = buffId .. "Buff"
@@ -126,8 +97,6 @@ local function createRow(buffId: string, displayName: string, duration: number, 
 	buffLabel.Text = displayName
 	timeLabel.Text = "0.0"
 
-	local isHealthPopup = buffId == "Health" and (healthPercent ~= nil or overhealPercent ~= nil)
-
 	local row: BuffRow = {
 		frame = frame,
 		buffLabel = buffLabel,
@@ -137,9 +106,6 @@ local function createRow(buffId: string, displayName: string, duration: number, 
 		startedAt = tick(),
 		buffId = buffId,
 		displayName = displayName,
-		isHealthPopup = isHealthPopup,
-		healthPercent = healthPercent,
-		overhealPercent = overhealPercent,
 	}
 
 	buffRows[buffId] = row
@@ -165,9 +131,6 @@ buffDurationRemote.OnClientEvent:Connect(function(data: any)
 	local buffId = data.buffId
 	local displayName = data.displayName or buffId
 	local duration = data.duration or 0
-	local healthPercent = data.healthPercent
-	local overhealPercent = data.overhealPercent
-	
 	-- Remove old row if it exists
 	if buffRows[buffId] then
 		removeRow(buffId)
@@ -179,7 +142,7 @@ buffDurationRemote.OnClientEvent:Connect(function(data: any)
 	end
 	
 	-- Create new buff row
-	createRow(buffId, displayName, duration, healthPercent, overhealPercent)
+	createRow(buffId, displayName, duration)
 end)
 
 -- Countdown and cleanup logic

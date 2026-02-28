@@ -102,7 +102,6 @@ local NIL_HELPER_LOG_INTERVAL = 2
 
 local AOI_TRACKED_TYPES = {
 	Enemy = true,
-	Powerup = true,
 	AfterimageClone = true,
 }
 
@@ -144,7 +143,6 @@ local shareableComponents = {
 	-- Visual = true,  -- REMOVED: Visual can change (red orb teleportation, scale upgrades) - must be sent per-entity
 	-- ItemData = true,  -- REMOVED: ItemData should NOT be shared (causes color bleeding due to catalog corruption)
 	AbilityData = true,
-	PowerupData = true,  -- Powerup data is static per type
 }
 
 -- Immutable components that can be passed by reference (no cloning needed)
@@ -168,7 +166,6 @@ local initialComponents = {
 	Visual = true,
 	ItemData = true,
 	ProjectileData = true,
-	PowerupData = true,
 	FacingDirection = true,
 	Health = true,
 	Target = true,
@@ -183,8 +180,12 @@ local initialComponents = {
 	MobilityCooldown = true,
 	SessionStats = true,
 	PassiveEffects = true,  -- Need for mobility multipliers on client
-	BuffState = true,  -- Needed for powerup buffs (ArcaneRune, etc.)
+	BuffState = true,
 	EnemyTier = true,
+	EnemyFrostbite = true,
+	EnemyLesserFrost = true,
+	EnemyGreaterFrost = true,
+	EnemyFreeze = true,
 	EnemySlow = true,
 	EnemyTimeStopped = true,
 }
@@ -925,19 +926,6 @@ function shouldIncludeEntityForPlayer(entity: number, player: Player?)
 		return false
 	end
 	
-	-- MULTIPLAYER: Per-player powerups (Health only)
-	if entityType.type == "Powerup" then
-		local powerupData = world:get(entity, componentLookup.PowerupData)
-		if powerupData and powerupData.ownerId then
-			-- Per-player powerup (Health): only send to owner
-			if not player then return false end
-			local ownerPlayer = getPlayerFromEntity(powerupData.ownerId)
-			return ownerPlayer == player
-		end
-		-- No owner = global powerup, visible to all
-		return true
-	end
-	
 	-- MULTIPLAYER: Player entities (per-player components like MobilityData, PassiveEffects)
 	if entityType.type == "Player" then
 		if not player then return false end
@@ -1162,15 +1150,18 @@ function SyncSystem.init(worldRef: any, components: any, dirtyService: any, remo
 		Knockback = Components.Knockback,
 		DeathAnimation = Components.DeathAnimation,
 		SessionStats = Components.SessionStats,
-		PowerupData = Components.PowerupData,  -- Has ownerId for per-player Health powerups
 		Overheal = Components.Overheal,
 		BuffState = Components.BuffState,
-		MagnetPull = Components.MagnetPull,
+		OrbSeek = Components.OrbSeek,
 		AbilityDamageStats = Components.AbilityDamageStats,
 		Homing = Components.Homing,  -- Homing projectile tracking data
 		MobilityData = Components.MobilityData,  -- Equipped mobility ability
 		MobilityCooldown = Components.MobilityCooldown,  -- Mobility cooldown tracking
 		PassiveEffects = Components.PassiveEffects,  -- Passive multipliers (for mobility)
+		EnemyFrostbite = Components.EnemyFrostbite,
+		EnemyLesserFrost = Components.EnemyLesserFrost,
+		EnemyGreaterFrost = Components.EnemyGreaterFrost,
+		EnemyFreeze = Components.EnemyFreeze,
 		EnemySlow = Components.EnemySlow,
 		EnemyTimeStopped = Components.EnemyTimeStopped,
 		EnemyTier = Components.EnemyTier,

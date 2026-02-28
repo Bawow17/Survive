@@ -1,39 +1,42 @@
 --!strict
 -- Ice Shard Ability Configuration (Unified)
--- Combines gameplay balance, animation settings, and asset IDs
+-- Starting manual-cast ice shard ability.
 
 return {
 	-- Display name (shown in UI)
 	Name = "Ice Shard",
-	
+
 	-- UI color (shown in upgrade selection)
-	color = Color3.fromRGB(100, 200, 255), -- Light blue
-	
+	color = Color3.fromRGB(100, 200, 255),
+
 	-- Progression settings
-	StartWith = false, -- Player starts with this ability
-	Unlockable = true, -- Can appear in random upgrade options
-	
-	-- Model path in ReplicatedStorage
-	modelPath = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard.IceShard",
-	
+	StartWith = true,
+	Unlockable = false,
+
+	-- Client-visible projectile path; source model is explicitly cloned from the moved asset.
+	modelPath = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel",
+	replicationSourcePath = "ServerStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel",
+
 	-- Core stats
-	damage = 150,
-	projectileSpeed = 175, -- studs per second
-	penetration = 3, -- amount of enemies it can hit before destroying (0 = destroy on first hit)
-	duration = 0.7, -- lifetime of the projectile in seconds
-	cooldown = 1.6, -- cooldown in seconds between casts
-	
+	damageCoefficient = 8.0,
+	procCoefficient = 1.0,
+	projectileSpeed = 214.5,
+	penetration = 0,
+	duration = 15,
+	cooldown = 3.0,
+	windup = 0.11,
+
 	-- Targeting configuration
 	-- 0 = random direction
 	-- 1 = random X/Z but track Y
 	-- 2 = direct targeting with prediction
-	-- 3 = homing (fallback to 2)
-	targetingMode = 3,
-	targetingRange = 10000, -- maximum range for targeting enemies
-	targetingAngle = math.rad(45), -- maximum angle deviation for targeting
-	StayHorizontal = true, -- Keep projectiles horizontal when player is grounded
-	AlwaysStayHorizontal = false, -- Lock Y-axis to spawn height (works even when airborne, overrides StayHorizontal)
-	StickToPlayer = false, -- Projectile follows player movement in all axes X/Y/Z (overrides AlwaysStayHorizontal)
+	-- 3 = homing
+	targetingMode = 2,
+	targetingRange = 10000,
+	targetingAngle = math.rad(45),
+	StayHorizontal = true,
+	AlwaysStayHorizontal = false,
+	StickToPlayer = false,
 
 	-- Upgrade stat whitelist
 	upgradeStatWhitelist = {
@@ -42,35 +45,41 @@ return {
 		cooldownReduction = true,
 		projectileCount = true,
 	},
-	
-	-- Homing configuration (only used when targetingMode = 3)
-	homingStrength = 100, -- Turn speed in degrees per second
-	homingDistance = 300, -- Distance for target acquisition in studs
-	homingMaxAngle = 180, -- Max turn angle in degrees (prevents 180° reversals)
-	
+
 	-- Spawn configuration
-	spawnOffset = Vector3.new(0, 0, 0), -- offset from player position
-	scale = 1, -- visual scale multiplier
-	
+	spawnOffset = Vector3.new(0, 0, 0),
+	scale = 1,
+
 	-- Multi-shot configuration
-	projectileCount = 1, -- amount of projectiles shot in one cast (after one another)
-	shotAmount = 1, -- amount of projectiles shot PER projectile (shotgun spread)
-	pulseInterval = 0.08, -- interval between each projectile count
-	spreadAngleEven = math.rad(15), -- spread angle when shotAmount is even
-	spreadAngleOdd = math.rad(30), -- spread angle when shotAmount is odd
-	
-	-- Animation configuration (Server-Only - Asset IDs)
-	-- Fill in animation IDs after creating animations
+	projectileCount = 1,
+	shotAmount = 1,
+	pulseInterval = 0.1,
+	spreadAngleEven = math.rad(15),
+	spreadAngleOdd = math.rad(30),
+
+	-- Ice Shard behavior configuration
+	splitCount = 6,
+	splitDamageMultiplier = 1.25,
+	splitProcCoefficient = 1.0,
+	splitScaleMultiplier = 0.55,
+	splitMaxSpreadDeg = 70,
+	lesserFrostStacksPerHit = 1,
+	lesserFrostDuration = 7.0,
+
+	-- Animation configuration (server-authoritative metadata)
 	animations = {
+		-- Optional server-side source path used to resolve animation IDs automatically.
+		-- Supports Animation instances or containers with Animation descendants.
+		sourcePath = "ServerStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShard",
 		animationIds = {
-			first = "",   -- Initial cast animation (leave empty until created)
-			loop = "",    -- Looping animation (alternates with last)
-			last = "",    -- Looping animation (alternates with loop)
+			first = "",
+			loop = "",
+			last = "",
 		},
-		loopFrame = 27,  -- Frame at which to stop and restart for loops (adjust based on your animation)
-		totalFrames = 50,  -- Total frames at 60fps (adjust based on your animation)
-		duration = 0.833,  -- Duration in seconds (totalFrames/60)
-		animationPriority = Enum.AnimationPriority.Action,  -- Overrides walking
-		anticipation = 0.2,  -- Delay before first projectile spawns (animation wind-up time)
+		loopFrame = 27,
+		totalFrames = 50,
+		duration = 0.833,
+		animationPriority = Enum.AnimationPriority.Action,
+		anticipation = 0.11,
 	},
 }

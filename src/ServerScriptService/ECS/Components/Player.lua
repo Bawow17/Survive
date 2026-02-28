@@ -38,9 +38,6 @@ PlayerComponents.Overheal = world:component()
 -- BuffState component - Stacking temporary buffs (damage, cooldown)
 PlayerComponents.BuffState = world:component()
 
--- MagnetSession component - Tracks active magnet sessions for auto-tagging new orbs
-PlayerComponents.MagnetSession = world:component()
-
 -- AbilityDamageStats component - Tracks total damage dealt by each ability (session-persistent)
 PlayerComponents.AbilityDamageStats = world:component()
 

@@ -3,8 +3,6 @@
 -- Overheal is damaged before actual health and decays at a configurable rate
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local PowerupBalance = require(game.ServerScriptService.Balance.PowerupBalance)
-
 local OverhealSystem = {}
 
 local world: any
@@ -14,6 +12,8 @@ local DirtyService: any
 local Overheal: any
 local PlayerStats: any
 local Health: any
+
+local DEFAULT_OVERHEAL_DECAY_RATE = 1.0
 
 -- Remote for notifying clients of overheal changes
 local OverhealUpdate: RemoteEvent
@@ -80,7 +80,7 @@ function OverhealSystem.grantOverheal(playerEntity: number, amount: number)
 	local overhealData = {
 		current = newAmount,
 		max = newAmount,
-		decayRate = PowerupBalance.OverhealDecayRate,
+		decayRate = DEFAULT_OVERHEAL_DECAY_RATE,
 	}
 	
 	-- Use world:set directly to ensure component is set immediately
@@ -157,7 +157,7 @@ function OverhealSystem.step(dt: number)
 		end
 		
 		-- Decay overheal
-		local decayAmount = (overheal.decayRate or PowerupBalance.OverhealDecayRate) * dt
+		local decayAmount = (overheal.decayRate or DEFAULT_OVERHEAL_DECAY_RATE) * dt
 		overheal.current = math.max(0, overheal.current - decayAmount)
 		
 		if overheal.current <= 0.1 then

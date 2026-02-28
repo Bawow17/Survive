@@ -234,41 +234,6 @@ function AbilitySystemBase.getAbilityStats(playerEntity: number, abilityId: stri
 			stats.cooldown = stats.cooldown * buffCooldownMult
 		end
 		
-		-- Check if ArcaneRune buff is active for additional multipliers
-		local buffState = world:get(playerEntity, Components.BuffState)
-		if buffState and buffState.buffs and buffState.buffs["ArcaneRune"] then
-			local arcaneRuneBuff = buffState.buffs["ArcaneRune"]
-			
-			-- Apply homing multiplier from buff config
-			local homingMult = arcaneRuneBuff.homingMultiplier or 1.0
-			if stats.homingStrength then
-				stats.homingStrength = stats.homingStrength * homingMult
-			end
-			if stats.homingDistance then
-				stats.homingDistance = stats.homingDistance * homingMult
-			end
-			if stats.homingMaxAngle then
-				stats.homingMaxAngle = stats.homingMaxAngle * homingMult
-			end
-			
-			-- Apply penetration multiplier from buff config
-			local penetrationMult = arcaneRuneBuff.penetrationMultiplier or 1.0
-			if stats.penetration then
-				stats.penetration = math.max(0, math.floor(stats.penetration * penetrationMult + 0.0001))
-			end
-			
-			-- Apply duration multiplier from buff config (stacks with passive duration multiplier)
-			local durationMult = arcaneRuneBuff.durationMultiplier or 1.0
-			if stats.duration then
-				stats.duration = stats.duration * durationMult
-			end
-			
-			-- Apply projectile speed multiplier from buff config
-			local projectileSpeedMult = arcaneRuneBuff.projectileSpeedMultiplier or 1.0
-			if stats.projectileSpeed then
-				stats.projectileSpeed = stats.projectileSpeed * projectileSpeedMult
-			end
-		end
 	end
 	
 	return stats
@@ -473,16 +438,24 @@ local function findModelByPath(modelPath: string): Model?
 	return nil
 end
 
-local function replicateAbilityModelFromPath(abilityId: string, modelPath: any): boolean
+local function replicateAbilityModelFromPath(abilityId: string, modelPath: any, replicationSourcePath: any): boolean
 	if typeof(modelPath) ~= "string" or modelPath == "" then
 		return ModelReplicationService.replicateAbility(abilityId)
 	end
 
+	if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." and findModelByPath(modelPath) then
+		return true
+	end
+
+	local sourcePath = modelPath
+	if typeof(replicationSourcePath) == "string" and replicationSourcePath ~= "" then
+		sourcePath = replicationSourcePath
+	end
 	local serverPath = nil
-	if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
-		serverPath = modelPath:sub(#"ReplicatedStorage." + 1)
-	elseif modelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
-		serverPath = modelPath:sub(#"ServerStorage." + 1)
+	if sourcePath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
+		serverPath = sourcePath:sub(#"ReplicatedStorage." + 1)
+	elseif sourcePath:sub(1, #"ServerStorage.") == "ServerStorage." then
+		serverPath = sourcePath:sub(#"ServerStorage." + 1)
 	end
 
 	if serverPath then
@@ -696,7 +669,7 @@ function AbilitySystemBase.createProjectile(
 	
 	-- Ensure model is replicated before creating projectile
 	if balance.modelPath then
-		replicateAbilityModelFromPath(abilityId, balance.modelPath)
+		replicateAbilityModelFromPath(abilityId, balance.modelPath, balance.replicationSourcePath)
 	end
 
 	-- Update collision radius based on actual hitbox size from model
@@ -776,6 +749,11 @@ function AbilitySystemBase.createProjectile(
 		}
 	end
 
+	local projectileModelPath = balance.modelPath
+	if typeof(projectileModelPath) == "string" and projectileModelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
+		projectileModelPath = "ReplicatedStorage." .. projectileModelPath:sub(#"ServerStorage." + 1)
+	end
+
 	local payload = {
 		kind = abilityId,
 		origin = finalSpawnPosition,
@@ -786,7 +764,7 @@ function AbilitySystemBase.createProjectile(
 		lifetime = balance.duration,
 		ownerEntity = ownerEntity,
 		pierce = balance.penetration,
-		modelPath = balance.modelPath,
+		modelPath = projectileModelPath,
 		visualScale = balance.scale or 1,
 		visualColor = balance.attributeColor,
 		homing = homing,

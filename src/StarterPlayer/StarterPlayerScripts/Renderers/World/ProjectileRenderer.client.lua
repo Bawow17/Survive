@@ -38,6 +38,13 @@ local ENEMY_SNAPSHOT_INTERVAL = 0.2
 local DEFAULT_HOMING_STRENGTH = 180
 local HOMING_SNAP_DISTANCE = 8
 local HOMING_POS_BLEND = 0.35
+local ICESHARD_MODEL_PATH_PRIMARY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel"
+local ICESHARD_MODEL_PATH_FALLBACK = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard.IceShard"
+local ICESHARD_ROOT_PRIMARY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard"
+local ICESHARD_ROOT_FALLBACK = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard"
+-- IceShardModel is authored with its local top (+Y) as the forward-facing axis.
+-- Rotate it so its UpVector points along the projectile travel direction.
+local ICESHARD_ROTATION_OFFSET = CFrame.Angles(math.rad(-90), 0, 0)
 local HOMING_DIR_BLEND = 0.5
 local AUTHORITATIVE_TIMEOUT = 0.35
 local EXPLOSION_STEPS = 10
@@ -247,7 +254,84 @@ local function findModelByPath(modelPath: string): Model?
 	if current and current:IsA("Model") then
 		return current
 	end
+	if current then
+		local nestedNamed = current:FindFirstChild("IceShardModel")
+		if nestedNamed and nestedNamed:IsA("Model") then
+			return nestedNamed
+		end
+		nestedNamed = current:FindFirstChild("IceShard")
+		if nestedNamed and nestedNamed:IsA("Model") then
+			return nestedNamed
+		end
+		local directModel = current:FindFirstChildWhichIsA("Model")
+		if directModel then
+			return directModel
+		end
+		local deepModel = current:FindFirstChildWhichIsA("Model", true)
+		if deepModel then
+			return deepModel
+		end
+	end
 	return nil
+end
+
+local function findInstanceByPath(path: string): Instance?
+	local current: Instance? = game
+	for _, partName in ipairs(string.split(path, ".")) do
+		if not current then
+			return nil
+		end
+		if partName == "ReplicatedStorage" then
+			current = ReplicatedStorage
+		else
+			current = current:FindFirstChild(partName)
+		end
+	end
+	return current
+end
+
+local function findFirstModelUnder(root: Instance?): Model?
+	if not root then
+		return nil
+	end
+	if root:IsA("Model") then
+		return root
+	end
+	local exact = root:FindFirstChild("IceShardModel")
+	if exact and exact:IsA("Model") then
+		return exact
+	end
+	exact = root:FindFirstChild("IceShard")
+	if exact and exact:IsA("Model") then
+		return exact
+	end
+	local directModel = root:FindFirstChildWhichIsA("Model")
+	if directModel then
+		return directModel
+	end
+	return root:FindFirstChildWhichIsA("Model", true)
+end
+
+local function findIceShardTemplate(modelPath: string?): Model?
+	if typeof(modelPath) == "string" then
+		local provided = findModelByPath(modelPath)
+		if provided then
+			return provided
+		end
+	end
+	local primary = findModelByPath(ICESHARD_MODEL_PATH_PRIMARY)
+	if primary then
+		return primary
+	end
+	local fallback = findModelByPath(ICESHARD_MODEL_PATH_FALLBACK)
+	if fallback then
+		return fallback
+	end
+	local primaryRoot = findFirstModelUnder(findInstanceByPath(ICESHARD_ROOT_PRIMARY))
+	if primaryRoot then
+		return primaryRoot
+	end
+	return findFirstModelUnder(findInstanceByPath(ICESHARD_ROOT_FALLBACK))
 end
 
 local function isCommonItemModelPath(modelPath: string?): boolean
@@ -377,6 +461,9 @@ local function acquireModel(modelPath: string?): (Model?, BasePart?, {BasePart}?
 	local model = pool and table.remove(pool) or nil
 	if not model then
 		local template = findModelByPath(modelPath)
+		if not template and (modelPath == ICESHARD_MODEL_PATH_PRIMARY or modelPath == ICESHARD_MODEL_PATH_FALLBACK) then
+			template = findIceShardTemplate(modelPath)
+		end
 		if not template then
 			return nil, nil, nil
 		end
@@ -609,6 +696,10 @@ local function applyVisual(record: ProjectileRecord)
 	applyProjectileOpacity(record)
 end
 
+local function usesIceShardRotationOffset(record: ProjectileRecord): boolean
+	return record.kind == "IceShard"
+end
+
 local function updateModelTransform(record: ProjectileRecord, position: Vector3, direction: Vector3)
 	if record.beam and record.beamVisual then
 		return
@@ -621,7 +712,11 @@ local function updateModelTransform(record: ProjectileRecord, position: Vector3,
 		model:PivotTo(CFrame.new(position))
 		return
 	end
-	model:PivotTo(CFrame.lookAt(position, position + direction))
+	local cf = CFrame.lookAt(position, position + direction)
+	if usesIceShardRotationOffset(record) then
+		cf = cf * ICESHARD_ROTATION_OFFSET
+	end
+	model:PivotTo(cf)
 end
 
 local function updateBeamTransform(record: ProjectileRecord, pivot: Vector3, direction: Vector3)
@@ -911,7 +1006,7 @@ local function getOwnerLeftArmGripAttachment(userId: number?): Attachment?
 end
 
 local function resolveInitialVisualSpawnPosition(kind: string, ownerUserId: number?, isSplitChild: boolean, fallback: Vector3): Vector3
-	if kind ~= "IceShardSpecial" then
+	if kind ~= "IceShard" then
 		return fallback
 	end
 	if isSplitChild then

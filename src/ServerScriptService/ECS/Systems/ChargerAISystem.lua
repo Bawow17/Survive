@@ -26,6 +26,7 @@ local StatusEffectSystem
 local GameTimeSystem
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
+local EnemyFrostSystem = require(game.ServerScriptService.ECS.Systems.EnemyFrostSystem)
 
 -- Component references
 local _Position
@@ -38,6 +39,7 @@ local _EntityTypeComponent
 local _Target
 local _PlayerStats
 local _EnemyTimeStopped
+local _EnemyFreeze
 
 -- State constants
 local S_APPROACH = 1
@@ -252,6 +254,7 @@ function ChargerAISystem.init(worldRef: any, components: any, dirtyService: any)
 	_Target = Components.Target
 	_PlayerStats = Components.PlayerStats
 	_EnemyTimeStopped = Components.EnemyTimeStopped
+	_EnemyFreeze = Components.EnemyFreeze
 	
 	-- Create cached queries for performance (JECS best practice)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing
@@ -638,6 +641,11 @@ function ChargerAISystem.step(dt: number)
 			setVelocity(entity, { x = 0, y = 0, z = 0 })
 			continue
 		end
+		local freezeData = _EnemyFreeze and world:get(entity, _EnemyFreeze)
+		if freezeData and (freezeData.endTime or 0) > tick() then
+			setVelocity(entity, { x = 0, y = 0, z = 0 })
+			continue
+		end
 		
 		-- CRITICAL: Check if frozen by pause system
 		if ai.speed == 0 then
@@ -714,7 +722,8 @@ function ChargerAISystem.step(dt: number)
 		end
 		local approachSpeed = baseSpeed
 		local slowMultiplier = EnemySlowSystem.getSlowMultiplier(entity)
-		approachSpeed = approachSpeed * slowMultiplier
+		local frostMultiplier = EnemyFrostSystem.getFrostMovementMultiplier(entity)
+		approachSpeed = approachSpeed * math.min(slowMultiplier, frostMultiplier)
 		
 		-- Apply cooldown speed penalty
 		if chargerState.state == S_COOLDOWN then

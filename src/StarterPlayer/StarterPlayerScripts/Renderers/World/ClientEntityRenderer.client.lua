@@ -44,10 +44,6 @@ local expOrbsFolder: Instance = workspace:FindFirstChild("ExpOrbs") or Instance.
 expOrbsFolder.Name = "ExpOrbs"
 expOrbsFolder.Parent = workspace
 
-local powerupsFolder: Instance = workspace:FindFirstChild("Powerups") or Instance.new("Folder")
-powerupsFolder.Name = "Powerups"
-powerupsFolder.Parent = workspace
-
 local afterimageClonesFolder: Instance = workspace:FindFirstChild("AfterimageClones") or Instance.new("Folder")
 afterimageClonesFolder.Name = "AfterimageClones"
 afterimageClonesFolder.Parent = workspace
@@ -143,15 +139,26 @@ type RenderRecord = {
 	enemyTier: string?,
 	nextVisualInvariantCheck: number?,
 	enemyHealthData: any?,
+	enemyFrostbiteData: any?,
+	enemyLesserFrostData: any?,
+	enemyGreaterFrostData: any?,
+	enemyFreezeData: any?,
 	enemySlowData: any?,
 	enemySlowExpiresAt: number?,
 	enemyHealthBillboard: BillboardGui?,
 	enemyHealthFill: GuiObject?,
+	enemyExecuteRangeBar: GuiObject?,
 	enemyEliteBackground: GuiObject?,
 	enemyStatusContainer: GuiObject?,
-	enemyStatusSlot: GuiObject?,
-	enemyStatusEmojiLabel: TextLabel?,
-	enemyStatusStackLabel: TextLabel?,
+	enemyStatusFrostbiteLabel: ImageLabel?,
+	enemyStatusFrostbiteStackLabel: TextLabel?,
+	enemyStatusLesserFrostLabel: ImageLabel?,
+	enemyStatusLesserFrostStackLabel: TextLabel?,
+	enemyStatusGreaterFrostLabel: ImageLabel?,
+	enemyStatusGreaterFrostStackLabel: TextLabel?,
+	enemyStatusSlowLabel: TextLabel?,
+	enemyStatusTimeStoppedLabel: TextLabel?,
+	enemyFreezeHighlight: Highlight?,
 	enemyTimeStopped: boolean?,
 	stasisPausedAnimations: {[AnimationTrack]: {speed: number, timePosition: number, isPlaying: boolean}}?,
 	stasisPausedVfx: {[Instance]: {enabled: boolean, lifetime: NumberRange?}}?,
@@ -573,6 +580,10 @@ local function resetModelForPool(record: RenderRecord, model: Model)
 	if tierOutline and tierOutline:IsA("Highlight") then
 		tierOutline:Destroy()
 	end
+	local statusFreezeHighlight = model:FindFirstChild("StatusFreezeHighlight")
+	if statusFreezeHighlight and statusFreezeHighlight:IsA("Highlight") then
+		statusFreezeHighlight:Destroy()
+	end
 	local enemyHealthBillboard = model:FindFirstChild("EnemyHealthBillboard")
 	if enemyHealthBillboard and enemyHealthBillboard:IsA("BillboardGui") then
 		enemyHealthBillboard:Destroy()
@@ -746,6 +757,46 @@ do
 		return current
 	end
 
+	local function getEnemyFrostbiteStatusTemplateInstance(): ImageLabel?
+		local current: Instance? = ReplicatedStorage
+		for _, partName in ipairs({"ContentDrawer", "UI", "EnemyHealth", "EnemyHealthExample", "StatusEffects", "FrostbiteStatusEffectImageLabel"}) do
+			if not current then
+				return nil
+			end
+			current = current:FindFirstChild(partName)
+		end
+		if current and current:IsA("ImageLabel") then
+			return current
+		end
+		return nil
+	end
+
+	local function getEnemyStatusTemplateInstance(templateName: string): ImageLabel?
+		local current: Instance? = ReplicatedStorage
+		for _, partName in ipairs({"ContentDrawer", "UI", "EnemyHealth", "EnemyHealthExample", "StatusEffects", templateName}) do
+			if not current then
+				break
+			end
+			current = current:FindFirstChild(partName)
+		end
+		if current and current:IsA("ImageLabel") then
+			return current
+		end
+		return nil
+	end
+
+	local function getEnemyFreezeHighlightTemplateInstance(): Highlight?
+		local greaterTemplate = getEnemyStatusTemplateInstance("GreaterFrostStatusEffectImageLabel")
+		if not greaterTemplate then
+			return nil
+		end
+		local highlight = greaterTemplate:FindFirstChild("Highlight")
+		if highlight and highlight:IsA("Highlight") then
+			return highlight
+		end
+		return nil
+	end
+
 	local function getEnemyUiAdornee(record: RenderRecord): BasePart?
 		local model = record.model
 		if not model then
@@ -778,6 +829,214 @@ do
 		local sizeY = math.floor(math.clamp(38 + extents.Y * 1.6, 44, 70))
 		local offsetY = math.clamp(extents.Y * 0.6 + 1.3, 3.2, 8.5)
 		return UDim2.fromOffset(sizeX, sizeY), Vector3.new(0, offsetY, 0)
+	end
+
+	local ENEMY_STATUS_ICE_TEXT = "❄️"
+	local DEFAULT_ENEMY_STATUS_LABEL_SIZE = UDim2.fromOffset(22, 12)
+
+	local function ensureEnemyStatusLayout(statusContainer: GuiObject)
+		local existingLayout = statusContainer:FindFirstChildOfClass("UIListLayout")
+		if existingLayout and existingLayout:IsA("UIListLayout") then
+			return existingLayout
+		end
+
+		local layout = Instance.new("UIListLayout")
+		layout.Name = "StatusEffectLayout"
+		layout.Parent = statusContainer
+		layout.FillDirection = Enum.FillDirection.Horizontal
+		layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+		layout.VerticalAlignment = Enum.VerticalAlignment.Center
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Padding = UDim.new(0, 3)
+		return layout
+	end
+
+	local function ensureEnemyStatusTextLabel(
+		statusContainer: GuiObject,
+		labelName: string,
+		layoutOrder: number,
+		labelSize: UDim2
+	): TextLabel
+		local existing = statusContainer:FindFirstChild(labelName)
+		if existing and not existing:IsA("TextLabel") then
+			existing:Destroy()
+			existing = nil
+		end
+
+		local label: TextLabel
+		if existing and existing:IsA("TextLabel") then
+			label = existing
+		else
+			label = Instance.new("TextLabel")
+			label.Name = labelName
+			label.Parent = statusContainer
+		end
+
+		label.BackgroundTransparency = 1
+		label.BorderSizePixel = 0
+		label.LayoutOrder = layoutOrder
+		label.Size = labelSize
+		label.Font = Enum.Font.GothamBold
+		label.TextScaled = true
+		label.TextColor3 = Color3.fromRGB(255, 255, 255)
+		label.TextStrokeTransparency = 1
+		label.TextWrapped = false
+		label.TextXAlignment = Enum.TextXAlignment.Center
+		label.TextYAlignment = Enum.TextYAlignment.Center
+		label.Text = ENEMY_STATUS_ICE_TEXT
+		label.Visible = false
+		return label
+	end
+
+	local function ensureEnemyStatusImageLabel(
+		statusContainer: GuiObject,
+		labelName: string,
+		layoutOrder: number,
+		labelSize: UDim2
+	): ImageLabel
+		local existing = statusContainer:FindFirstChild(labelName)
+		if existing and not existing:IsA("ImageLabel") then
+			existing:Destroy()
+			existing = nil
+		end
+
+		local imageLabel: ImageLabel
+		local shouldApplyFallbackStyling = false
+		if existing and existing:IsA("ImageLabel") then
+			imageLabel = existing
+		else
+			local template = getEnemyFrostbiteStatusTemplateInstance()
+			if template then
+				imageLabel = template:Clone()
+			else
+				imageLabel = Instance.new("ImageLabel")
+				shouldApplyFallbackStyling = true
+			end
+			imageLabel.Name = labelName
+			imageLabel.Parent = statusContainer
+		end
+
+		if shouldApplyFallbackStyling then
+			imageLabel.BackgroundTransparency = 1
+			imageLabel.BorderSizePixel = 0
+			imageLabel.Size = labelSize
+		end
+		imageLabel.LayoutOrder = layoutOrder
+		imageLabel.ImageTransparency = 0
+		imageLabel.Visible = false
+		return imageLabel
+	end
+
+	local function ensureEnemyStatusTemplateImageLabel(
+		statusContainer: GuiObject,
+		labelName: string,
+		templateName: string,
+		layoutOrder: number,
+		labelSize: UDim2
+	): ImageLabel?
+		local existing = statusContainer:FindFirstChild(labelName)
+		if existing and not existing:IsA("ImageLabel") then
+			existing:Destroy()
+			existing = nil
+		end
+
+		local imageLabel: ImageLabel?
+		if existing and existing:IsA("ImageLabel") then
+			imageLabel = existing
+		else
+			local template = getEnemyStatusTemplateInstance(templateName)
+			if template then
+				imageLabel = template:Clone()
+				imageLabel.Name = labelName
+				imageLabel.Parent = statusContainer
+			end
+		end
+
+		if not imageLabel then
+			return nil
+		end
+
+		imageLabel.LayoutOrder = layoutOrder
+		imageLabel.ImageTransparency = 0
+		imageLabel.Visible = false
+		return imageLabel
+	end
+
+	local function ensureEnemyStatusStackLabel(statusIcon: GuiObject): TextLabel
+		local placeholderEmoji = statusIcon:FindFirstChild("EmojiText")
+		if placeholderEmoji and placeholderEmoji:IsA("TextLabel") then
+			placeholderEmoji.Visible = false
+		end
+
+		local existing = statusIcon:FindFirstChild("StackCountExample")
+		if existing and not existing:IsA("TextLabel") then
+			existing:Destroy()
+			existing = nil
+		end
+
+		local stackLabel: TextLabel
+		if existing and existing:IsA("TextLabel") then
+			stackLabel = existing
+		else
+			stackLabel = Instance.new("TextLabel")
+			stackLabel.Name = "StackCountExample"
+			stackLabel.Parent = statusIcon
+			stackLabel.BackgroundTransparency = 1
+			stackLabel.BorderSizePixel = 0
+			stackLabel.AnchorPoint = Vector2.new(0, 0)
+			stackLabel.AutomaticSize = Enum.AutomaticSize.None
+			stackLabel.Size = UDim2.fromScale(1, 1)
+			stackLabel.Position = UDim2.fromScale(0, 0)
+			stackLabel.Font = Enum.Font.GothamBold
+			stackLabel.TextScaled = true
+			stackLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+			stackLabel.TextTransparency = 0
+			stackLabel.TextStrokeTransparency = 0.35
+			stackLabel.TextWrapped = false
+			stackLabel.TextXAlignment = Enum.TextXAlignment.Right
+			stackLabel.TextYAlignment = Enum.TextYAlignment.Bottom
+			stackLabel.ZIndex = (statusIcon.ZIndex or 1) + 1
+		end
+
+		stackLabel.Text = ""
+		stackLabel.Visible = false
+		return stackLabel
+	end
+
+	local function ensureEnemyFreezeHighlight(record: RenderRecord): Highlight?
+		local model = record.model
+		if not model or not model.Parent then
+			return nil
+		end
+
+		local existing = model:FindFirstChild("StatusFreezeHighlight")
+		if existing and not existing:IsA("Highlight") then
+			existing:Destroy()
+			existing = nil
+		end
+
+		local highlight: Highlight
+		if existing and existing:IsA("Highlight") then
+			highlight = existing
+		else
+			local template = getEnemyFreezeHighlightTemplateInstance()
+			if template then
+				highlight = template:Clone()
+			else
+				highlight = Instance.new("Highlight")
+				highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+				highlight.FillTransparency = 0.8
+				highlight.OutlineTransparency = 0.15
+				highlight.FillColor = Color3.fromRGB(165, 235, 255)
+				highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+			end
+			highlight.Name = "StatusFreezeHighlight"
+			highlight.Parent = model
+		end
+
+		highlight.Adornee = model
+		highlight.Enabled = false
+		return highlight
 	end
 
 	local function createFallbackEnemyHealthBillboard(): BillboardGui
@@ -843,38 +1102,22 @@ do
 		statusEffects.BackgroundTransparency = 1
 		statusEffects.Size = UDim2.fromOffset(118, 12)
 		statusEffects.Position = UDim2.fromOffset(11, 32)
+		statusEffects.Visible = false
 		statusEffects.Parent = root
 
-		local statusSlot = Instance.new("ImageLabel")
-		statusSlot.Name = "StatusEffectExampleImageLabel"
-		statusSlot.BackgroundTransparency = 1
-		statusSlot.ImageTransparency = 1
-		statusSlot.Size = UDim2.fromOffset(22, 12)
-		statusSlot.Visible = false
-		statusSlot.Parent = statusEffects
-
-		local emojiLabel = Instance.new("TextLabel")
-		emojiLabel.Name = "EmojiText"
-		emojiLabel.BackgroundTransparency = 1
-		emojiLabel.Text = "❄️"
-		emojiLabel.Font = Enum.Font.GothamBold
-		emojiLabel.TextScaled = true
-		emojiLabel.Size = UDim2.fromOffset(12, 12)
-		emojiLabel.Position = UDim2.fromOffset(0, 0)
-		emojiLabel.Parent = statusSlot
-
-		local stackCount = Instance.new("TextLabel")
-		stackCount.Name = "StackCountExample"
-		stackCount.BackgroundTransparency = 1
-		stackCount.Text = ""
-		stackCount.Font = Enum.Font.GothamBold
-		stackCount.TextSize = 11
-		stackCount.TextXAlignment = Enum.TextXAlignment.Right
-		stackCount.TextColor3 = Color3.fromRGB(255, 255, 255)
-		stackCount.Size = UDim2.fromOffset(10, 12)
-		stackCount.Position = UDim2.fromOffset(12, 0)
-		stackCount.Visible = false
-		stackCount.Parent = statusSlot
+		ensureEnemyStatusLayout(statusEffects)
+		local fallbackFrostbiteLabel = ensureEnemyStatusTemplateImageLabel(statusEffects, "FrostbiteStatusEffectImageLabel", "FrostbiteStatusEffectImageLabel", 1, DEFAULT_ENEMY_STATUS_LABEL_SIZE)
+		if fallbackFrostbiteLabel then
+			ensureEnemyStatusStackLabel(fallbackFrostbiteLabel)
+		end
+		local fallbackLesserFrostLabel = ensureEnemyStatusTemplateImageLabel(statusEffects, "LesserFrostStatusEffectImageLabel", "LesserFrostStatusEffectImageLabel", 2, DEFAULT_ENEMY_STATUS_LABEL_SIZE)
+		if fallbackLesserFrostLabel then
+			ensureEnemyStatusStackLabel(fallbackLesserFrostLabel)
+		end
+		local fallbackGreaterFrostLabel = ensureEnemyStatusTemplateImageLabel(statusEffects, "GreaterFrostStatusEffectImageLabel", "GreaterFrostStatusEffectImageLabel", 3, DEFAULT_ENEMY_STATUS_LABEL_SIZE)
+		if fallbackGreaterFrostLabel then
+			ensureEnemyStatusStackLabel(fallbackGreaterFrostLabel)
+		end
 
 		return billboard
 	end
@@ -886,11 +1129,17 @@ do
 		end
 		record.enemyHealthBillboard = nil
 		record.enemyHealthFill = nil
+		record.enemyExecuteRangeBar = nil
 		record.enemyEliteBackground = nil
 		record.enemyStatusContainer = nil
-		record.enemyStatusSlot = nil
-		record.enemyStatusEmojiLabel = nil
-		record.enemyStatusStackLabel = nil
+		record.enemyStatusFrostbiteLabel = nil
+		record.enemyStatusFrostbiteStackLabel = nil
+		record.enemyStatusLesserFrostLabel = nil
+		record.enemyStatusLesserFrostStackLabel = nil
+		record.enemyStatusGreaterFrostLabel = nil
+		record.enemyStatusGreaterFrostStackLabel = nil
+		record.enemyStatusSlowLabel = nil
+		record.enemyStatusTimeStoppedLabel = nil
 	end
 
 	local function ensureEnemyHealthbar(record: RenderRecord)
@@ -956,6 +1205,13 @@ do
 		if not fillInstance then
 			fillInstance = billboard:FindFirstChild("Fill", true)
 		end
+		local executeRangeInstance = findInstanceByPath(billboard, {"Highlight", "Border", "Health", "ExecuteRange"})
+		if not executeRangeInstance then
+			executeRangeInstance = billboard:FindFirstChild("ExecuteRange", true)
+		end
+		if executeRangeInstance and executeRangeInstance:IsA("GuiObject") then
+			executeRangeInstance.Visible = false
+		end
 
 		local eliteInstance = findInstanceByPath(billboard, {"EliteType", "ImageLabel"})
 		if not eliteInstance then
@@ -969,59 +1225,84 @@ do
 		if not statusContainer then
 			statusContainer = billboard:FindFirstChild("StatusEffects", true)
 		end
-		local statusSlot = statusContainer and findInstanceByPath(statusContainer, {"StatusEffectExampleImageLabel"}) or nil
-		if not statusSlot and statusContainer then
-			for _, child in ipairs(statusContainer:GetChildren()) do
-				if child:IsA("GuiObject") then
-					statusSlot = child
-					break
-				end
+		if not statusContainer or not statusContainer:IsA("GuiObject") then
+			local statusParent = findInstanceByPath(billboard, {"Root"})
+			if not statusParent then
+				statusParent = billboard
 			end
+
+			local createdContainer = Instance.new("Frame")
+			createdContainer.Name = "StatusEffects"
+			createdContainer.BackgroundTransparency = 1
+			createdContainer.Size = UDim2.fromOffset(118, 12)
+			createdContainer.Position = UDim2.fromOffset(11, 32)
+			createdContainer.Visible = false
+			createdContainer.Parent = statusParent
+			statusContainer = createdContainer
 		end
 
-		local statusEmojiLabel: TextLabel? = nil
-		local statusStackLabel: TextLabel? = nil
-		if statusSlot and statusSlot:IsA("GuiObject") then
-			if statusSlot:IsA("ImageLabel") then
-				statusSlot.ImageTransparency = 1
-			end
-
-			local existingEmoji = statusSlot:FindFirstChild("EmojiText")
-			if existingEmoji and existingEmoji:IsA("TextLabel") then
-				statusEmojiLabel = existingEmoji
-			elseif statusSlot:IsA("TextLabel") then
-				statusEmojiLabel = statusSlot
-			else
-				local createdEmoji = Instance.new("TextLabel")
-				createdEmoji.Name = "EmojiText"
-				createdEmoji.BackgroundTransparency = 1
-				createdEmoji.Size = UDim2.fromOffset(12, 12)
-				createdEmoji.Position = UDim2.fromOffset(0, 0)
-				createdEmoji.Font = Enum.Font.GothamBold
-				createdEmoji.TextScaled = true
-				createdEmoji.Text = "❄️"
-				createdEmoji.Parent = statusSlot
-				statusEmojiLabel = createdEmoji
-			end
-
-			local existingStack = statusSlot:FindFirstChild("StackCountExample")
-			if existingStack and existingStack:IsA("TextLabel") then
-				statusStackLabel = existingStack
-			else
-				local createdStack = Instance.new("TextLabel")
-				createdStack.Name = "StackCountExample"
-				createdStack.BackgroundTransparency = 1
-				createdStack.Size = UDim2.fromOffset(10, 12)
-				createdStack.Position = UDim2.fromOffset(12, 0)
-				createdStack.Font = Enum.Font.GothamBold
-				createdStack.TextSize = 11
-				createdStack.TextXAlignment = Enum.TextXAlignment.Right
-				createdStack.TextColor3 = Color3.fromRGB(255, 255, 255)
-				createdStack.Visible = false
-				createdStack.Parent = statusSlot
-				statusStackLabel = createdStack
-			end
+		local statusContainerGui = statusContainer :: GuiObject
+		local statusLabelSize = DEFAULT_ENEMY_STATUS_LABEL_SIZE
+		local frostbiteTemplate = getEnemyStatusTemplateInstance("FrostbiteStatusEffectImageLabel")
+		local lesserTemplate = getEnemyStatusTemplateInstance("LesserFrostStatusEffectImageLabel")
+		local greaterTemplate = getEnemyStatusTemplateInstance("GreaterFrostStatusEffectImageLabel")
+		local frostbiteExisting = statusContainerGui:FindFirstChild("FrostbiteStatusEffectImageLabel")
+		local lesserExisting = statusContainerGui:FindFirstChild("LesserFrostStatusEffectImageLabel")
+		local greaterExisting = statusContainerGui:FindFirstChild("GreaterFrostStatusEffectImageLabel")
+		local genericStatusSlot = statusContainerGui:FindFirstChild("StatusEffectImageLabel")
+		local slowLabel = statusContainerGui:FindFirstChild("StatusSlowLabel")
+		local timeStoppedLabel = statusContainerGui:FindFirstChild("StatusTimeStoppedLabel")
+		if frostbiteExisting and frostbiteExisting:IsA("GuiObject") then
+			statusLabelSize = frostbiteExisting.Size
+		elseif lesserExisting and lesserExisting:IsA("GuiObject") then
+			statusLabelSize = lesserExisting.Size
+		elseif greaterExisting and greaterExisting:IsA("GuiObject") then
+			statusLabelSize = greaterExisting.Size
+		elseif frostbiteTemplate then
+			statusLabelSize = frostbiteTemplate.Size
+		elseif lesserTemplate then
+			statusLabelSize = lesserTemplate.Size
+		elseif greaterTemplate then
+			statusLabelSize = greaterTemplate.Size
+		elseif genericStatusSlot and genericStatusSlot:IsA("GuiObject") then
+			statusLabelSize = genericStatusSlot.Size
 		end
+
+		ensureEnemyStatusLayout(statusContainerGui)
+		if genericStatusSlot and genericStatusSlot:IsA("GuiObject") then
+			genericStatusSlot:Destroy()
+		end
+		if slowLabel and slowLabel:IsA("GuiObject") then
+			slowLabel:Destroy()
+		end
+		if timeStoppedLabel and timeStoppedLabel:IsA("GuiObject") then
+			timeStoppedLabel:Destroy()
+		end
+		local statusFrostbiteLabel = ensureEnemyStatusTemplateImageLabel(
+			statusContainerGui,
+			"FrostbiteStatusEffectImageLabel",
+			"FrostbiteStatusEffectImageLabel",
+			1,
+			statusLabelSize
+		)
+		local statusFrostbiteStackLabel = if statusFrostbiteLabel then ensureEnemyStatusStackLabel(statusFrostbiteLabel) else nil
+		local statusLesserFrostLabel = ensureEnemyStatusTemplateImageLabel(
+			statusContainerGui,
+			"LesserFrostStatusEffectImageLabel",
+			"LesserFrostStatusEffectImageLabel",
+			2,
+			statusLabelSize
+		)
+		local statusLesserFrostStackLabel = if statusLesserFrostLabel then ensureEnemyStatusStackLabel(statusLesserFrostLabel) else nil
+		local statusGreaterFrostLabel = ensureEnemyStatusTemplateImageLabel(
+			statusContainerGui,
+			"GreaterFrostStatusEffectImageLabel",
+			"GreaterFrostStatusEffectImageLabel",
+			3,
+			statusLabelSize
+		)
+		local statusGreaterFrostStackLabel = if statusGreaterFrostLabel then ensureEnemyStatusStackLabel(statusGreaterFrostLabel) else nil
+		local freezeHighlight = ensureEnemyFreezeHighlight(record)
 
 		local healthRoot = findInstanceByPath(billboard, {"Highlight", "Border", "Health"})
 		if not healthRoot then
@@ -1037,11 +1318,18 @@ do
 
 		record.enemyHealthBillboard = billboard
 		record.enemyHealthFill = if fillInstance and fillInstance:IsA("GuiObject") then fillInstance else nil
+		record.enemyExecuteRangeBar = if executeRangeInstance and executeRangeInstance:IsA("GuiObject") then executeRangeInstance else nil
 		record.enemyEliteBackground = if eliteInstance and eliteInstance:IsA("GuiObject") then eliteInstance else nil
-		record.enemyStatusContainer = if statusContainer and statusContainer:IsA("GuiObject") then statusContainer else nil
-		record.enemyStatusSlot = if statusSlot and statusSlot:IsA("GuiObject") then statusSlot else nil
-		record.enemyStatusEmojiLabel = statusEmojiLabel
-		record.enemyStatusStackLabel = statusStackLabel
+		record.enemyStatusContainer = statusContainerGui
+		record.enemyStatusFrostbiteLabel = statusFrostbiteLabel
+		record.enemyStatusFrostbiteStackLabel = statusFrostbiteStackLabel
+		record.enemyStatusLesserFrostLabel = statusLesserFrostLabel
+		record.enemyStatusLesserFrostStackLabel = statusLesserFrostStackLabel
+		record.enemyStatusGreaterFrostLabel = statusGreaterFrostLabel
+		record.enemyStatusGreaterFrostStackLabel = statusGreaterFrostStackLabel
+		record.enemyStatusSlowLabel = nil
+		record.enemyStatusTimeStoppedLabel = nil
+		record.enemyFreezeHighlight = freezeHighlight
 	end
 
 	local function updateEnemyHealthbar(record: RenderRecord, now: number)
@@ -1079,38 +1367,108 @@ do
 			end
 		end
 
-		local slowActive = (record.enemySlowExpiresAt or 0) > now
-		if record.enemyStatusSlot then
-			record.enemyStatusSlot.Visible = slowActive
-			if record.enemyStatusSlot:IsA("ImageLabel") then
-				record.enemyStatusSlot.ImageTransparency = 1
+		local frostbiteEndTime = 0
+		local frostbiteStacks = 1
+		if typeof(record.enemyFrostbiteData) == "table" then
+			frostbiteEndTime = tonumber(record.enemyFrostbiteData.endTime) or 0
+			frostbiteStacks = math.max(1, math.floor(tonumber(record.enemyFrostbiteData.stacks) or 1))
+		end
+		local frostbiteActive = frostbiteEndTime > now
+		local lesserFrostEndTime = 0
+		local lesserFrostStacks = 1
+		if typeof(record.enemyLesserFrostData) == "table" then
+			lesserFrostEndTime = tonumber(record.enemyLesserFrostData.endTime) or 0
+			lesserFrostStacks = math.max(1, math.floor(tonumber(record.enemyLesserFrostData.stacks) or 1))
+		end
+		local lesserFrostActive = lesserFrostEndTime > now
+		local greaterFrostEndTime = 0
+		local greaterFrostStacks = 1
+		if typeof(record.enemyGreaterFrostData) == "table" then
+			greaterFrostEndTime = tonumber(record.enemyGreaterFrostData.endTime) or 0
+			greaterFrostStacks = math.max(1, math.floor(tonumber(record.enemyGreaterFrostData.stacks) or 1))
+		end
+		local greaterFrostActive = greaterFrostEndTime > now
+		local freezeActive = typeof(record.enemyFreezeData) == "table" and (tonumber(record.enemyFreezeData.endTime) or 0) > now
+		local executeThreshold = 0
+		if typeof(record.enemyFreezeData) == "table" then
+			executeThreshold = math.clamp(tonumber(record.enemyFreezeData.executeThreshold) or 0, 0, 1)
+		end
+		local executeActive = freezeActive and executeThreshold > 0
+
+		if record.enemyExecuteRangeBar then
+			record.enemyExecuteRangeBar.Visible = executeActive
+			if executeActive then
+				local currentSize = record.enemyExecuteRangeBar.Size
+				record.enemyExecuteRangeBar.Size = UDim2.new(executeThreshold, 0, currentSize.Y.Scale, currentSize.Y.Offset)
 			end
 		end
+
 		if record.enemyStatusContainer then
-			record.enemyStatusContainer.Visible = slowActive
+			record.enemyStatusContainer.Visible = frostbiteActive or lesserFrostActive or greaterFrostActive
 		end
-		if record.enemyStatusEmojiLabel then
-			record.enemyStatusEmojiLabel.Visible = slowActive
-			record.enemyStatusEmojiLabel.Text = "❄️"
-		end
-		if record.enemyStatusStackLabel then
-			local stackCount = 1
-			if typeof(record.enemySlowData) == "table" then
-				stackCount = math.max(1, math.floor(tonumber(record.enemySlowData.stacks) or 1))
+		if record.enemyStatusFrostbiteLabel then
+			record.enemyStatusFrostbiteLabel.Visible = frostbiteActive
+			if frostbiteActive then
+				record.enemyStatusFrostbiteLabel.ImageTransparency = 0
 			end
-			if slowActive and stackCount >= 2 then
-				record.enemyStatusStackLabel.Visible = true
-				record.enemyStatusStackLabel.Text = tostring(stackCount)
+		end
+		if record.enemyStatusFrostbiteStackLabel then
+			if frostbiteActive and frostbiteStacks >= 2 then
+				record.enemyStatusFrostbiteStackLabel.Visible = true
+				record.enemyStatusFrostbiteStackLabel.Text = tostring(frostbiteStacks)
 			else
-				record.enemyStatusStackLabel.Visible = false
-				record.enemyStatusStackLabel.Text = ""
+				record.enemyStatusFrostbiteStackLabel.Visible = false
+				record.enemyStatusFrostbiteStackLabel.Text = ""
 			end
+		end
+		if record.enemyStatusLesserFrostLabel then
+			record.enemyStatusLesserFrostLabel.Visible = lesserFrostActive
+			if lesserFrostActive then
+				record.enemyStatusLesserFrostLabel.ImageTransparency = 0
+			end
+		end
+		if record.enemyStatusLesserFrostStackLabel then
+			if lesserFrostActive and lesserFrostStacks >= 2 then
+				record.enemyStatusLesserFrostStackLabel.Visible = true
+				record.enemyStatusLesserFrostStackLabel.Text = tostring(lesserFrostStacks)
+			else
+				record.enemyStatusLesserFrostStackLabel.Visible = false
+				record.enemyStatusLesserFrostStackLabel.Text = ""
+			end
+		end
+		if record.enemyStatusGreaterFrostLabel then
+			record.enemyStatusGreaterFrostLabel.Visible = greaterFrostActive
+			if greaterFrostActive then
+				record.enemyStatusGreaterFrostLabel.ImageTransparency = 0
+			end
+		end
+		if record.enemyStatusGreaterFrostStackLabel then
+			if greaterFrostActive and greaterFrostStacks >= 2 then
+				record.enemyStatusGreaterFrostStackLabel.Visible = true
+				record.enemyStatusGreaterFrostStackLabel.Text = tostring(greaterFrostStacks)
+			else
+				record.enemyStatusGreaterFrostStackLabel.Visible = false
+				record.enemyStatusGreaterFrostStackLabel.Text = ""
+			end
+		end
+		if record.enemyFreezeHighlight then
+			record.enemyFreezeHighlight.Enabled = freezeActive
+			record.enemyFreezeHighlight.Adornee = record.model
 		end
 	end
 
 	applyEnemyHealthbarVisibility = function(key: string, record: RenderRecord, now: number)
 		if record.entityType ~= "Enemy" then
 			return
+		end
+
+		if not record.enemyFreezeHighlight or not record.enemyFreezeHighlight.Parent then
+			record.enemyFreezeHighlight = ensureEnemyFreezeHighlight(record)
+		end
+		if record.enemyFreezeHighlight then
+			local freezeActive = typeof(record.enemyFreezeData) == "table" and (tonumber(record.enemyFreezeData.endTime) or 0) > now
+			record.enemyFreezeHighlight.Enabled = freezeActive
+			record.enemyFreezeHighlight.Adornee = record.model
 		end
 
 		if not revealedEnemyIds[key] then
@@ -2467,8 +2825,8 @@ local function computeTargetCFrame(position: Vector3?, facingData: any, velocity
 		targetPosition = reference.Position
 	end
 
-	-- Only apply ground snapping to enemies, not projectiles, exp orbs, powerups, or afterimage clones
-	if ENABLE_CLIENT_GROUND_SNAP and entityType ~= "Projectile" and entityType ~= "ExpOrb" and entityType ~= "Powerup" and entityType ~= "AfterimageClone" then
+	-- Only apply ground snapping to enemies and players, not transient visuals.
+	if ENABLE_CLIENT_GROUND_SNAP and entityType ~= "Projectile" and entityType ~= "ExpOrb" and entityType ~= "AfterimageClone" then
 		local groundHeight = getGroundHeight(targetPosition)
 		if groundHeight then
 			targetPosition = Vector3.new(targetPosition.X, groundHeight, targetPosition.Z)
@@ -2689,7 +3047,7 @@ local function clonePlayerCharacter(sourcePlayer: Player, transparency: number):
 end
 
 local function createVisualModel(entityType: string, entitySubtype: string?, visualColor: Color3?): Model?
-	if entityType ~= "Enemy" and entityType ~= "Projectile" and entityType ~= "Explosion" and entityType ~= "ExpOrb" and entityType ~= "Powerup" and entityType ~= "AfterimageClone" then
+	if entityType ~= "Enemy" and entityType ~= "Projectile" and entityType ~= "Explosion" and entityType ~= "ExpOrb" and entityType ~= "AfterimageClone" then
 		return nil
 	end
 	
@@ -2791,29 +3149,6 @@ local function createVisualModel(entityType: string, entitySubtype: string?, vis
 		if not model then
 			debug.profileend()
 			return nil  -- Model not ready
-		end
-	elseif entityType == "Powerup" then
-		-- Handle powerups from ReplicatedStorage
-		-- Path: ReplicatedStorage.ContentDrawer.ItemModels.Powerups.[PowerupType]
-		if entitySubtype then
-			local powerupsFolder = ReplicatedStorage:FindFirstChild("ContentDrawer")
-			if powerupsFolder then
-				powerupsFolder = powerupsFolder:FindFirstChild("ItemModels")
-				if powerupsFolder then
-					powerupsFolder = powerupsFolder:FindFirstChild("Powerups")
-					if powerupsFolder then
-						local powerupModel = powerupsFolder:FindFirstChild(entitySubtype)
-						if powerupModel and powerupModel:IsA("Model") then
-							model = powerupModel:Clone()
-						end
-					end
-				end
-			end
-		end
-		
-		if not model then
-			debug.profileend()
-			return nil  -- Model not ready, will retry next frame
 		end
 	end
 
@@ -3156,6 +3491,10 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	local spawnScale = sanitizeEnemyScale((visualData and type(visualData) == "table") and visualData.scale or nil)
 	local spawnTier: string? = nil
 	local spawnHealth: any = nil
+	local spawnFrostbiteData: any = nil
+	local spawnLesserFrostData: any = nil
+	local spawnGreaterFrostData: any = nil
+	local spawnFreezeData: any = nil
 	local spawnSlowData: any = nil
 	local spawnSlowExpiresAt: number? = nil
 	local spawnTimeStopped = false
@@ -3166,6 +3505,18 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		end
 		if typeof(entityData.Health) == "table" then
 			spawnHealth = entityData.Health
+		end
+		if typeof(entityData.EnemyFrostbite) == "table" then
+			spawnFrostbiteData = entityData.EnemyFrostbite
+		end
+		if typeof(entityData.EnemyLesserFrost) == "table" then
+			spawnLesserFrostData = entityData.EnemyLesserFrost
+		end
+		if typeof(entityData.EnemyGreaterFrost) == "table" then
+			spawnGreaterFrostData = entityData.EnemyGreaterFrost
+		end
+		if typeof(entityData.EnemyFreeze) == "table" then
+			spawnFreezeData = entityData.EnemyFreeze
 		end
 		if typeof(entityData.EnemySlow) == "table" then
 			spawnSlowData = entityData.EnemySlow
@@ -3229,8 +3580,6 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			model.Parent = expOrbsFolder
 		elseif entityTypeName == "Projectile" or entityTypeName == "Explosion" then
 			model.Parent = projectilesFolder
-		elseif entityTypeName == "Powerup" then
-			model.Parent = powerupsFolder
 		elseif entityTypeName == "AfterimageClone" then
 			model.Parent = afterimageClonesFolder
 		else
@@ -3351,6 +3700,10 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			enemyTier = spawnTier,
 			nextVisualInvariantCheck = 0,
 			enemyHealthData = spawnHealth,
+			enemyFrostbiteData = spawnFrostbiteData,
+			enemyLesserFrostData = spawnLesserFrostData,
+			enemyGreaterFrostData = spawnGreaterFrostData,
+			enemyFreezeData = spawnFreezeData,
 			enemySlowData = spawnSlowData,
 			enemySlowExpiresAt = spawnSlowExpiresAt,
 			enemyTimeStopped = false,
@@ -3373,8 +3726,8 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	model:SetAttribute("ECS_EntityId", key)
 	model:SetAttribute("ECS_LastUpdate", record.lastUpdate)
 	if entityTypeName == "Enemy" then
-		applyEnemyHealthbarVisibility(key, record, tick())
 		applyEnemyTimeStopState(record, spawnTimeStopped)
+		applyEnemyHealthbarVisibility(key, record, tick())
 	end
 	
 	-- OPTIMIZED: Fade in new enemies from transparent
@@ -3657,6 +4010,28 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 	if record.entityType == "Enemy" and typeof(entityData.Health) == "table" then
 		record.enemyHealthData = entityData.Health
 	end
+	if record.entityType == "Enemy" then
+		if typeof(entityData.EnemyFrostbite) == "table" then
+			record.enemyFrostbiteData = entityData.EnemyFrostbite
+		elseif entityData.EnemyFrostbite ~= nil then
+			record.enemyFrostbiteData = nil
+		end
+		if typeof(entityData.EnemyLesserFrost) == "table" then
+			record.enemyLesserFrostData = entityData.EnemyLesserFrost
+		elseif entityData.EnemyLesserFrost ~= nil then
+			record.enemyLesserFrostData = nil
+		end
+		if typeof(entityData.EnemyGreaterFrost) == "table" then
+			record.enemyGreaterFrostData = entityData.EnemyGreaterFrost
+		elseif entityData.EnemyGreaterFrost ~= nil then
+			record.enemyGreaterFrostData = nil
+		end
+		if typeof(entityData.EnemyFreeze) == "table" then
+			record.enemyFreezeData = entityData.EnemyFreeze
+		elseif entityData.EnemyFreeze ~= nil then
+			record.enemyFreezeData = nil
+		end
+	end
 	if record.entityType == "Enemy" and typeof(entityData.EnemySlow) == "table" then
 		record.enemySlowData = entityData.EnemySlow
 		local duration = math.max(tonumber(entityData.EnemySlow.duration) or 0, 0)
@@ -3693,7 +4068,7 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 		local visualData = entityData.Visual
 		
 		-- CLIENT-SIDE FALLBACK: Immediately fade collected orbs even if despawn is delayed
-		-- ONLY fade when collected = true (not when MagnetPull is removed)
+		-- ONLY fade when collected = true (not when OrbSeek is removed)
 		if itemData and itemData.collected and not record.isFadedOut then
 			local despawnId = entityId
 			fadeModel(record.model, 1, 0.1, function()
@@ -4470,8 +4845,8 @@ end
 			model:SetAttribute("ECS_LastUpdate", now)
 		end
 		
-		-- Skip ExpOrbs and Powerups from render loop UNLESS they're moving
-		if record.entityType == "ExpOrb" or record.entityType == "Powerup" then
+		-- Skip ExpOrbs from the render loop unless they're moving.
+		if record.entityType == "ExpOrb" then
 			-- Check if this item is moving (has velocity updates)
 			-- Use a very low threshold (0.01) to catch even slow-moving magnetized orbs
 			local hasVelocity = record.velocity and 

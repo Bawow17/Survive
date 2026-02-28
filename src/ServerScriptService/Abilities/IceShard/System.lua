@@ -1,17 +1,15 @@
 --!strict
--- IceShard System - Handles auto-casting IceShard ability for players
--- Manages targeting, cooldowns, and projectile spawning
+-- IceShard System - Manual-cast IceShard that fires toward cursor aim.
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
+
 local AbilitySystemBase = require(script.Parent.Parent.AbilitySystemBase)
 local TargetingService = require(script.Parent.Parent.TargetingService)
-local Config = require(script.Parent.Config)
-local Attributes = require(script.Parent.Attributes)
 local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
-local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
-local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
-local Balance = Config  -- Backward compatibility alias
+local PassiveEffectSystem = require(game.ServerScriptService.ECS.Systems.PassiveEffectSystem)
+local Config = require(script.Parent.Config)
+local Balance = Config
 
 local AbilityCastRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("AbilityCast")
 
@@ -20,7 +18,7 @@ local IceShardSystem = {}
 local world: any
 local Components: any
 local DirtyService: any
-local ECSWorldService: any
+local _ECSWorldService: any
 
 -- Component references
 local Position: any
@@ -28,376 +26,243 @@ local EntityType: any
 local AbilityData: any
 local AbilityCooldown: any
 local AbilityPulse: any
-local AttributeSelections: any
 
--- IceShard constants
 local ICESHARD_ID = "IceShard"
 local ICESHARD_NAME = Balance.Name
+local CAST_REQUEST_REMOTE_NAME = "IceShardCastRequest"
 
 local playerQuery: any
+local castRequestConnection: RBXScriptConnection? = nil
+local sprintForceOffRemote: RemoteEvent? = nil
+local animationIdsBySourcePath: {[string]: {[string]: string}} = {}
+local warnedMissingAnimationSource: {[string]: boolean} = {}
+local warnedMissingProjectileModel = false
+local pendingCastTokenByEntity: {[number]: number} = {}
+local pendingCastTokenCounter = 0
 
-local petalStateByEntity: {[number]: {petalIds: {number}, repelTimer: number}} = {}
-
--- Spawn a burst of IceShard projectiles (handles shotgun spread)
-local function spawnIceShardBurst(
-	playerEntity: number,
-	player: Player,
-	position: Vector3,
-	baseDirection: Vector3,
-	targetPosition: Vector3,
-	targetDistance: number,
-	stats: any  -- Upgraded stats (from getAbilityStats)
-): number
-	local created = 0
-	local shots = math.max(stats.shotAmount, 1)
-	local totalSpread = math.min(math.abs(stats.targetingAngle) * 2, math.rad(10))
-	local step = shots > 1 and totalSpread / (shots - 1) or 0
-	local midpoint = (shots - 1) * 0.5
-
-	for shotIndex = 1, shots do
-		local direction = baseDirection
-
-		if shots > 1 then
-			-- Apply spread for shotgun pattern
-			local offsetIndex = (shotIndex - 1) - midpoint
-			local finalAngle = offsetIndex * step
-			local cos = math.cos(finalAngle)
-			local sin = math.sin(finalAngle)
-			direction = Vector3.new(
-				direction.X * cos - direction.Z * sin,
-				direction.Y,
-				direction.X * sin + direction.Z * cos
-			)
-		end
-
-		if direction.Magnitude == 0 then
-			direction = Vector3.new(0, 0, 1)
-		end
-
-		direction = direction.Unit
-
-		-- Calculate target point for this projectile
-		local targetPoint: Vector3
-		if targetDistance > 0 then
-			targetPoint = position + direction * targetDistance
-		else
-			targetPoint = position + direction * (stats.projectileSpeed * stats.duration)
-		end
-
-		-- Use shared projectile creation from base (with upgraded stats)
-		local projectileEntity = AbilitySystemBase.createProjectile(
-			ICESHARD_ID,
-			stats,  -- Pass upgraded stats instead of base Balance
-			position,
-			direction,
-			player,
-			targetPoint,
-			playerEntity
-		)
-		
-		if projectileEntity then
-			created += 1
-		end
+local function ensureProjectileModelReplicated(): boolean
+	local success = ModelReplicationService.replicateIceSpecialAssets()
+	if not success and not warnedMissingProjectileModel then
+		warnedMissingProjectileModel = true
+		warn("[IceShard] Failed to replicate projectile model from ServerStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel")
 	end
-
-	return created
+	return success
 end
 
-local function getIceShardAttribute(playerEntity: number, abilityData: any): string?
-	local attributeSelections = world:get(playerEntity, AttributeSelections)
-	if attributeSelections and attributeSelections[ICESHARD_ID] then
-		return attributeSelections[ICESHARD_ID]
+local function normalizeAnimationId(rawId: any): string?
+	if typeof(rawId) == "number" then
+		if rawId <= 0 then
+			return nil
+		end
+		return "rbxassetid://" .. tostring(math.floor(rawId))
 	end
-	local abilityRecord = abilityData and abilityData.abilities and abilityData.abilities[ICESHARD_ID]
-	if abilityRecord and abilityRecord.selectedAttribute then
-		return abilityRecord.selectedAttribute
+	if typeof(rawId) ~= "string" then
+		return nil
+	end
+
+	local trimmed = string.gsub(rawId, "^%s*(.-)%s*$", "%1")
+	if trimmed == "" then
+		return nil
+	end
+	if string.find(trimmed, "rbxassetid://", 1, true) == 1 then
+		return trimmed
+	end
+	local numeric = tonumber(trimmed)
+	if numeric and numeric > 0 then
+		return "rbxassetid://" .. tostring(math.floor(numeric))
 	end
 	return nil
 end
 
-local function applyCrystalShardsOverrides(stats: any)
-	if not stats then
-		return
-	end
-	local shotAmount = math.max(stats.shotAmount or 1, 1)
-	local extraShots = math.max(shotAmount - 1, 0)
-	if extraShots > 0 then
-		stats.shotAmount = 1
-		stats.projectileCount = (stats.projectileCount or 1) + extraShots
-	else
-		stats.shotAmount = shotAmount
-		stats.projectileCount = stats.projectileCount or 1
-	end
-	stats.cooldown = (stats.cooldown or 0) * 1.2
-end
-
-local function getAdjustedIceShardStats(playerEntity: number, abilityData: any): (any, string?)
-	local stats = AbilitySystemBase.getAbilityStats(playerEntity, ICESHARD_ID, Balance)
-	local baseShotAmount = math.max(stats.shotAmount or 1, 1)
-	if stats.damage then
-		stats.damage = stats.damage * (1.7 * baseShotAmount)
-	end
-	local attributeId = getIceShardAttribute(playerEntity, abilityData)
-	if attributeId == "CrystalShards" then
-		applyCrystalShardsOverrides(stats)
-		if stats.damage then
-			stats.damage = stats.damage * 0.8
-		end
-	elseif attributeId == "ImpalingFrost" then
-		local effectiveShotAmount = baseShotAmount + 2
-		local excessShots = math.max(effectiveShotAmount - 1, 0)
-		stats.shotAmount = 1
-		stats.projectileCount = math.max((stats.projectileCount or 1) + 1 + excessShots, 1)
-		stats.pulseInterval = 0.02
-		stats.targetingMode = 0
-	end
-	return stats, attributeId
-end
-
-local function buildIceShardExtraConfig(attributeId: string?, stats: any): any?
-	if not attributeId then
+local function resolveAnimationIdFromInstance(source: Instance?): string?
+	if not source then
 		return nil
 	end
-	if attributeId == "ImpalingFrost" then
-		local special = Attributes.ImpalingFrost and Attributes.ImpalingFrost.special
-		if special then
-			return {
-				slowOnHit = {
-					duration = special.slowDuration or 5,
-					multiplier = special.slowMultiplier or 0.6,
-					impaleModelPath = special.impaleModelPath,
-				},
-			}
-		end
-	elseif attributeId == "CrystalShards" then
-		local special = Attributes.CrystalShards and Attributes.CrystalShards.special
-		if special then
-			local penetration = stats.penetration or 0
-			local splitCount = 2 + math.floor(penetration / 2)
-			return {
-				splitOnHit = {
-					count = splitCount,
-					damageMultiplier = special.splitDamageMultiplier or 0.7,
-					scaleMultiplier = special.splitScaleMultiplier or 0.5,
-					maxSpreadDeg = special.maxSpreadDegrees or 180,
-					targetingAngle = stats.targetingAngle,
-				},
-			}
-		end
+	if source:IsA("Animation") then
+		return normalizeAnimationId(source.AnimationId)
+	end
+	if source:IsA("StringValue") then
+		return normalizeAnimationId(source.Value)
+	end
+	if source:IsA("NumberValue") then
+		return normalizeAnimationId(source.Value)
 	end
 	return nil
 end
 
-local function ensureFrozenPetalModelsReplicated()
-	ModelReplicationService.replicateModel(
-		"ContentDrawer.Attacks.Abilties.IceShard.FrozenPetals",
-		"ContentDrawer.Attacks.Abilties.IceShard"
-	)
-	ModelReplicationService.replicateModel(
-		"ContentDrawer.Attacks.Abilties.IceShard.Repel",
-		"ContentDrawer.Attacks.Abilties.IceShard"
-	)
-end
-
-local function getRepelRadius(): number
-	local hitboxSize = ModelHitboxHelper.getModelHitboxData("ServerStorage.ContentDrawer.Attacks.Abilties.IceShard.Repel")
-	if hitboxSize then
-		return math.max(hitboxSize.X, hitboxSize.Z) * 0.5
-	end
-	return 12
-end
-
-local function spawnPetalProjectile(
-	playerEntity: number,
-	player: Player,
-	stats: any,
-	special: any,
-	index: number
-): number?
-	local position = AbilitySystemBase.getPlayerPosition(playerEntity, player)
-	if not position then
+local function findInstanceByDotPath(path: string): Instance?
+	if typeof(path) ~= "string" or path == "" then
 		return nil
 	end
 
-	local direction = Vector3.new(0, 0, 1)
-	local character = player.Character
-	local hrp = character and character:FindFirstChild("HumanoidRootPart")
-	if hrp and hrp:IsA("BasePart") then
-		direction = (hrp :: BasePart).CFrame.LookVector
+	local parts = string.split(path, ".")
+	local current: Instance? = game
+	local startIndex = 1
+	if parts[1] == "game" then
+		startIndex = 2
+	elseif parts[1] == "ServerStorage" then
+		current = ServerStorage
+		startIndex = 2
+	elseif parts[1] == "ReplicatedStorage" then
+		current = ReplicatedStorage
+		startIndex = 2
 	end
 
-	local offsetDir = Vector3.new(1, 0, 0)
-	if hrp and hrp:IsA("BasePart") then
-		offsetDir = (hrp :: BasePart).CFrame.RightVector
-	end
-	local offsetSign = (index % 2 == 1) and -1 or 1
-	position = position + offsetDir * offsetSign * 2
-
-	local petalStats = {
-		modelPath = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard.FrozenPetals",
-		damage = (stats.damage or 0) * (special.petalDamageMultiplier or 1),
-		projectileSpeed = (stats.projectileSpeed or 0) * (special.petalSpeedMultiplier or 0.5),
-		penetration = 999,
-		duration = special.petalLifetime or 999999,
-		scale = stats.scale or 1,
-		hitCooldown = special.petalHitCooldown or 0.3,
-		targetingMode = 3,
-		homingStrength = special.petalHomingStrength or 360,
-		homingMaxAngle = special.petalHomingMaxAngle or 360,
-		homingDistance = special.petalMaxRange or 100,
-		StayHorizontal = stats.StayHorizontal,
-		AlwaysStayHorizontal = stats.AlwaysStayHorizontal,
-		StickToPlayer = false,
-	}
-
-	local petalRadius: number? = nil
-	local hitboxSize = ModelHitboxHelper.getModelHitboxData(petalStats.modelPath)
-	if not hitboxSize and typeof(petalStats.modelPath) == "string" then
-		local serverPath = petalStats.modelPath:gsub("^ReplicatedStorage%.", "ServerStorage.")
-		if serverPath ~= petalStats.modelPath then
-			hitboxSize = ModelHitboxHelper.getModelHitboxData(serverPath)
+	for i = startIndex, #parts do
+		if not current then
+			return nil
 		end
+		current = current:FindFirstChild(parts[i])
 	end
-	if hitboxSize then
-		local baseRadius = math.max(hitboxSize.X, hitboxSize.Z) * 0.5
-		local scale = petalStats.scale or 1
-		local radiusMult = special.petalRadiusMultiplier or 1
-		petalRadius = baseRadius * scale * radiusMult
-	end
-
-	local targetPoint = position + direction * (petalStats.projectileSpeed * petalStats.duration)
-	return AbilitySystemBase.createProjectile(
-		ICESHARD_ID,
-		petalStats,
-		position,
-		direction,
-		player,
-		targetPoint,
-		playerEntity,
-		{
-			petal = {
-				ownerEntity = playerEntity,
-				maxRange = special.petalMaxRange or 100,
-				homingStrength = special.petalHomingStrength or 360,
-				homingMaxAngle = special.petalHomingMaxAngle or 360,
-				stayHorizontal = petalStats.StayHorizontal,
-				alwaysStayHorizontal = petalStats.AlwaysStayHorizontal,
-				role = (index == 1 and "closest") or (index == 2 and "toughest") or "closest",
-			},
-			radius = petalRadius,
-		}
-	)
+	return current
 end
 
-local function spawnRepelPulse(playerEntity: number, player: Player, special: any)
-	local position = AbilitySystemBase.getPlayerPosition(playerEntity, player)
-	if not position then
-		return
+local function getAnimationSourceIds(sourcePath: string): {[string]: string}?
+	local cached = animationIdsBySourcePath[sourcePath]
+	if cached then
+		return cached
 	end
 
-	local aoeRadius = getRepelRadius()
-	ProjectileService.spawnProjectile({
-		kind = ICESHARD_ID,
-		origin = position,
-		direction = Vector3.new(0, 1, 0),
-		speed = 0,
-		damage = 0,
-		radius = 0.1,
-		lifetime = 0.05,
-		ownerEntity = playerEntity,
-		pierce = 0,
-		modelPath = "",
-		visualScale = 1,
-		aoe = {
-			radius = aoeRadius,
-			damage = special.repelDamage or 100,
-			triggerOnExpire = true,
-			trigger = "hit",
-			duration = 0.5,
-			modelPath = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard.Repel",
-			scale = 1,
-			knockbackDistance = special.repelKnockbackDistance or 10,
-			knockbackDuration = 0.25,
-			knockbackStunned = true,
-			retargetPetalsOwner = playerEntity,
-		},
-	})
-end
-
-local function updateFrozenPetals(playerEntity: number, player: Player, stats: any, dt: number)
-	local special = Attributes.FrozenPetals and Attributes.FrozenPetals.special
-	if not special then
-		return
+	local source = findInstanceByDotPath(sourcePath)
+	if not source then
+		if not warnedMissingAnimationSource[sourcePath] then
+			warn(string.format("[IceShard] Animation source path not found: %s", sourcePath))
+			warnedMissingAnimationSource[sourcePath] = true
+		end
+		return nil
 	end
 
-	ensureFrozenPetalModelsReplicated()
+	local firstAnim: Animation? = nil
+	local loopAnim: Animation? = nil
+	local lastAnim: Animation? = nil
+	local allAnimations: {Animation} = {}
 
-	local state = petalStateByEntity[playerEntity]
-	if not state then
-		state = {
-			petalIds = {},
-			repelTimer = special.repelInterval or 3,
-		}
-		petalStateByEntity[playerEntity] = state
+	if source:IsA("Animation") then
+		firstAnim = source
+		allAnimations[1] = source
 	end
 
-	local petalCount = special.petalCount or 2
-	for i = 1, petalCount do
-		local id = state.petalIds[i]
-		if not id or not ProjectileService.isProjectileActive(id) then
-			local newId = spawnPetalProjectile(playerEntity, player, stats, special, i)
-			if newId then
-				state.petalIds[i] = newId
+	for _, desc in ipairs(source:GetDescendants()) do
+		if desc:IsA("Animation") then
+			local anim = desc :: Animation
+			allAnimations[#allAnimations + 1] = anim
+			local lowered = string.lower(anim.Name)
+			if lowered == "first" or lowered == "start" then
+				firstAnim = firstAnim or anim
+			elseif lowered == "loop" or lowered == "middle" then
+				loopAnim = loopAnim or anim
+			elseif lowered == "last" or lowered == "end" then
+				lastAnim = lastAnim or anim
 			end
 		end
 	end
 
-	state.repelTimer = (state.repelTimer or (special.repelInterval or 3)) - dt
-	if state.repelTimer <= 0 then
-		spawnRepelPulse(playerEntity, player, special)
-		AbilityCastRemote:FireClient(player, ICESHARD_ID, special.repelInterval or 3, ICESHARD_NAME)
-		state.repelTimer = special.repelInterval or 3
+	table.sort(allAnimations, function(a: Animation, b: Animation)
+		return a:GetFullName() < b:GetFullName()
+	end)
+
+	local fallbackFirst = resolveAnimationIdFromInstance(firstAnim or allAnimations[1])
+	local fallbackLoop = resolveAnimationIdFromInstance(loopAnim or allAnimations[2]) or fallbackFirst
+	local fallbackLast = resolveAnimationIdFromInstance(lastAnim or allAnimations[3]) or fallbackLoop or fallbackFirst
+
+	if not fallbackFirst and not fallbackLoop and not fallbackLast then
+		return nil
 	end
+
+	local resolved = {
+		first = fallbackFirst or fallbackLoop or fallbackLast,
+		loop = fallbackLoop or fallbackFirst or fallbackLast,
+		last = fallbackLast or fallbackLoop or fallbackFirst,
+	}
+	animationIdsBySourcePath[sourcePath] = resolved
+	return resolved
 end
 
-local function clearPetalState(playerEntity: number)
-	if petalStateByEntity[playerEntity] then
-		petalStateByEntity[playerEntity] = nil
+local function buildAnimationData(): any?
+	if not Config.animations then
+		return nil
 	end
+
+	local configuredIds = Config.animations.animationIds or {}
+	local animationIds = {
+		first = normalizeAnimationId(configuredIds.first),
+		loop = normalizeAnimationId(configuredIds.loop),
+		last = normalizeAnimationId(configuredIds.last),
+	}
+
+	local sourcePath = Config.animations.sourcePath
+	if typeof(sourcePath) == "string" and sourcePath ~= "" then
+		local sourceIds = getAnimationSourceIds(sourcePath)
+		if sourceIds then
+			animationIds.first = animationIds.first or sourceIds.first
+			animationIds.loop = animationIds.loop or sourceIds.loop
+			animationIds.last = animationIds.last or sourceIds.last
+		end
+	end
+
+	if not animationIds.first and not animationIds.loop and not animationIds.last then
+		return nil
+	end
+
+	return {
+		animationIds = animationIds,
+		loopFrame = Config.animations.loopFrame,
+		totalFrames = Config.animations.totalFrames,
+		duration = Config.animations.duration,
+		animationPriority = Config.animations.animationPriority,
+		anticipation = Config.animations.anticipation,
+	}
 end
 
--- Perform a IceShard burst (finds target and spawns projectiles)
-local function performIceShardBurst(playerEntity: number, player: Player, statsOverride: any?, attributeOverride: string?): boolean
-	-- Get player position (prefers character position)
-	local position = AbilitySystemBase.getPlayerPosition(playerEntity, player)
-	if not position then
-		return false
-	end
-	
-	-- Get upgraded stats for this player (includes ability upgrades + passive effects)
-	local abilityData = world:get(playerEntity, AbilityData)
-	local stats = statsOverride
-	local attributeId = attributeOverride
-	if not stats then
-		stats, attributeId = getAdjustedIceShardStats(playerEntity, abilityData)
+local function buildExtraProjectileConfig(stats: any): any?
+	local splitCount = math.max(math.floor((stats.splitCount or 0) + 0.0001), 0)
+	local splitDamageMultiplier = stats.splitDamageMultiplier or 0
+	local splitScaleMultiplier = stats.splitScaleMultiplier or 1
+	local splitMaxSpreadDeg = stats.splitMaxSpreadDeg or 180
+
+	local lesserFrostStacks = math.max(math.floor((stats.lesserFrostStacksPerHit or 0) + 0.0001), 0)
+	local lesserFrostDuration = math.max(stats.lesserFrostDuration or 0, 7.0)
+
+	local extraConfig = {}
+	if splitCount > 0 and splitDamageMultiplier > 0 then
+		extraConfig.splitOnHit = {
+			count = splitCount,
+			damageMultiplier = splitDamageMultiplier,
+			procCoefficient = stats.splitProcCoefficient or stats.procCoefficient,
+			scaleMultiplier = splitScaleMultiplier,
+			maxSpreadDeg = splitMaxSpreadDeg,
+			targetingAngle = stats.targetingAngle,
+		}
 	end
 
-	local shots = math.max(stats.shotAmount, 1)
-	local totalSpread = math.min(math.abs(stats.targetingAngle) * 2, math.rad(10))
-	local step = shots > 1 and totalSpread / (shots - 1) or 0
-	local offsets = table.create(shots)
-	if shots == 1 then
+	if lesserFrostStacks > 0 and lesserFrostDuration > 0 then
+		extraConfig.lesserFrostOnHit = {
+			statusId = "LesserFrost",
+			stacks = lesserFrostStacks,
+			duration = lesserFrostDuration,
+		}
+	end
+
+	if next(extraConfig) == nil then
+		return nil
+	end
+	return extraConfig
+end
+
+local function buildSpreadOffsets(count: number): {number}
+	local offsets = table.create(count)
+	if count == 1 then
 		offsets[1] = 0
-	elseif shots % 2 == 1 then
-		local midpoint = (shots - 1) * 0.5
-		for i = 1, shots do
+	elseif count % 2 == 1 then
+		local midpoint = (count - 1) * 0.5
+		for i = 1, count do
 			offsets[i] = (i - 1) - midpoint
 		end
 	else
-		local middleIndex = math.ceil(shots / 2)
+		local middleIndex = math.ceil(count / 2)
 		offsets[middleIndex] = 0
 		local stepIndex = 1
-		for i = 1, shots do
+		for i = 1, count do
 			if i ~= middleIndex then
 				local sign = (stepIndex % 2 == 1) and 1 or -1
 				local magnitude = math.floor((stepIndex + 1) / 2)
@@ -406,38 +271,107 @@ local function performIceShardBurst(playerEntity: number, player: Player, statsO
 			end
 		end
 	end
-	local targetingResult = TargetingService.acquireTarget({
-		playerEntity = playerEntity,
-		player = player,
-		origin = position,
-		maxRange = stats.targetingRange,
-		mode = stats.targetingMode,
-		stayHorizontal = stats.StayHorizontal,
-		alwaysStayHorizontal = stats.AlwaysStayHorizontal,
-		stickToPlayer = stats.StickToPlayer,
-		enablePrediction = stats.enablePrediction,
-		projectileSpeed = stats.projectileSpeed,
-		duration = stats.duration,
-		lockDuration = stats.targetLockDuration,
-		reacquireDelay = stats.reacquireDelay,
-		minTargetableAge = stats.minTargetableAge,
-		fovAngle = stats.targetingFov,
-		damage = stats.damage,
-		abilityId = ICESHARD_ID,
-	})
+	return offsets
+end
+
+local function getFallbackLookDirection(player: Player): Vector3
+	local character = player.Character
+	local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+	if humanoidRootPart and humanoidRootPart:IsA("BasePart") then
+		return (humanoidRootPart :: BasePart).CFrame.LookVector
+	end
+	return Vector3.new(0, 0, 1)
+end
+
+local function getManualAimDirection(stats: any, player: Player, origin: Vector3, targetPoint: Vector3): Vector3
+	local direction = AbilitySystemBase.calculateTargetingDirection(
+		origin,
+		2,
+		targetPoint,
+		stats,
+		stats.StayHorizontal,
+		player,
+		nil
+	)
+	if direction.Magnitude <= 0.0001 then
+		local raw = targetPoint - origin
+		if raw.Magnitude > 0.0001 then
+			direction = raw.Unit
+		else
+			direction = getFallbackLookDirection(player)
+		end
+	end
+	return direction.Unit
+end
+
+local function performIceShardBurst(
+	playerEntity: number,
+	player: Player,
+	statsOverride: any?,
+	targetPointOverride: Vector3?
+): boolean
+	local position = AbilitySystemBase.getPlayerPosition(playerEntity, player)
+	if not position then
+		return false
+	end
+
+	local stats = statsOverride or AbilitySystemBase.getAbilityStats(playerEntity, ICESHARD_ID, Balance)
+	local shots = math.max(stats.shotAmount or 1, 1)
+	local totalSpread = math.min(math.abs(stats.targetingAngle or 0) * 2, math.rad(10))
+	local step = shots > 1 and totalSpread / (shots - 1) or 0
+	local offsets = buildSpreadOffsets(shots)
+
+	local targetEntity: number? = nil
+	local aimPoint: Vector3
+	local baseDirection: Vector3
+	if typeof(targetPointOverride) == "Vector3" then
+		aimPoint = targetPointOverride
+		baseDirection = getManualAimDirection(stats, player, position, aimPoint)
+	else
+		local targetingResult = TargetingService.acquireTarget({
+			playerEntity = playerEntity,
+			player = player,
+			origin = position,
+			maxRange = stats.targetingRange,
+			mode = stats.targetingMode,
+			stayHorizontal = stats.StayHorizontal,
+			alwaysStayHorizontal = stats.AlwaysStayHorizontal,
+			stickToPlayer = stats.StickToPlayer,
+			enablePrediction = stats.enablePrediction,
+			projectileSpeed = stats.projectileSpeed,
+			duration = stats.duration,
+			lockDuration = stats.targetLockDuration,
+			reacquireDelay = stats.reacquireDelay,
+			minTargetableAge = stats.minTargetableAge,
+			fovAngle = stats.targetingFov,
+			damage = stats.damage,
+			abilityId = ICESHARD_ID,
+		})
+		targetEntity = targetingResult.targetEntity
+		baseDirection = targetingResult.direction
+		aimPoint = targetingResult.aimPoint or (position + baseDirection * stats.targetingRange)
+	end
+
+	if baseDirection.Magnitude == 0 then
+		baseDirection = getFallbackLookDirection(player)
+	end
+	baseDirection = baseDirection.Unit
+
+	local targetDistance = AbilitySystemBase.getTargetDistance(
+		position,
+		aimPoint,
+		stats.StayHorizontal,
+		stats.AlwaysStayHorizontal,
+		player
+	)
 
 	local created = 0
 	for shotIndex = 1, shots do
-		local targetEntity = targetingResult.targetEntity
+		ensureProjectileModelReplicated()
+
 		if targetEntity then
 			TargetingService.recordPredictedDamage(playerEntity, ICESHARD_ID, targetEntity, stats.damage)
 		end
-
-		local baseDirection = targetingResult.direction
-		if baseDirection.Magnitude == 0 then
-			baseDirection = Vector3.new(0, 0, 1)
-		end
-		baseDirection = baseDirection.Unit
 
 		local direction = baseDirection
 		if shots > 1 then
@@ -451,14 +385,11 @@ local function performIceShardBurst(playerEntity: number, player: Player, statsO
 				direction.X * sin + direction.Z * cos
 			)
 		end
-
 		if direction.Magnitude == 0 then
-			direction = Vector3.new(0, 0, 1)
+			direction = getFallbackLookDirection(player)
 		end
 		direction = direction.Unit
 
-		local aimPoint = targetingResult.aimPoint or (position + baseDirection * stats.targetingRange)
-		local targetDistance = (aimPoint - position).Magnitude
 		local targetPoint: Vector3
 		if targetDistance > 0 then
 			targetPoint = position + direction * targetDistance
@@ -466,7 +397,6 @@ local function performIceShardBurst(playerEntity: number, player: Player, statsO
 			targetPoint = position + direction * (stats.projectileSpeed * stats.duration)
 		end
 
-		local extraConfig = buildIceShardExtraConfig(attributeId, stats)
 		local projectileEntity = AbilitySystemBase.createProjectile(
 			ICESHARD_ID,
 			stats,
@@ -475,7 +405,7 @@ local function performIceShardBurst(playerEntity: number, player: Player, statsO
 			player,
 			targetPoint,
 			playerEntity,
-			extraConfig
+			buildExtraProjectileConfig(stats)
 		)
 		if projectileEntity then
 			created += 1
@@ -485,222 +415,306 @@ local function performIceShardBurst(playerEntity: number, player: Player, statsO
 	return created > 0
 end
 
--- Cast IceShard ability (handles initial cast and multi-shot setup)
-local function castIceShard(playerEntity: number, player: Player): boolean
-	-- Get upgraded stats
-	local abilityData = world:get(playerEntity, AbilityData)
-	local stats, attributeId = getAdjustedIceShardStats(playerEntity, abilityData)
-	
-	-- Start prediction tracking for smart multi-targeting
-	TargetingService.startCastPrediction(playerEntity, ICESHARD_ID)
-	
-	local success = performIceShardBurst(playerEntity, player, stats, attributeId)
+local function castIceShard(playerEntity: number, player: Player, targetPointOverride: Vector3?): (boolean, any)
+	local stats = AbilitySystemBase.getAbilityStats(playerEntity, ICESHARD_ID, Balance)
 
-	if success and stats.projectileCount > 1 then
-		-- Setup multi-shot pulse (predictions will persist through pulse)
+	TargetingService.startCastPrediction(playerEntity, ICESHARD_ID)
+	local success = performIceShardBurst(playerEntity, player, stats, targetPointOverride)
+
+	if success and (stats.projectileCount or 1) > 1 then
 		local interval = math.max(stats.pulseInterval or 0, 0.01)
 		local pulseData = {
 			ability = ICESHARD_ID,
-			remaining = stats.projectileCount - 1,
+			remaining = (stats.projectileCount or 1) - 1,
 			timer = interval,
 			interval = interval,
+			targetPoint = targetPointOverride,
 		}
 		DirtyService.setIfChanged(world, playerEntity, AbilityPulse, pulseData, "AbilityPulse")
 	else
-		-- Single shot cast, end prediction immediately
 		TargetingService.endCastPrediction(playerEntity, ICESHARD_ID)
 	end
 
-	return success
+	return success, stats
 end
 
--- Initialize the system
+local function findPlayerEntity(player: Player): number?
+	if not playerQuery then
+		return nil
+	end
+	for entity, entityType in playerQuery do
+		if entityType.type == "Player" and entityType.player == player then
+			return entity
+		end
+	end
+	return nil
+end
+
+local function isAbilityEnabled(playerEntity: number): boolean
+	local abilityData = world:get(playerEntity, AbilityData)
+	return abilityData
+		and abilityData.abilities
+		and abilityData.abilities[ICESHARD_ID]
+		and abilityData.abilities[ICESHARD_ID].enabled == true
+end
+
+local function stopSprintOnCastPress(playerEntity: number, player: Player)
+	PassiveEffectSystem.setSprintIntent(playerEntity, false)
+	if sprintForceOffRemote then
+		sprintForceOffRemote:FireClient(player)
+	end
+end
+
+local function tryCastFromRequest(player: Player, payload: any)
+	if not world or not player or not player.Parent then
+		return
+	end
+	if player:GetAttribute("CooldownsFrozen") then
+		return
+	end
+	if not AbilitySystemBase.isPlayerAlive(player) then
+		return
+	end
+
+	local playerEntity = findPlayerEntity(player)
+	if not playerEntity then
+		return
+	end
+
+	stopSprintOnCastPress(playerEntity, player)
+
+	if pendingCastTokenByEntity[playerEntity] then
+		return
+	end
+	if not isAbilityEnabled(playerEntity) then
+		return
+	end
+
+	local pulseComponent = world:get(playerEntity, AbilityPulse)
+	if pulseComponent and pulseComponent.ability == ICESHARD_ID then
+		return
+	end
+
+	local stats = AbilitySystemBase.getAbilityStats(playerEntity, ICESHARD_ID, Balance)
+	local cooldownData = world:get(playerEntity, AbilityCooldown)
+	local cooldowns = cooldownData and cooldownData.cooldowns or {}
+	local cooldown = cooldowns[ICESHARD_ID] or { remaining = 0, max = stats.cooldown }
+	if (cooldown.remaining or 0) > 0 then
+		return
+	end
+
+	local targetPoint = nil
+	if typeof(payload) == "table" and typeof(payload.targetPoint) == "Vector3" then
+		targetPoint = payload.targetPoint
+	end
+
+	local windup = math.max(tonumber(stats.windup) or 0, 0)
+	local function executeCastAfterWindup()
+		if not world or not player or not player.Parent then
+			return
+		end
+		if player:GetAttribute("CooldownsFrozen") then
+			return
+		end
+		if not AbilitySystemBase.isPlayerAlive(player) then
+			return
+		end
+
+		local currentEntity = findPlayerEntity(player)
+		if currentEntity ~= playerEntity then
+			return
+		end
+		if not isAbilityEnabled(playerEntity) then
+			return
+		end
+
+		local livePulseComponent = world:get(playerEntity, AbilityPulse)
+		if livePulseComponent and livePulseComponent.ability == ICESHARD_ID then
+			return
+		end
+
+		local liveStats = AbilitySystemBase.getAbilityStats(playerEntity, ICESHARD_ID, Balance)
+		local liveCooldownData = world:get(playerEntity, AbilityCooldown)
+		local liveCooldowns = liveCooldownData and liveCooldownData.cooldowns or {}
+		local liveCooldown = liveCooldowns[ICESHARD_ID] or { remaining = 0, max = liveStats.cooldown }
+		if (liveCooldown.remaining or 0) > 0 then
+			return
+		end
+
+		local success, castStats = castIceShard(playerEntity, player, targetPoint)
+		if not success then
+			return
+		end
+
+		local damageStats = world:get(playerEntity, Components.AbilityDamageStats) or {}
+		local animationData = buildAnimationData()
+
+		AbilityCastRemote:FireClient(player, ICESHARD_ID, castStats.cooldown, ICESHARD_NAME, {
+			projectileCount = castStats.projectileCount or 1,
+			pulseInterval = castStats.pulseInterval or 0,
+			damageStats = damageStats,
+			animationData = animationData,
+		})
+
+		liveCooldowns[ICESHARD_ID] = {
+			remaining = castStats.cooldown,
+			max = castStats.cooldown,
+		}
+		DirtyService.setIfChanged(world, playerEntity, AbilityCooldown, {
+			cooldowns = liveCooldowns,
+		}, "AbilityCooldown")
+	end
+
+	if windup <= 0 then
+		executeCastAfterWindup()
+		return
+	end
+
+	pendingCastTokenCounter += 1
+	local castToken = pendingCastTokenCounter
+	pendingCastTokenByEntity[playerEntity] = castToken
+	task.delay(windup, function()
+		if pendingCastTokenByEntity[playerEntity] ~= castToken then
+			return
+		end
+		pendingCastTokenByEntity[playerEntity] = nil
+		executeCastAfterWindup()
+	end)
+end
+
 function IceShardSystem.init(worldRef: any, components: any, dirtyService: any, ecsWorldService: any)
 	world = worldRef
 	Components = components
 	DirtyService = dirtyService
-	ECSWorldService = ecsWorldService
+	_ECSWorldService = ecsWorldService
 
-	-- Initialize base system with shared references
 	AbilitySystemBase.init(worldRef, components, dirtyService, ecsWorldService)
 
-	-- Get component references
 	Position = Components.Position
 	EntityType = Components.EntityType
 	AbilityData = Components.AbilityData
 	AbilityCooldown = Components.AbilityCooldown
 	AbilityPulse = Components.AbilityPulse
-	AttributeSelections = Components.AttributeSelections
+
+	ensureProjectileModelReplicated()
 
 	playerQuery = world:query(Components.EntityType, Components.Position, Components.Ability):cached()
+
+	local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
+	local castRequestRemote = remotesFolder:FindFirstChild(CAST_REQUEST_REMOTE_NAME)
+	if not castRequestRemote then
+		castRequestRemote = Instance.new("RemoteEvent")
+		castRequestRemote.Name = CAST_REQUEST_REMOTE_NAME
+		castRequestRemote.Parent = remotesFolder
+	end
+	local weaponRemotesFolder = remotesFolder:FindFirstChild("Weapons")
+	if weaponRemotesFolder and weaponRemotesFolder:IsA("Folder") then
+		local sprintRemote = weaponRemotesFolder:FindFirstChild("SprintForceOff")
+		if sprintRemote and sprintRemote:IsA("RemoteEvent") then
+			sprintForceOffRemote = sprintRemote
+		end
+	end
+
+	if castRequestConnection then
+		castRequestConnection:Disconnect()
+		castRequestConnection = nil
+	end
+	castRequestConnection = (castRequestRemote :: RemoteEvent).OnServerEvent:Connect(function(player: Player, payload: any)
+		tryCastFromRequest(player, payload)
+	end)
 end
 
--- Step function (called every frame)
 function IceShardSystem.step(dt: number)
 	if not world then
 		return
 	end
 
-	-- Query all players with IceShard ability
-	for entity, entityType, position, ability in playerQuery do
-		if entityType.type == "Player" and entityType.player then
-			local player = entityType.player
-			
-			-- Don't cast abilities if player is dead
-			if not AbilitySystemBase.isPlayerAlive(player) then
-				continue
-			end
-			
-			-- Skip cooldown updates if player has frozen cooldowns (individual pause)
-			local cooldownsFrozen = player:GetAttribute("CooldownsFrozen")
-			if cooldownsFrozen then
-				continue
-			end
+	for entity, entityType in playerQuery do
+		if entityType.type ~= "Player" or not entityType.player then
+			continue
+		end
 
-			local abilityData = world:get(entity, AbilityData)
-			-- Check if player has IceShard ability enabled
-			if abilityData and abilityData.abilities and abilityData.abilities[ICESHARD_ID] 
-				and abilityData.abilities[ICESHARD_ID].enabled then
-				local attributeId = getIceShardAttribute(entity, abilityData)
-				if attributeId == "FrozenPetals" then
-					local stats = AbilitySystemBase.getAbilityStats(entity, ICESHARD_ID, Balance)
-					updateFrozenPetals(entity, player, stats, dt)
+		local player = entityType.player
+		if not AbilitySystemBase.isPlayerAlive(player) then
+			continue
+		end
+		if player:GetAttribute("CooldownsFrozen") then
+			continue
+		end
+		if not isAbilityEnabled(entity) then
+			continue
+		end
 
-					local pulseComponent = world:get(entity, AbilityPulse)
-					if pulseComponent and pulseComponent.ability == ICESHARD_ID then
-						world:remove(entity, AbilityPulse)
-						TargetingService.endCastPrediction(entity, ICESHARD_ID)
-					end
+		local pulseComponent = world:get(entity, AbilityPulse)
+		if pulseComponent and pulseComponent.ability == ICESHARD_ID then
+			local stats = AbilitySystemBase.getAbilityStats(entity, ICESHARD_ID, Balance)
+			local interval = pulseComponent.interval or stats.pulseInterval or 0
+			local timer = 0
+			local remaining = pulseComponent.remaining or 0
+			local targetPoint = if typeof(pulseComponent.targetPoint) == "Vector3" then pulseComponent.targetPoint else nil
 
-					local cooldownData = world:get(entity, AbilityCooldown)
-					local cooldowns = cooldownData and cooldownData.cooldowns or {}
-					local currentCooldown = cooldowns[ICESHARD_ID]
-					if not currentCooldown or currentCooldown.remaining ~= 0 or currentCooldown.max ~= stats.cooldown then
-						cooldowns[ICESHARD_ID] = {
-							remaining = 0,
-							max = stats.cooldown,
-						}
-						DirtyService.setIfChanged(world, entity, AbilityCooldown, {
-							cooldowns = cooldowns
-						}, "AbilityCooldown")
-					end
-
-					continue
-				end
-				-- Handle multi-shot pulse
-				local pulseComponent = world:get(entity, AbilityPulse)
-				if pulseComponent and pulseComponent.ability == ICESHARD_ID then
-					local stats, attributeId = getAdjustedIceShardStats(entity, abilityData)
-					local interval = (pulseComponent.interval or stats.pulseInterval or 0)
-					local timer = 0
-					local remaining = pulseComponent.remaining or 0
-
-					if interval <= 0 then
-						-- Fire all remaining shots immediately
-						while remaining > 0 do
-							if performIceShardBurst(entity, player, stats, attributeId) then
-								remaining -= 1
-							else
-								remaining = 0
-							end
-						end
+			if interval <= 0 then
+				while remaining > 0 do
+					if performIceShardBurst(entity, player, stats, targetPoint) then
+						remaining -= 1
 					else
-						-- Fire shots with interval timing
-						local actualInterval = math.max(interval, 0.01)
-						timer = (pulseComponent.timer or actualInterval) - dt
-						while remaining > 0 and timer <= 0 do
-							if performIceShardBurst(entity, player, stats, attributeId) then
-								remaining -= 1
-								timer += actualInterval
-							else
-								remaining = 0
-							end
-						end
-						interval = actualInterval
+						remaining = 0
 					end
-
-					-- Update or remove pulse component
-					if remaining <= 0 then
-						world:remove(entity, AbilityPulse)
-						pulseComponent = nil
-						-- End prediction tracking when cast completes
-						TargetingService.endCastPrediction(entity, ICESHARD_ID)
+				end
+			else
+				local actualInterval = math.max(interval, 0.01)
+				timer = (pulseComponent.timer or actualInterval) - dt
+				while remaining > 0 and timer <= 0 do
+					if performIceShardBurst(entity, player, stats, targetPoint) then
+						remaining -= 1
+						timer += actualInterval
 					else
-						local newPulse = {
-							ability = ICESHARD_ID,
-							timer = timer,
-							remaining = remaining,
-							interval = interval,
-						}
-						DirtyService.setIfChanged(world, entity, AbilityPulse, newPulse, "AbilityPulse")
-						pulseComponent = newPulse
+						remaining = 0
 					end
 				end
+				interval = actualInterval
+			end
 
-				-- Check if pulse is still active
-				pulseComponent = world:get(entity, AbilityPulse)
-				local pulseActive = pulseComponent and pulseComponent.ability == ICESHARD_ID
-
-				-- Handle cooldown for this ability
-				-- Get upgraded stats for cooldown
-				local stats = getAdjustedIceShardStats(entity, abilityData)
-
-				local cooldownData = world:get(entity, AbilityCooldown)
-				local cooldowns = cooldownData and cooldownData.cooldowns or {}
-				local cooldown = cooldowns[ICESHARD_ID] or { remaining = 0, max = stats.cooldown }
-
-				-- Cast ability when cooldown is ready and no pulse active
-				if cooldown.remaining <= 0 and not pulseActive then
-					local success = castIceShard(entity, player)
-					if success then
-						-- Get damage stats for animation priority
-						local damageStats = world:get(entity, Components.AbilityDamageStats) or {}
-
-						-- Get animation config from Config (if it exists)
-						local animationData = nil
-						if Config.animations then
-							animationData = {
-								animationIds = Config.animations.animationIds,
-								loopFrame = Config.animations.loopFrame,
-								totalFrames = Config.animations.totalFrames,
-								duration = Config.animations.duration,
-								animationPriority = Config.animations.animationPriority,
-							}
-						end
-
-						-- Notify client of ability cast with animation data
-						AbilityCastRemote:FireClient(player, ICESHARD_ID, stats.cooldown, ICESHARD_NAME, {
-							projectileCount = stats.projectileCount or 1,
-							pulseInterval = stats.pulseInterval or 0,
-							damageStats = damageStats,
-							animationData = animationData,  -- Send all animation config from server
-						})
-
-						-- Update this ability's cooldown
-						cooldowns[ICESHARD_ID] = {
-							remaining = stats.cooldown,
-							max = stats.cooldown,
-						}
-						DirtyService.setIfChanged(world, entity, AbilityCooldown, {
-							cooldowns = cooldowns
-						}, "AbilityCooldown")
-					end
-				else
-					-- Update cooldown timer
-					cooldowns[ICESHARD_ID] = {
-						remaining = math.max((cooldown.remaining or 0) - dt, 0),
-						max = cooldown.max or stats.cooldown,
-					}
-					DirtyService.setIfChanged(world, entity, AbilityCooldown, {
-						cooldowns = cooldowns
-					}, "AbilityCooldown")
-				end
+			if remaining <= 0 then
+				world:remove(entity, AbilityPulse)
+				TargetingService.endCastPrediction(entity, ICESHARD_ID)
+			else
+				local newPulse = {
+					ability = ICESHARD_ID,
+					timer = timer,
+					remaining = remaining,
+					interval = interval,
+					targetPoint = targetPoint,
+				}
+				DirtyService.setIfChanged(world, entity, AbilityPulse, newPulse, "AbilityPulse")
 			end
 		end
+
+		local stats = AbilitySystemBase.getAbilityStats(entity, ICESHARD_ID, Balance)
+		local cooldownData = world:get(entity, AbilityCooldown)
+		local cooldowns = cooldownData and cooldownData.cooldowns or {}
+		local cooldown = cooldowns[ICESHARD_ID] or { remaining = 0, max = stats.cooldown }
+		local currentRemaining = cooldown.remaining or 0
+		local currentMax = cooldown.max or stats.cooldown
+
+		if currentRemaining > 0 then
+			cooldowns[ICESHARD_ID] = {
+				remaining = math.max(currentRemaining - dt, 0),
+				max = currentMax,
+			}
+			DirtyService.setIfChanged(world, entity, AbilityCooldown, {
+				cooldowns = cooldowns,
+			}, "AbilityCooldown")
+		elseif currentMax ~= stats.cooldown then
+			cooldowns[ICESHARD_ID] = {
+				remaining = 0,
+				max = stats.cooldown,
+			}
+			DirtyService.setIfChanged(world, entity, AbilityCooldown, {
+				cooldowns = cooldowns,
+			}, "AbilityCooldown")
+		end
 	end
-
 end
-
-IceShardSystem.clearPetalState = clearPetalState
 
 return IceShardSystem

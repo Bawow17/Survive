@@ -4,7 +4,6 @@
 return {
 	-- Spawn Settings
 	SpawnEnabled = false,
-	PowerupSpawnEnabled = false,  -- Powerups disabled (kill-only XP flow)
 	
 	-- Ambient exp spawn rate scaling (over game time)
 	ExpPerSecondScaling = {

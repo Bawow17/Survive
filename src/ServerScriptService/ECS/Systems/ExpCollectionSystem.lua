@@ -99,10 +99,10 @@ local function collectOrb(playerEntity: number, orbEntity: number, expAmount: nu
 		ExpSinkSystem.onSinkCollected(orbEntity)
 	end
 	
-	-- Remove MagnetPull component if present (before destroying entity)
-	local magnetPull = world:get(orbEntity, Components.MagnetPull)
-	if magnetPull then
-		world:remove(orbEntity, Components.MagnetPull)
+	-- Remove OrbSeek component if present (before destroying entity)
+	local seekData = world:get(orbEntity, Components.OrbSeek)
+	if seekData then
+		world:remove(orbEntity, Components.OrbSeek)
 	end
 	
 	-- Mark orb as collected (prevents double collection)
@@ -215,16 +215,16 @@ function ExpCollectionSystem.step(dt: number)
 				continue
 			end
 			
-			-- Check if orb is being pulled by magnet
-			local magnetPull = world:get(orbEntity, Components.MagnetPull)
+			-- Check if orb is already seeking a player
+			local seekData = world:get(orbEntity, Components.OrbSeek)
 			local effectiveRadius = collectionRadius
 			local effectiveRadiusSq = collectionRadiusSq
 			
-			-- CRITICAL: Magnetized orbs require VERY small collection radius
+			-- Seeking orbs require a very small collection radius
 			-- This prevents early pickup while orbs are still flying towards player
 			-- Ultra-tight radius ensures orbs visually reach the player before collection
 			-- Compensates for client interpolation lag (0.03s * 200 studs/s = 6 studs)
-			if magnetPull then
+			if seekData then
 				effectiveRadius = 0.8  -- Tight enough to look good, loose enough for reliable collection
 				effectiveRadiusSq = effectiveRadius * effectiveRadius
 			end
@@ -239,23 +239,23 @@ function ExpCollectionSystem.step(dt: number)
 			-- DIAGNOSTIC: Log orbs within 30 studs for debugging
 			if shouldLogDebug and distance <= 30 then
 				orbsInRange += 1
-				print(string.format("[ExpCollection] Orb %d: dist=%.2f type=%s collected=%s ownerId=%s playerEntity=%s magnetPull=%s", 
+				print(string.format("[ExpCollection] Orb %d: dist=%.2f type=%s collected=%s ownerId=%s playerEntity=%s seeking=%s", 
 					orbEntity, distance, orbEntityType.type, tostring(orbItemData and orbItemData.collected), 
-					tostring(orbItemData and orbItemData.ownerId), tostring(playerEntity), tostring(magnetPull ~= nil)))
+					tostring(orbItemData and orbItemData.ownerId), tostring(playerEntity), tostring(seekData ~= nil)))
 			end
 			
 			-- Check if within collection radius
 			if distSq <= effectiveRadiusSq then
 				-- For very large pickup ranges, pull orbs in before collecting
 				if collectionRadius >= LARGE_RANGE_MIN and distSq > (MAGNETIZE_CLOSE_RADIUS * MAGNETIZE_CLOSE_RADIUS) then
-					if not magnetPull then
+					if not seekData then
 						local now = GameTimeSystem.getGameTime()
 						local duration = math.clamp(distance / 120, MAGNET_PULL_MIN_DURATION, MAGNET_PULL_MAX_DURATION)
-						DirtyService.setIfChanged(world, orbEntity, Components.MagnetPull, {
+						DirtyService.setIfChanged(world, orbEntity, Components.OrbSeek, {
 							targetPlayer = playerEntity,
 							startTime = now,
 							duration = duration,
-						}, "MagnetPull")
+						}, "OrbSeek")
 					end
 					continue
 				end

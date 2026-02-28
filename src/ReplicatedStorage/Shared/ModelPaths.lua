@@ -16,20 +16,13 @@ local ModelPaths = {
         MagicBolt = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.MagicBolt.MagicBolt",
         FireBall = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.FireBall.FireBall",
         FireBallExplosion = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.FireBall.Explosion",
-        IceShard = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard.IceShard",
+        IceShard = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel",
         Refractions = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.Refractions.Refractions",
         -- Additional projectile types will be added when replicated
     },
     
     -- Item models (some already replicated)
     Items = {
-        -- Powerup models (already in ReplicatedStorage)
-        ArcaneRune = "ReplicatedStorage.ContentDrawer.ItemModels.Powerups.ArcaneRune",
-        Cloak = "ReplicatedStorage.ContentDrawer.ItemModels.Powerups.Cloak",
-        Health = "ReplicatedStorage.ContentDrawer.ItemModels.Powerups.Health",
-        Magnet = "ReplicatedStorage.ContentDrawer.ItemModels.Powerups.Magnet",
-        Nuke = "ReplicatedStorage.ContentDrawer.ItemModels.Powerups.Nuke",
-        
         -- Experience/Coin models will be added when replicated
         Experience = "ReplicatedStorage.ContentDrawer.Items.Experience.Experience",
         Coin = "ReplicatedStorage.ContentDrawer.Items.Coin.Coin",

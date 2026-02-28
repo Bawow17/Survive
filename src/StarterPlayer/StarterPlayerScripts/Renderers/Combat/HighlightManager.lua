@@ -30,7 +30,7 @@ local isPaused = false
 local pauseStartTime = 0
 local totalPausedTime = 0
 
--- Apply character transparency (for Cloak effect)
+-- Apply character transparency for active highlight effects.
 local function setCharacterTransparency(character: Model, transparency: number)
 	for _, descendant in pairs(character:GetDescendants()) do
 		if descendant:IsA("BasePart") and descendant.Name ~= "HumanoidRootPart" then
@@ -98,7 +98,7 @@ local function showEffect(effectId: string)
 	currentVisibleEffect = effectId
 	effect.currentTransparency = 1.0
 	
-	-- Apply character transparency if needed (Cloak effect)
+	-- Apply character transparency if needed.
 	if effect.characterTransparency > 0 then
 		setCharacterTransparency(character, effect.characterTransparency)
 	end

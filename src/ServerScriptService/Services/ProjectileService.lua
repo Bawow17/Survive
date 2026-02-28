@@ -7,6 +7,7 @@ local Workspace = game:GetService("Workspace")
 
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
+local EnemyFrostSystem = require(game.ServerScriptService.ECS.Systems.EnemyFrostSystem)
 local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
 local TargetingService = require(game.ServerScriptService.Abilities.TargetingService)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
@@ -116,6 +117,12 @@ type FrostbiteOnHit = {
 	damageTakenPerStack: number,
 }
 
+type LesserFrostOnHit = {
+	statusId: string?,
+	stacks: number,
+	duration: number,
+}
+
 type ProjectileRecord = {
 	id: number,
 	kind: string,
@@ -144,6 +151,7 @@ type ProjectileRecord = {
 	splitOnHit: SplitConfig?,
 	slowOnHit: SlowConfig?,
 	frostbiteOnHit: FrostbiteOnHit?,
+	lesserFrostOnHit: LesserFrostOnHit?,
 	recipients: {[Player]: boolean},
 	visualScale: number?,
 	visualColor: Color3?,
@@ -158,6 +166,8 @@ type ProjectileRecord = {
 	isSplitChild: boolean?,
 	timeStopFrozen: boolean?,
 	timeStopSessionId: number?,
+	timeStopFreezeGraceUntil: number?,
+	timeStopFreezeGraceSessionId: number?,
 	frozenAt: number?,
 	frozenPosition: Vector3?,
 	accumulatedFrozenDuration: number?,
@@ -210,6 +220,7 @@ local MAX_HITS_PER_TICK = 600
 local MAX_SPAWNS_PER_SECOND = 400
 local RECIPIENT_REFRESH_INTERVAL = 0.5
 local MAX_RECIPIENT_SPAWNS_PER_TICK = 200
+local TIME_STOP_FREEZE_GRACE_DURATION = 0.1
 local PETAL_MIN_SEPARATION = 30
 local ENEMY_COLLISION_GRACE_RADIUS = 1.0
 local ENEMY_CANDIDATE_BASE_BUFFER = 30.0
@@ -265,6 +276,19 @@ local pendingStates: {[Player]: {any}} = {}
 local petalRetargetRequests: {[number]: boolean} = {}
 local freezeProjectile: (ProjectileRecord, Vector3?, number?) -> () = function() end
 local unfreezeProjectile: (ProjectileRecord, number?) -> () = function() end
+
+local function beginTimeStopFreezeGrace(record: ProjectileRecord, sessionId: number?, nowOverride: number?)
+	local now = nowOverride or getSimTime()
+	if record.timeStopFrozen then
+		return
+	end
+	if record.timeStopFreezeGraceUntil and record.timeStopFreezeGraceUntil > now then
+		return
+	end
+	record.timeStopFreezeGraceUntil = now + TIME_STOP_FREEZE_GRACE_DURATION
+	record.timeStopFreezeGraceSessionId = sessionId
+end
+
 local activeExplosions: {{
 	position: Vector3,
 	radius: number,
@@ -863,6 +887,7 @@ local function spawnSplitProjectiles(record: ProjectileRecord, hitPos: Vector3, 
 			isSplitChild = true,
 			procCoefficient = splitProcCoefficient,
 			splitProcCoefficient = record.splitProcCoefficient,
+			lesserFrostOnHit = record.lesserFrostOnHit,
 		})
 
 		if splitProjectileId and excludedTargetEntity then
@@ -1208,6 +1233,7 @@ function ProjectileService.spawnProjectile(payload: {
 	splitOnHit: SplitConfig?,
 	slowOnHit: SlowConfig?,
 	frostbiteOnHit: FrostbiteOnHit?,
+	lesserFrostOnHit: LesserFrostOnHit?,
 	isSplitChild: boolean?,
 	procCoefficient: number?,
 	splitProcCoefficient: number?,
@@ -1280,6 +1306,7 @@ function ProjectileService.spawnProjectile(payload: {
 		splitOnHit = payload.splitOnHit,
 		slowOnHit = payload.slowOnHit,
 		frostbiteOnHit = payload.frostbiteOnHit,
+		lesserFrostOnHit = payload.lesserFrostOnHit,
 		recipients = {},
 		visualScale = payload.visualScale,
 		visualColor = payload.visualColor,
@@ -1294,6 +1321,8 @@ function ProjectileService.spawnProjectile(payload: {
 		isSplitChild = payload.isSplitChild == true,
 		timeStopFrozen = false,
 		timeStopSessionId = nil,
+		timeStopFreezeGraceUntil = nil,
+		timeStopFreezeGraceSessionId = nil,
 		frozenAt = nil,
 		frozenPosition = nil,
 		accumulatedFrozenDuration = 0,
@@ -1320,7 +1349,7 @@ function ProjectileService.spawnProjectile(payload: {
 	if TemporalStasisSystem and TemporalStasisSystem.isActive and TemporalStasisSystem.isActive() then
 		if TemporalStasisSystem.isPointFrozen and TemporalStasisSystem.isPointFrozen(record.origin) then
 			local sessionId = TemporalStasisSystem.getActiveSessionId and TemporalStasisSystem.getActiveSessionId() or nil
-			freezeProjectile(record, record.origin, sessionId)
+			beginTimeStopFreezeGrace(record, sessionId, now)
 		end
 	end
 
@@ -1583,6 +1612,8 @@ freezeProjectile = function(record: ProjectileRecord, freezePosition: Vector3?, 
 	local frozenPos = freezePosition or record.lastPos
 	record.timeStopFrozen = true
 	record.timeStopSessionId = sessionId
+	record.timeStopFreezeGraceUntil = nil
+	record.timeStopFreezeGraceSessionId = nil
 	record.frozenAt = now
 	record.frozenPosition = frozenPos
 	record.lastPos = frozenPos
@@ -1737,9 +1768,26 @@ function ProjectileService.step(dt: number)
 				continue
 			end
 			unfreezeProjectile(record, stasisSessionId)
-		elseif stasisActive and TemporalStasisSystem and TemporalStasisSystem.isPointFrozen and TemporalStasisSystem.isPointFrozen(record.lastPos) then
-			freezeProjectile(record, record.lastPos, stasisSessionId)
-			continue
+		else
+			local graceUntil = record.timeStopFreezeGraceUntil
+			if graceUntil then
+				if not stasisActive then
+					record.timeStopFreezeGraceUntil = nil
+					record.timeStopFreezeGraceSessionId = nil
+				elseif now >= graceUntil then
+					local graceSessionId = record.timeStopFreezeGraceSessionId
+					record.timeStopFreezeGraceUntil = nil
+					record.timeStopFreezeGraceSessionId = nil
+					if TemporalStasisSystem and TemporalStasisSystem.isPointFrozen and TemporalStasisSystem.isPointFrozen(record.lastPos) then
+						freezeProjectile(record, record.lastPos, graceSessionId or stasisSessionId)
+						continue
+					end
+				end
+			end
+			if (not record.timeStopFreezeGraceUntil) and stasisActive and TemporalStasisSystem and TemporalStasisSystem.isPointFrozen and TemporalStasisSystem.isPointFrozen(record.lastPos) then
+				freezeProjectile(record, record.lastPos, stasisSessionId)
+				continue
+			end
 		end
 		if record.expiresAt <= now then
 			local impactPos = record.lastPos
@@ -1916,12 +1964,7 @@ function ProjectileService.step(dt: number)
 		if stasisActive and TemporalStasisSystem and TemporalStasisSystem.getFreezeEntryPoint then
 			local freezePos, _entryT, entrySessionId = TemporalStasisSystem.getFreezeEntryPoint(record.lastPos, newPos)
 			if freezePos then
-				record.lastPos = freezePos
-				record.lastSimTime = now
-				record.nextSimTime = now + simInterval
-				simCount += 1
-				freezeProjectile(record, freezePos, entrySessionId or stasisSessionId)
-				continue
+				beginTimeStopFreezeGrace(record, entrySessionId or stasisSessionId, now)
 			end
 		end
 
@@ -2007,7 +2050,7 @@ function ProjectileService.step(dt: number)
 			end
 
 			local collideWithWorld = not record.beam and (
-				record.kind == "IceShardSpecial"
+				record.kind == "IceShard"
 				or (record.collision and record.collision.collideWithWorld == true)
 			)
 			if collideWithWorld then
@@ -2181,6 +2224,16 @@ function ProjectileService.step(dt: number)
 								damageTakenPerStack = record.frostbiteOnHit.damageTakenPerStack,
 							})
 						end
+						if record.lesserFrostOnHit then
+							sideEffects = sideEffects or {}
+							table.insert(sideEffects, {
+								kind = "lesserFrost",
+								sourceEntity = record.ownerEntity,
+								statusId = record.lesserFrostOnHit.statusId,
+								stacks = record.lesserFrostOnHit.stacks,
+								duration = record.lesserFrostOnHit.duration,
+							})
+						end
 						if record.slowOnHit then
 							sideEffects = sideEffects or {}
 							table.insert(sideEffects, {
@@ -2221,6 +2274,14 @@ function ProjectileService.step(dt: number)
 									record.frostbiteOnHit.duration,
 									record.frostbiteOnHit.damageTakenPerStack,
 									record.frostbiteOnHit.statusId
+								)
+							end
+							if didApply and record.lesserFrostOnHit and EnemyFrostSystem and EnemyFrostSystem.applyLesserFrost then
+								EnemyFrostSystem.applyLesserFrost(
+									enemyId,
+									record.ownerEntity,
+									record.lesserFrostOnHit.stacks,
+									record.lesserFrostOnHit.duration
 								)
 							end
 							if didApply and record.slowOnHit then

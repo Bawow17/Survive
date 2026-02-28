@@ -96,7 +96,7 @@ local function broadcastToClient(playerEntity: number, statusEffects: any)
 end
 
 -- Grant invincibility for a duration (stacks with existing invincibility buffs)
--- showInTracker: if true, shows in buff duration tracker (for level-up). false for Cloak powerup.
+-- showInTracker: if true, shows in buff duration tracker.
 -- pauseAware: if true, duration pauses during player pause (levelup, not death)
 -- isSpawnProtection: if true, enemies won't target this player
 function StatusEffectSystem.grantInvincibility(playerEntity: number, duration: number, showInTracker: boolean?, pauseAware: boolean?, isSpawnProtection: boolean?)

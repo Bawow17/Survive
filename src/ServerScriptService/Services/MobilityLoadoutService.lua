@@ -10,21 +10,11 @@ local Components: any
 local DirtyService: any
 
 local function replicateIceTracerAssets()
-	local paths = {
-		IceTracerConfig.iceTracerPathModelPath,
-		IceTracerConfig.iceTracerBeam1ModelPath,
-		IceTracerConfig.iceTracerBeam2ModelPath,
-		IceTracerConfig.iceTracerAnimationModelPath,
-	}
-
-	for _, serverPath in ipairs(paths) do
-		if type(serverPath) == "string" and serverPath ~= "" then
-			local ok = ModelReplicationService.replicateMobilityModel(serverPath)
-			if not ok then
-				warn("[MobilityLoadoutService] Could not replicate IceTracer asset at ServerStorage." .. serverPath)
-			end
-		end
+	if ModelReplicationService.replicateIceUtilityAssets() then
+		return
 	end
+
+	warn("[MobilityLoadoutService] Ice utility asset replication did not complete successfully")
 end
 
 function MobilityLoadoutService.init(worldRef: any, components: any, dirtyService: any)

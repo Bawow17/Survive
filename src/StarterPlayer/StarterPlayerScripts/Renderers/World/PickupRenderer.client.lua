@@ -32,8 +32,6 @@ local PickupsDespawnBatch = pickupRemotesFolder:WaitForChild("PickupsDespawnBatc
 local PickupsValueUpdate = pickupRemotesFolder:WaitForChild("PickupsValueUpdate") :: RemoteEvent
 local PickupRequest = pickupRemotesFolder:WaitForChild("PickupRequest") :: RemoteEvent
 
-local PowerupEffectUpdate = remotesFolder:FindFirstChild("PowerupEffectUpdate")
-
 local pickupsFolder: Instance = workspace:FindFirstChild("Pickups") or Instance.new("Folder")
 pickupsFolder.Name = "Pickups"
 pickupsFolder.Parent = workspace
@@ -47,12 +45,11 @@ local REQUEST_RETRY_DELAY = 0.4
 local SEEK_TIMEOUT = 1.5
 local CONTACT_DESPAWN_DISTANCE = 2.0
 local CONTACT_DESPAWN_DISTANCE_SQ = CONTACT_DESPAWN_DISTANCE * CONTACT_DESPAWN_DISTANCE
-local MAGNET_RADIUS_MULTIPLIER = 6
-local GLOBAL_MAGNET_RADIUS = 1000
 local ORB_TEMPLATE_PATH = {"ContentDrawer", "ItemModels", "OrbTemplate"}
 local DEFAULT_INTERACT_RADIUS = 20
 local DEFAULT_AUTO_PICKUP_RADIUS = 5
 local DEFAULT_SPIN_PERIOD = 8
+local PICKUP_VISUAL_HEIGHT_OFFSET = 1.0
 
 local COLOR_BY_KIND = {
 	expBlue = Color3.fromRGB(100, 150, 255),
@@ -91,6 +88,7 @@ type PickupRecord = {
 	spinPeriod: number?,
 	bobAmplitude: number?,
 	visualKind: "part" | "orbModel" | "customModel",
+	baseRotation: CFrame?,
 }
 
 local activePickups: {[number]: PickupRecord} = {}
@@ -99,8 +97,6 @@ local modelPool: {Model} = {}
 local modelPoolByPath: {[string]: {Model}} = {}
 local MAX_POOL_SIZE = 300
 local orbTemplate: Model? = nil
-
-local magnetActiveUntil = 0
 
 local function setPickupPrompt(promptData: any)
 	if PickupPromptState and PickupPromptState.setPrompt then
@@ -204,7 +200,11 @@ local function configureModel(model: Model): (BasePart, {BasePart})
 	return model.PrimaryPart :: BasePart, parts
 end
 
-local function acquireVisual(modelPath: string?): (Instance, BasePart, {BasePart}?, "part" | "orbModel" | "customModel")
+local function extractRotation(cf: CFrame): CFrame
+	return CFrame.fromMatrix(Vector3.zero, cf.RightVector, cf.UpVector, cf.LookVector)
+end
+
+local function acquireVisual(modelPath: string?): (Instance, BasePart, {BasePart}?, "part" | "orbModel" | "customModel", CFrame?)
 	if typeof(modelPath) == "string" and modelPath ~= "" then
 		local pool = modelPoolByPath[modelPath]
 		local model = pool and table.remove(pool) or nil
@@ -217,7 +217,7 @@ local function acquireVisual(modelPath: string?): (Instance, BasePart, {BasePart
 		if model then
 			model.Parent = pickupsFolder
 			local primary, parts = configureModel(model)
-			return model, primary, parts, "customModel"
+			return model, primary, parts, "customModel", extractRotation(model:GetPivot())
 		end
 	end
 
@@ -229,7 +229,7 @@ local function acquireVisual(modelPath: string?): (Instance, BasePart, {BasePart
 		end
 		model.Parent = pickupsFolder
 		local primary, parts = configureModel(model)
-		return model, primary, parts, "orbModel"
+		return model, primary, parts, "orbModel", extractRotation(model:GetPivot())
 	end
 
 	local part = table.remove(partPool)
@@ -237,7 +237,7 @@ local function acquireVisual(modelPath: string?): (Instance, BasePart, {BasePart
 		part = createPickupPart()
 	end
 	part.Parent = pickupsFolder
-	return part, part, nil, "part"
+	return part, part, nil, "part", nil
 end
 
 local function releaseVisual(record: PickupRecord)
@@ -295,8 +295,13 @@ local function applyVisual(record: PickupRecord)
 end
 
 local function setRecordCFrame(record: PickupRecord, cf: CFrame)
+	cf = cf + Vector3.new(0, PICKUP_VISUAL_HEIGHT_OFFSET, 0)
 	if record.instance:IsA("Model") then
-		(record.instance :: Model):PivotTo(cf)
+		local finalCf = cf
+		if record.baseRotation then
+			finalCf = cf * record.baseRotation
+		end
+		(record.instance :: Model):PivotTo(finalCf)
 	else
 		record.primary.CFrame = cf
 	end
@@ -312,19 +317,6 @@ local function getPickupRange(): number
 		mult = 1
 	end
 	return baseRange * mult
-end
-
-local function isMagnetActive(now: number): boolean
-	return now < magnetActiveUntil
-end
-
-if PowerupEffectUpdate and PowerupEffectUpdate:IsA("RemoteEvent") then
-	PowerupEffectUpdate.OnClientEvent:Connect(function(data: any)
-		if data and data.powerupType == "Magnet" then
-			local duration = data.duration or 0
-			magnetActiveUntil = math.max(magnetActiveUntil, tick() + duration)
-		end
-	end)
 end
 
 PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
@@ -378,7 +370,7 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			continue
 		end
 
-		local instance, primary, parts, visualKind = acquireVisual(modelPath)
+		local instance, primary, parts, visualKind, baseRotation = acquireVisual(modelPath)
 		local record: PickupRecord = {
 			id = id,
 			kind = data.kind or "expBlue",
@@ -402,6 +394,7 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			spinPeriod = if typeof(data.spinPeriod) == "number" then data.spinPeriod else DEFAULT_SPIN_PERIOD,
 			bobAmplitude = if typeof(data.bobAmplitude) == "number" then data.bobAmplitude else BOB_AMPLITUDE,
 			visualKind = visualKind,
+			baseRotation = baseRotation,
 		}
 		if record.seekOnSpawn and not record.requiresInteract then
 			record.seeking = true
@@ -608,13 +601,6 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local playerPos = hrp.Position
 	local pickupRadius = getPickupRange()
 	local pickupRadiusSq = pickupRadius * pickupRadius
-	local magnetRadius = pickupRadius * MAGNET_RADIUS_MULTIPLIER
-	local magnetRadiusSq = magnetRadius * magnetRadius
-	local magnetActive = isMagnetActive(now)
-	if magnetActive then
-		magnetRadius = GLOBAL_MAGNET_RADIUS
-		magnetRadiusSq = magnetRadius * magnetRadius
-	end
 
 	checkAccumulator += dt
 	local doCheck = false
@@ -693,8 +679,6 @@ RunService.Heartbeat:Connect(function(dt: number)
 					record.seekStartAt = now
 					PickupRequest:FireServer(record.id)
 				end
-			elseif magnetActive and distSq <= magnetRadiusSq and record.kind ~= "expRed" then
-				record.seeking = true
 			elseif record.seekOnSpawn then
 				record.seeking = true
 			elseif not record.lastRequestAt then
@@ -702,7 +686,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 			end
 		end
 
-		if record.seeking and record.lastRequestAt and record.seekStartAt and not magnetActive then
+		if record.seeking and record.lastRequestAt and record.seekStartAt then
 			if (now - record.seekStartAt) > SEEK_TIMEOUT then
 				record.seeking = false
 				record.lastRequestAt = nil

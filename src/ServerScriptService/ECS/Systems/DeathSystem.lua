@@ -175,9 +175,6 @@ function DeathSystem.triggerPlayerDeath(playerEntity: number, player: Player)
 	local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
 	ProjectileService.despawnOwnedProjectiles(playerEntity)
 
-	local IceShardSystem = require(game.ServerScriptService.Abilities.IceShard.System)
-	IceShardSystem.clearPetalState(playerEntity)
-
 	local AfterimageCloneSystem = require(game.ServerScriptService.ECS.Systems.AfterimageCloneSystem)
 	AfterimageCloneSystem.despawnClones(playerEntity)
 	

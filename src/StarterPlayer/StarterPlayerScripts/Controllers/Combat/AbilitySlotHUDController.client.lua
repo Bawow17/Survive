@@ -123,7 +123,7 @@ local slotRefs: {[string]: SlotRef} = {
 local CASTABLE_SLOTS: {SlotName} = { "Primary", "Utility", "Secondary", "Special", "Equipment" }
 local ABILITY_SLOTS: {SlotName} = { "Secondary", "Special", "Equipment" }
 local NON_SECONDARY_ABILITY_SLOTS: {SlotName} = { "Special", "Equipment" }
-local ABILITY_PRIORITY = { "IceShardSpecial", "FireBall", "IceShard", "Refractions" }
+local ABILITY_PRIORITY = { "IceShard", "FireBall", "Refractions" }
 
 local chargeLabels: {[string]: TextLabel?} = {
 	Primary = nil,

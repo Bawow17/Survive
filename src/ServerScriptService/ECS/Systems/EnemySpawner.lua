@@ -7,6 +7,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
+local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local EnemyRegistry = require(game.ServerScriptService.Enemies.EnemyRegistry)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
@@ -259,20 +260,6 @@ local function getPlayerPartsToExclude()
 		for _, orbModel in pairs(expOrbsFolder:GetChildren()) do
 			if orbModel:IsA("Model") then
 				for _, part in pairs(orbModel:GetDescendants()) do
-					if part:IsA("BasePart") then
-						table.insert(playerPartsCache, part)
-					end
-				end
-			end
-		end
-	end
-	
-	-- Exclude powerups
-	local powerupsFolder = Workspace:FindFirstChild("Powerups")
-	if powerupsFolder then
-		for _, powerupModel in pairs(powerupsFolder:GetChildren()) do
-			if powerupModel:IsA("Model") then
-				for _, part in pairs(powerupModel:GetDescendants()) do
 					if part:IsA("BasePart") then
 						table.insert(playerPartsCache, part)
 					end
@@ -586,8 +573,9 @@ local function computePlayerPowerScore(playerEntity: number): number
 	local healthFlat = safeNumber(effects.healthFlatBonus, 0)
 	local healthEffective = (baseHealth * healthMult + healthFlat) / baseHealth
 
-	local armorReduction = math.clamp(safeNumber(effects.armorReduction, 0), 0, 0.6)
-	local armorEffective = 1 / math.max(0.1, 1 - armorReduction * armorReduction)
+	local playerArmor = safeNumber(PlayerBalance.BaseArmor, 0) + safeNumber(effects.armor, 0)
+	local armorMultiplier = DamageSystem.getArmorDamageMultiplier(playerArmor)
+	local armorEffective = 1 / math.max(0.0001, armorMultiplier)
 
 	local baseRegen = math.max(0.01, safeNumber(PlayerBalance.HealthRegenRate, 1))
 	local regenMult = math.max(0, safeNumber(effects.regenMultiplier, 1))

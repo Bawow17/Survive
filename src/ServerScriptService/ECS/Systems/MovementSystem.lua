@@ -28,6 +28,7 @@ local _DesiredVelocity: any
 local _RepulsionVelocity: any
 local _Knockback: any
 local _EnemyTimeStopped: any
+local _EnemyFreeze: any
 
 local CHARGER_DASH_STATE = 3
 local ENEMY_DISPLACEMENT_MULT = 2.5
@@ -134,20 +135,6 @@ local function getPartsToExcludeFromGround()
 		for _, orbModel in pairs(expOrbsFolder:GetChildren()) do
 			if orbModel:IsA("Model") then
 				for _, part in pairs(orbModel:GetDescendants()) do
-					if part:IsA("BasePart") then
-						table.insert(playerPartsCache, part)
-					end
-				end
-			end
-		end
-	end
-	
-	-- Exclude powerups from ground raycasts
-	local powerupsFolder = Workspace:FindFirstChild("Powerups")
-	if powerupsFolder then
-		for _, powerupModel in pairs(powerupsFolder:GetChildren()) do
-			if powerupModel:IsA("Model") then
-				for _, part in pairs(powerupModel:GetDescendants()) do
 					if part:IsA("BasePart") then
 						table.insert(playerPartsCache, part)
 					end
@@ -340,6 +327,7 @@ function MovementSystem.init(worldRef: any, components: any, dirtyService: any)
 	_RepulsionVelocity = Components.RepulsionVelocity
 	_Knockback = Components.Knockback
 	_EnemyTimeStopped = Components.EnemyTimeStopped
+	_EnemyFreeze = Components.EnemyFreeze
 	
 	-- Create cached query for performance
 	movingQuery = world:query(Components.Position, Components.Velocity, Components.EntityType):cached()
@@ -452,19 +440,25 @@ function MovementSystem.step(dt: number)
 			continue
 		end
 		
-		-- Exclude ExpOrbs from movement system UNLESS they have a MagnetPull component (being pulled by magnet powerup)
+		-- Exclude ExpOrbs from movement system unless they are actively being pulled.
 		if entityType and entityType.type == "ExpOrb" then
-			local magnetPull = world:get(entity, Components.MagnetPull)
-			if not magnetPull then
+			local seekData = world:get(entity, Components.OrbSeek)
+			if not seekData then
 				continue  -- Orb is not being pulled, keep it stationary
 			end
-			-- If magnetPull exists, allow the orb to move
+			-- If OrbSeek exists, allow the orb to move
 		end
 		
 		-- Derive effective velocity (Desired + External) for enemies
 		if entityType and entityType.type == "Enemy" then
 			local timeStopped = _EnemyTimeStopped and world:get(entity, _EnemyTimeStopped)
 			if timeStopped and timeStopped.active == true then
+				velocity = { x = 0, y = 0, z = 0 }
+				DirtyService.setIfChanged(world, entity, _Velocity, velocity, "Velocity")
+				continue
+			end
+			local freezeData = _EnemyFreeze and world:get(entity, _EnemyFreeze)
+			if freezeData and (freezeData.endTime or 0) > tick() then
 				velocity = { x = 0, y = 0, z = 0 }
 				DirtyService.setIfChanged(world, entity, _Velocity, velocity, "Velocity")
 				continue

@@ -56,8 +56,20 @@ local function resetEnemyEntity(entity: number, enemyType: string, position: Vec
 	if Components.EnemyFrostbite and world:has(entity, Components.EnemyFrostbite) then
 		world:remove(entity, Components.EnemyFrostbite)
 	end
+	if Components.EnemyLesserFrost and world:has(entity, Components.EnemyLesserFrost) then
+		world:remove(entity, Components.EnemyLesserFrost)
+	end
+	if Components.EnemyGreaterFrost and world:has(entity, Components.EnemyGreaterFrost) then
+		world:remove(entity, Components.EnemyGreaterFrost)
+	end
+	if Components.EnemyFreeze and world:has(entity, Components.EnemyFreeze) then
+		world:remove(entity, Components.EnemyFreeze)
+	end
 	if Components.EnemyTimeStopped and world:has(entity, Components.EnemyTimeStopped) then
 		world:remove(entity, Components.EnemyTimeStopped)
+	end
+	if Components.EnemyArmor and world:has(entity, Components.EnemyArmor) then
+		world:remove(entity, Components.EnemyArmor)
 	end
 
 	local posData = { x = position.X, y = position.Y, z = position.Z }
@@ -250,8 +262,20 @@ function EnemyPool.release(entity: number)
 		if world:has(entity, Components.EnemyTier) then
 			world:remove(entity, Components.EnemyTier)
 		end
+		if world:has(entity, Components.EnemyArmor) then
+			world:remove(entity, Components.EnemyArmor)
+		end
 		if Components.EnemyFrostbite and world:has(entity, Components.EnemyFrostbite) then
 			world:remove(entity, Components.EnemyFrostbite)
+		end
+		if Components.EnemyLesserFrost and world:has(entity, Components.EnemyLesserFrost) then
+			world:remove(entity, Components.EnemyLesserFrost)
+		end
+		if Components.EnemyGreaterFrost and world:has(entity, Components.EnemyGreaterFrost) then
+			world:remove(entity, Components.EnemyGreaterFrost)
+		end
+		if Components.EnemyFreeze and world:has(entity, Components.EnemyFreeze) then
+			world:remove(entity, Components.EnemyFreeze)
 		end
 		if Components.EnemyTimeStopped and world:has(entity, Components.EnemyTimeStopped) then
 			world:remove(entity, Components.EnemyTimeStopped)

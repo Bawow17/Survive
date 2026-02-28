@@ -149,20 +149,65 @@ local function resolveReplicatedModel(replicatedPath: string, modelName: string)
 	return nil
 end
 
+local function resolveReplicatedInstance(replicatedPath: string, childName: string): Instance?
+	local current: Instance = ReplicatedStorage
+	for _, part in ipairs(string.split(replicatedPath, ".")) do
+		local nextFolder = current:FindFirstChild(part)
+		if not nextFolder then
+			return nil
+		end
+		current = nextFolder
+	end
+
+	return current:FindFirstChild(childName)
+end
+
+local function syncReplicatedInstance(source: Instance, target: Instance): Instance
+	if source.ClassName ~= target.ClassName then
+		local parent = target.Parent
+		if parent then
+			target:Destroy()
+			local replacement = source:Clone()
+			replacement.Parent = parent
+			return replacement
+		end
+		return target
+	end
+
+	if source:IsA("Folder") or source:IsA("Model") then
+		for _, sourceChild in ipairs(source:GetChildren()) do
+			local targetChild = target:FindFirstChild(sourceChild.Name)
+			if targetChild then
+				syncReplicatedInstance(sourceChild, targetChild)
+			else
+				local clonedChild = sourceChild:Clone()
+				clonedChild.Parent = target
+			end
+		end
+	end
+
+	return target
+end
+
 -- Replicate a model from ServerStorage to ReplicatedStorage
 -- @param serverPath: Path in ServerStorage (e.g., "ContentDrawer.Enemies.Mobs.Zombie")
 -- @param replicatedPath: Path in ReplicatedStorage (e.g., "ContentDrawer.Enemies.Mobs")
 -- @return success: boolean, model: Instance?
 function ModelReplicationService.replicateModel(serverPath: string, replicatedPath: string): (boolean, Instance?)
-	-- Check cache
-	local cacheKey = serverPath .. " -> " .. replicatedPath
-	if replicatedModels[cacheKey] then
-		-- Already replicated, just return success
-		return true, nil
-	end
-	
 	-- Parse server path
 	local serverParts = string.split(serverPath, ".")
+	local modelName = serverParts[#serverParts]
+
+	-- Check cache, but only if the replicated instance still exists.
+	local cacheKey = serverPath .. " -> " .. replicatedPath
+	if replicatedModels[cacheKey] then
+		local existing = resolveReplicatedInstance(replicatedPath, modelName)
+		if existing then
+			return true, existing
+		end
+		replicatedModels[cacheKey] = nil
+	end
+
 	local currentServer = ServerStorage
 	
 	for i, part in ipairs(serverParts) do
@@ -192,10 +237,11 @@ function ModelReplicationService.replicateModel(serverPath: string, replicatedPa
 	end
 	
 	-- Check if model already exists in destination
-	local modelName = serverParts[#serverParts]
-	if currentReplicated:FindFirstChild(modelName) then
+	local existing = currentReplicated:FindFirstChild(modelName)
+	if existing then
+		existing = syncReplicatedInstance(currentServer, existing)
 		replicatedModels[cacheKey] = true
-		return true, currentReplicated:FindFirstChild(modelName)
+		return true, existing
 	end
 	
 	-- Clone the model to ReplicatedStorage
@@ -299,6 +345,45 @@ function ModelReplicationService.replicateCommonItem(itemModelName: string): boo
 	return success
 end
 
+function ModelReplicationService.replicateIceUtilityAssets(): boolean
+	local branchSuccess = ModelReplicationService.replicateModel(
+		"ContentDrawer.PlayerAbilities.Ice.Utility",
+		"ContentDrawer.PlayerAbilities.Ice"
+	)
+	if branchSuccess then
+		return true
+	end
+
+	local success = true
+	local paths = {
+		"ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IcePath",
+		"ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser",
+		"ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser2",
+		"ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceTracerAnimation",
+	}
+
+	for _, path in ipairs(paths) do
+		local ok = ModelReplicationService.replicateMobilityModel(path)
+		if not ok then
+			success = false
+			warn("[ModelReplicationService] Failed to replicate ice utility asset '" .. path .. "'")
+		end
+	end
+
+	return success
+end
+
+function ModelReplicationService.replicateIceSpecialAssets(): boolean
+	local success, _ = ModelReplicationService.replicateModel(
+		"ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel",
+		"ContentDrawer.PlayerAbilities.Ice.Special.IceShard"
+	)
+	if not success then
+		warn("[ModelReplicationService] Failed to replicate ice special asset 'ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel'")
+	end
+	return success
+end
+
 -- Initialize by replicating commonly used models
 function ModelReplicationService.init()
 	
@@ -317,8 +402,16 @@ function ModelReplicationService.init()
 		"ContentDrawer.PlayerAbilities.MobilityAbilities.BashShield.Afterimage",
 		"ContentDrawer.PlayerAbilities.MobilityAbilities.BashShield"
 	)
+
+	-- Replicate starter ice mobility assets up-front because multiple client systems
+	-- reference these paths directly before loadout data arrives.
+	ModelReplicationService.replicateIceUtilityAssets()
+
+	-- Replicate starter ice special projectile model up-front because the special
+	-- now sources visuals from the PlayerAbilities branch directly.
+	ModelReplicationService.replicateIceSpecialAssets()
 	
-	-- Note: Other powerup and ability models are replicated on-demand when they spawn/are unlocked
+	-- Note: Other ability models are replicated on-demand when they spawn/are unlocked
 	-- This ensures models exist before rendering
 	
 end
@@ -344,14 +437,6 @@ end
 -- Get exp orb template from ReplicatedStorage
 function ModelReplicationService.getExpOrbTemplate(): Model?
 	return resolveReplicatedModel("ContentDrawer.ItemModels", "OrbTemplate")
-end
-
--- Replicate powerup model from ServerStorage to ReplicatedStorage
-function ModelReplicationService.replicatePowerup(powerupType: string): boolean
-	local serverPath = "ContentDrawer.ItemModels.Powerups." .. powerupType
-	local replicatedPath = "ContentDrawer.ItemModels.Powerups"
-	local success, _ = ModelReplicationService.replicateModel(serverPath, replicatedPath)
-	return success
 end
 
 -- Replicate a mobility ability model from ServerStorage to ReplicatedStorage

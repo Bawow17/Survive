@@ -615,7 +615,6 @@ function handleStartCleanup(player: Player)
 		enemies = {},
 		projectiles = {},
 		expOrbs = {},
-		powerups = {},
 		afterimageClones = {},
 	}
 	
@@ -629,8 +628,6 @@ function handleStartCleanup(player: Player)
 			table.insert(entitiesToDestroy.projectiles, entity)
 		elseif entityType.type == "ExpOrb" then
 			table.insert(entitiesToDestroy.expOrbs, entity)
-		elseif entityType.type == "Powerup" then
-			table.insert(entitiesToDestroy.powerups, entity)
 		elseif entityType.type == "AfterimageClone" then
 			table.insert(entitiesToDestroy.afterimageClones, entity)
 		end
@@ -645,9 +642,6 @@ function handleStartCleanup(player: Player)
 		ECSWorldService.DestroyEntity(entity)
 	end
 	for _, entity in ipairs(entitiesToDestroy.expOrbs) do
-		ECSWorldService.DestroyEntity(entity)
-	end
-	for _, entity in ipairs(entitiesToDestroy.powerups) do
 		ECSWorldService.DestroyEntity(entity)
 	end
 	for _, entity in ipairs(entitiesToDestroy.afterimageClones) do
@@ -675,9 +669,6 @@ function handleStartCleanup(player: Player)
 		for _, entity in ipairs(entitiesToDestroy.expOrbs) do
 			table.insert(allEntityIds, entity)
 		end
-		for _, entity in ipairs(entitiesToDestroy.powerups) do
-			table.insert(allEntityIds, entity)
-		end
 		for _, entity in ipairs(entitiesToDestroy.afterimageClones) do
 			table.insert(allEntityIds, entity)
 		end
@@ -691,7 +682,7 @@ function handleStartCleanup(player: Player)
 	task.wait(2.0)  -- Increased from 1.0 to 2.0 seconds
 	
 	-- Double-check: Count remaining entities
-	local remainingCounts = {enemies = 0, projectiles = 0, expOrbs = 0, powerups = 0, afterimageClones = 0}
+	local remainingCounts = {enemies = 0, projectiles = 0, expOrbs = 0, afterimageClones = 0}
 	local recheckQuery = world:query(Components.EntityType)
 	for entity, entityType in recheckQuery do
 		if entityType.type == "Enemy" then
@@ -700,17 +691,15 @@ function handleStartCleanup(player: Player)
 			remainingCounts.projectiles = remainingCounts.projectiles + 1
 		elseif entityType.type == "ExpOrb" then
 			remainingCounts.expOrbs = remainingCounts.expOrbs + 1
-		elseif entityType.type == "Powerup" then
-			remainingCounts.powerups = remainingCounts.powerups + 1
 		elseif entityType.type == "AfterimageClone" then
 			remainingCounts.afterimageClones = remainingCounts.afterimageClones + 1
 		end
 	end
 	
 	-- Clean up any stragglers
-	if remainingCounts.expOrbs > 0 or remainingCounts.enemies > 0 or remainingCounts.projectiles > 0 or remainingCounts.powerups > 0 or remainingCounts.afterimageClones > 0 then
+	if remainingCounts.expOrbs > 0 or remainingCounts.enemies > 0 or remainingCounts.projectiles > 0 or remainingCounts.afterimageClones > 0 then
 		for entity, entityType in recheckQuery do
-			if entityType.type == "Enemy" or entityType.type == "Projectile" or entityType.type == "ExpOrb" or entityType.type == "Powerup" or entityType.type == "AfterimageClone" then
+			if entityType.type == "Enemy" or entityType.type == "Projectile" or entityType.type == "ExpOrb" or entityType.type == "AfterimageClone" then
 				ECSWorldService.DestroyEntity(entity)
 			end
 		end

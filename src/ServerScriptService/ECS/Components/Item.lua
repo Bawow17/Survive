@@ -16,16 +16,10 @@ ItemComponents.Pickup = world:component()
 -- Rarity component - Item rarity and effects
 ItemComponents.Rarity = world:component()
 
--- Magnetic component - Magnetic attraction data
-ItemComponents.Magnetic = world:component()
-
 -- Bounce component - Bounce physics data
 ItemComponents.Bounce = world:component()
 
--- PowerupData component - Powerup type and collected state
-ItemComponents.PowerupData = world:component()
-
--- MagnetPull component - Magnet pull state for exp orbs
-ItemComponents.MagnetPull = world:component()
+-- OrbSeek component - Pull state for exp orbs
+ItemComponents.OrbSeek = world:component()
 
 return ItemComponents

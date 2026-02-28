@@ -1,5 +1,5 @@
 --!strict
--- IceShardSpecialInputController - Manual cast input for IceShardSpecial.
+-- IceShardInputController - Manual cast input for IceShard.
 
 local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
@@ -9,7 +9,7 @@ local Workspace = game:GetService("Workspace")
 
 local localPlayer = Players.LocalPlayer
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
-local castRequestRemote = remotesFolder:WaitForChild("IceShardSpecialCastRequest") :: RemoteEvent
+local castRequestRemote = remotesFolder:WaitForChild("IceShardCastRequest") :: RemoteEvent
 local sprintStateRemote = remotesFolder:WaitForChild("SprintState") :: RemoteEvent
 
 local CAST_KEY = Enum.KeyCode.R
