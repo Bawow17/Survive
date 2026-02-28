@@ -23,6 +23,7 @@ local ProjectilesDespawnBatch = waitForProjectileRemote("ProjectilesDespawnBatch
 local ProjectilesImpactBatch = waitForProjectileRemote("ProjectilesImpactBatch")
 local ProjectilesFreezeBatch = waitForProjectileRemote("ProjectilesFreezeBatch")
 local ProjectilesResumeBatch = waitForProjectileRemote("ProjectilesResumeBatch")
+local ProjectilesStateBatch = waitForProjectileRemote("ProjectilesStateBatch")
 
 local ModelPaths = require(ReplicatedStorage.Shared.ModelPaths)
 
@@ -35,6 +36,10 @@ local BASE_RENDER_DISABLE_DISTANCE = 340
 local HOMING_UPDATE_INTERVAL = 0.1
 local ENEMY_SNAPSHOT_INTERVAL = 0.2
 local DEFAULT_HOMING_STRENGTH = 180
+local HOMING_SNAP_DISTANCE = 8
+local HOMING_POS_BLEND = 0.35
+local HOMING_DIR_BLEND = 0.5
+local AUTHORITATIVE_TIMEOUT = 0.35
 local EXPLOSION_STEPS = 10
 local EXPLOSION_EXPAND_DURATION = 0.25
 local EXPLOSION_FADE_DURATION = 0.25
@@ -117,6 +122,11 @@ type ProjectileRecord = {
 	lastSimTime: number?,
 	lastPos: Vector3?,
 	lastHomingUpdate: number?,
+	lastAuthoritativePos: Vector3?,
+	lastAuthoritativeDir: Vector3?,
+	lastAuthoritativeAt: number?,
+	lastAuthoritativeServerTime: number?,
+	lastAuthoritativeTarget: number?,
 	lastOwnerPos: Vector3?,
 	stickOffset: Vector3?,
 	isSplitChild: boolean?,
@@ -162,6 +172,14 @@ local beamTransparencyByInstance: {[Beam]: NumberSequence} = setmetatable({}, { 
 local emitterColorByInstance: {[ParticleEmitter]: ColorSequence} = setmetatable({}, { __mode = "k" }) :: any
 local trailColorByInstance: {[Trail]: ColorSequence} = setmetatable({}, { __mode = "k" }) :: any
 local beamColorByInstance: {[Beam]: ColorSequence} = setmetatable({}, { __mode = "k" }) :: any
+local ENABLE_HOMING_SYNC_DEBUG = RunService:IsStudio()
+local HOMING_CORRECTION_WARN_INTERVAL = 5.0
+local HOMING_CORRECTION_WARN_THRESHOLD = 12.0
+local homingCorrectionAccum = 0.0
+local homingCorrectionSamples = 0
+local homingCorrectionMax = 0.0
+local homingSnapCount = 0
+local lastHomingCorrectionWarn = 0.0
 
 local function readNumberSetting(attributeName: string, fallback: number, minimum: number, maximum: number): number
 	local raw = player:GetAttribute(attributeName)
@@ -945,26 +963,112 @@ local function findNearestEnemy(position: Vector3, radius: number): (Vector3?, n
 	return closest, closestEntityId
 end
 
-local function updateHoming(record: ProjectileRecord, dt: number, now: number)
+local function blendDirection(fromDir: Vector3, toDir: Vector3, alpha: number): Vector3
+	local source = if fromDir.Magnitude > 1e-4 then fromDir.Unit else Vector3.new(0, 0, -1)
+	local target = if toDir.Magnitude > 1e-4 then toDir.Unit else source
+	local blended = source:Lerp(target, math.clamp(alpha, 0, 1))
+	if blended.Magnitude <= 1e-4 then
+		return target
+	end
+	return blended.Unit
+end
+
+local function reconcileHomingWithAuthority(record: ProjectileRecord, position: Vector3, now: number): Vector3
+	local authoritativePos = record.lastAuthoritativePos
+	local authoritativeAt = record.lastAuthoritativeAt
+	if not authoritativePos or not authoritativeAt then
+		return position
+	end
+	local age = now - authoritativeAt
+	if age < 0 or age > AUTHORITATIVE_TIMEOUT then
+		return position
+	end
+
+	local correctedPos = authoritativePos
+	local authDir = record.lastAuthoritativeDir
+	if authDir and authDir.Magnitude > 1e-4 and record.lastAuthoritativeServerTime then
+		local extrapolateDt = math.clamp(now - record.lastAuthoritativeServerTime, 0, 0.25)
+		correctedPos = correctedPos + authDir.Unit * record.speed * extrapolateDt
+	end
+
+	local delta = correctedPos - position
+	local errorMagnitude = delta.Magnitude
+	if errorMagnitude > 1e-4 then
+		homingCorrectionAccum += errorMagnitude
+		homingCorrectionSamples += 1
+		if errorMagnitude > homingCorrectionMax then
+			homingCorrectionMax = errorMagnitude
+		end
+	end
+
+	local reconciledPos = position
+	if errorMagnitude >= HOMING_SNAP_DISTANCE then
+		reconciledPos = correctedPos
+		homingSnapCount += 1
+	elseif errorMagnitude > 1e-4 then
+		reconciledPos = position:Lerp(correctedPos, HOMING_POS_BLEND)
+	end
+
+	if authDir and authDir.Magnitude > 1e-4 then
+		record.direction = blendDirection(record.direction, authDir, HOMING_DIR_BLEND)
+	end
+
+	if record.homing then
+		record.homing.targetEntity = record.lastAuthoritativeTarget
+	end
+
+	if ENABLE_HOMING_SYNC_DEBUG then
+		if errorMagnitude >= HOMING_CORRECTION_WARN_THRESHOLD and (now - lastHomingCorrectionWarn) >= HOMING_CORRECTION_WARN_INTERVAL then
+			lastHomingCorrectionWarn = now
+			local average = if homingCorrectionSamples > 0 then (homingCorrectionAccum / homingCorrectionSamples) else 0
+			warn(string.format(
+				"[ProjectileRenderer] Homing correction high avg=%.2f max=%.2f snaps=%d",
+				average,
+				homingCorrectionMax,
+				homingSnapCount
+			))
+		end
+	end
+
+	return reconciledPos
+end
+
+local function updateHoming(record: ProjectileRecord, now: number)
 	local homing = record.homing
 	if not homing then
 		return
 	end
-	if record.lastHomingUpdate and (now - record.lastHomingUpdate) < HOMING_UPDATE_INTERVAL then
+	local lastHomingUpdate = record.lastHomingUpdate
+	local elapsed = if lastHomingUpdate then (now - lastHomingUpdate) else HOMING_UPDATE_INTERVAL
+	if lastHomingUpdate and elapsed < HOMING_UPDATE_INTERVAL then
 		return
 	end
 	record.lastHomingUpdate = now
+	if elapsed <= 0 then
+		elapsed = HOMING_UPDATE_INTERVAL
+	end
 
 	local currentPos = record.lastPos or record.origin
 	local acquireRadius = homing.acquireRadius or 80
+	local authoritativeFresh = record.lastAuthoritativeAt and ((now - record.lastAuthoritativeAt) <= AUTHORITATIVE_TIMEOUT) or false
 	local targetPos: Vector3? = nil
-	if typeof(homing.targetEntity) == "number" then
-		targetPos = findEnemyPositionByEntityId(homing.targetEntity)
-	end
-	if not targetPos then
-		local nearestPos, nearestEntityId = findNearestEnemy(currentPos, acquireRadius)
-		targetPos = nearestPos
-		homing.targetEntity = nearestEntityId
+	if authoritativeFresh then
+		local authoritativeTarget = record.lastAuthoritativeTarget
+		homing.targetEntity = authoritativeTarget
+		if typeof(authoritativeTarget) == "number" then
+			targetPos = findEnemyPositionByEntityId(authoritativeTarget)
+		else
+			return
+		end
+	else
+		if typeof(homing.targetEntity) == "number" then
+			targetPos = findEnemyPositionByEntityId(homing.targetEntity)
+		end
+		if not targetPos then
+			local nearestPos, nearestEntityId = findNearestEnemy(currentPos, acquireRadius)
+			targetPos = nearestPos
+			homing.targetEntity = nearestEntityId
+		end
 	end
 	if not targetPos then
 		return
@@ -990,8 +1094,8 @@ local function updateHoming(record: ProjectileRecord, dt: number, now: number)
 		return
 	end
 
-	local maxTurn = homing.maxTurnDeg and math.rad(homing.maxTurnDeg) or math.huge
-	local maxStep = math.rad(homing.strengthDeg or DEFAULT_HOMING_STRENGTH) * dt
+	local maxTurn = homing.maxTurnDeg and (math.rad(homing.maxTurnDeg) * elapsed) or math.huge
+	local maxStep = math.rad(homing.strengthDeg or DEFAULT_HOMING_STRENGTH) * elapsed
 	local turn = math.min(angle, maxTurn, maxStep)
 	local axis = currentDir:Cross(desired)
 	if axis.Magnitude <= 0.0001 then
@@ -1226,6 +1330,8 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 		local ownerUserId = typeof(data.ownerUserId) == "number" and data.ownerUserId or nil
 		local kind = typeof(data.kind) == "string" and data.kind or "Projectile"
 		local isSplitChild = data.isSplitChild == true
+		local homingPayload = typeof(data.homing) == "table" and data.homing or nil
+		local initialAuthTarget = if homingPayload and typeof(homingPayload.targetEntity) == "number" then homingPayload.targetEntity else nil
 		local age = math.max(now - spawnTime, 0)
 		if lifetime then
 			age = math.min(age, lifetime)
@@ -1252,13 +1358,18 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 				alwaysStayHorizontal = data.alwaysStayHorizontal == true,
 				stickToPlayer = data.stickToPlayer == true,
 				orbit = typeof(data.orbit) == "table" and data.orbit or nil,
-				homing = typeof(data.homing) == "table" and data.homing or nil,
+				homing = homingPayload,
 				petal = typeof(data.petal) == "table" and data.petal or nil,
 				beam = typeof(data.beam) == "table" and data.beam or nil,
 				lastSimTime = now,
 				lastPos = initialPos,
 				lastOwnerPos = nil,
 				stickOffset = nil,
+				lastAuthoritativePos = initialPos,
+				lastAuthoritativeDir = direction,
+				lastAuthoritativeAt = now,
+				lastAuthoritativeServerTime = spawnTime,
+				lastAuthoritativeTarget = initialAuthTarget,
 				isSplitChild = isSplitChild,
 				timeStopFrozen = data.frozen == true,
 			}
@@ -1279,13 +1390,18 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			record.alwaysStayHorizontal = data.alwaysStayHorizontal == true
 			record.stickToPlayer = data.stickToPlayer == true
 			record.orbit = typeof(data.orbit) == "table" and data.orbit or record.orbit
-			record.homing = typeof(data.homing) == "table" and data.homing or record.homing
+			record.homing = homingPayload or record.homing
 			record.petal = typeof(data.petal) == "table" and data.petal or record.petal
 			record.beam = typeof(data.beam) == "table" and data.beam or record.beam
 			record.lastSimTime = now
 			record.lastPos = initialPos
 			record.lastOwnerPos = nil
 			record.stickOffset = nil
+			record.lastAuthoritativePos = initialPos
+			record.lastAuthoritativeDir = direction
+			record.lastAuthoritativeAt = now
+			record.lastAuthoritativeServerTime = spawnTime
+			record.lastAuthoritativeTarget = initialAuthTarget
 			record.isSplitChild = isSplitChild
 			record.timeStopFrozen = data.frozen == true
 		end
@@ -1314,6 +1430,41 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			updateBeamTransform(record, initialPos, direction)
 		else
 			updateModelTransform(record, initialPos, direction)
+		end
+	end
+end)
+
+ProjectilesStateBatch.OnClientEvent:Connect(function(payloads: any)
+	if typeof(payloads) ~= "table" then
+		return
+	end
+	local now = tick()
+	for _, entry in ipairs(payloads) do
+		if typeof(entry) ~= "table" then
+			continue
+		end
+		local id = entry.id
+		if typeof(id) ~= "number" then
+			continue
+		end
+		local record = activeProjectiles[id]
+		if not record then
+			continue
+		end
+		local authoritativePos = toVector3(entry.pos)
+		local authoritativeDir = toVector3(entry.dir)
+		if authoritativePos then
+			record.lastAuthoritativePos = authoritativePos
+			record.lastAuthoritativeAt = now
+			record.lastAuthoritativeServerTime = if typeof(entry.serverTime) == "number" then entry.serverTime else now
+		end
+		if authoritativeDir and authoritativeDir.Magnitude > 1e-4 then
+			record.lastAuthoritativeDir = authoritativeDir.Unit
+		end
+		local targetEntity = if typeof(entry.targetEntity) == "number" then entry.targetEntity else nil
+		record.lastAuthoritativeTarget = targetEntity
+		if record.homing then
+			record.homing.targetEntity = targetEntity
 		end
 	end
 end)
@@ -1419,6 +1570,12 @@ ProjectilesResumeBatch.OnClientEvent:Connect(function(payloads: any)
 			if record.lastHomingUpdate then
 				record.lastHomingUpdate += frozenDuration
 			end
+			if record.lastAuthoritativeAt then
+				record.lastAuthoritativeAt += frozenDuration
+			end
+			if record.lastAuthoritativeServerTime then
+				record.lastAuthoritativeServerTime += frozenDuration
+			end
 		end
 	end
 end)
@@ -1455,6 +1612,12 @@ GameUnpaused.OnClientEvent:Connect(function()
 		end
 		if record.lastHomingUpdate then
 			record.lastHomingUpdate += pauseDuration
+		end
+		if record.lastAuthoritativeAt then
+			record.lastAuthoritativeAt += pauseDuration
+		end
+		if record.lastAuthoritativeServerTime then
+			record.lastAuthoritativeServerTime += pauseDuration
 		end
 	end
 end)
@@ -1495,7 +1658,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 					record.direction = Vector3.new(-math.sin(angle), 0, math.cos(angle)).Unit
 				end
 			elseif record.homing then
-				updateHoming(record, dtSim, now)
+				updateHoming(record, now)
 				pos = pos + record.direction * record.speed * dtSim
 			else
 				pos = pos + record.direction * record.speed * dtSim
@@ -1519,6 +1682,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 				pos = Vector3.new(pos.X, record.origin.Y, pos.Z)
 			elseif record.homing and record.homing.alwaysStayHorizontal then
 				pos = Vector3.new(pos.X, record.origin.Y, pos.Z)
+			end
+			if record.homing then
+				pos = reconcileHomingWithAuthority(record, pos, now)
 			end
 
 			record.lastPos = pos

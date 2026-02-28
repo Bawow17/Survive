@@ -562,12 +562,14 @@ local function triggerFuseBomb(targetPlayerEntity: number, procCoefficient: numb
 	end
 
 	local fuseCfg = RunItems.Definitions[RunItems.Ids.FuseBomb].fuseBomb
-	local effectiveChance = math.clamp(fuseCfg.baseProcChance * procCoefficient, 0, 1)
+	local stackBonusCount = math.max(0, stacks - 1)
+	local totalProcChance = fuseCfg.baseProcChance + (fuseCfg.stackProcChance * stackBonusCount)
+	local effectiveChance = math.clamp(totalProcChance * procCoefficient, 0, 1)
 	if RNG:NextNumber() > effectiveChance then
 		return
 	end
 
-	local cooldown = fuseCfg.baseCooldown * (fuseCfg.stackCooldownMultiplier ^ stacks)
+	local cooldown = fuseCfg.baseCooldown * (fuseCfg.stackCooldownMultiplier ^ stackBonusCount)
 	local scaledCooldown = cooldown * procCoefficient
 	state.fuseReadyAt = math.max(state.fuseReadyAt, now + scaledCooldown)
 
@@ -582,7 +584,8 @@ local function triggerFuseBomb(targetPlayerEntity: number, procCoefficient: numb
 		then sourcePlayer.Character
 		else nil
 	local groundedPos = snapToGround(sourcePos, ignoreModel, fuseGroundLift)
-	local damage = getScaledBaseDamage(targetPlayerEntity) * fuseCfg.damageCoefficient
+	local damageCoefficient = fuseCfg.baseDamageCoefficient + (fuseCfg.stackDamageCoefficient * stackBonusCount)
+	local damage = getScaledBaseDamage(targetPlayerEntity) * damageCoefficient
 
 	local visual = spawnWorldModel(resolvedFuseModelName, groundedPos, true)
 	table.insert(pendingFuseBombs, {
@@ -708,6 +711,7 @@ local function triggerSilverStar(sourcePlayerEntity: number, targetEnemyEntity: 
 		modelPath = buildReplicatedCommonItemPath(silverDropModelName),
 		collision = {
 			useRaycast = true,
+			collideWithWorld = true,
 		},
 		homing = homingConfig,
 		procCoefficient = procCoefficient,
@@ -793,6 +797,8 @@ function ItemSystem.spawnDebugDropForPlayer(player: Player, itemId: string): (bo
 			allowMerge = false,
 			noDespawn = dropCfg.noDespawn,
 			itemId = itemId,
+			itemDisplayName = def.displayName,
+			itemDescription = def.promptDescription or def.description,
 			modelPath = modelPath,
 			requiresInteract = dropCfg.requiresInteract,
 			interactionRadius = dropCfg.interactionRadius,

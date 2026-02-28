@@ -12,13 +12,16 @@ local PlayerSettingsService = {}
 
 local SETTINGS_STORE_NAME = "PlayerSettings_v1"
 local UPDATE_COOLDOWN_SECONDS = 0.1
-local SAVE_DEBOUNCE_SECONDS = 1.0
+local SAVE_DEBOUNCE_SECONDS = 5.0
+local MIN_SAVE_INTERVAL_SECONDS = 10.0
 
 local settingsStore = DataStoreService:GetDataStore(SETTINGS_STORE_NAME)
 local initialized = false
 
 local settingsByUserId: {[number]: SettingsV1} = {}
+local dirtyByUserId: {[number]: boolean} = {}
 local updateReadyAtByUserId: {[number]: number} = {}
+local lastSaveAtByUserId: {[number]: number} = {}
 local pendingSaveTaskByUserId: {[number]: thread} = {}
 
 local GetSettingsRemote: RemoteFunction
@@ -59,37 +62,65 @@ local function fireSettingsChanged(player: Player, settings: SettingsV1)
 	end
 end
 
-local function saveForUserId(userId: number)
+local function clearPendingSave(userId: number)
+	local existing = pendingSaveTaskByUserId[userId]
+	if existing then
+		task.cancel(existing)
+		pendingSaveTaskByUserId[userId] = nil
+	end
+end
+
+local function saveForUserId(userId: number): boolean
 	local settings = settingsByUserId[userId]
 	if not settings then
-		return
+		dirtyByUserId[userId] = nil
+		return true
 	end
+	if not dirtyByUserId[userId] then
+		return true
+	end
+
 	local payload = PlayerSettingsSchema.sanitize(settings)
 	local ok, err = pcall(function()
 		settingsStore:SetAsync(getStoreKey(userId), payload)
 	end)
 	if not ok then
 		warn(string.format("[PlayerSettingsService] Save failed for userId=%d: %s", userId, tostring(err)))
+		return false
 	end
+
+	dirtyByUserId[userId] = false
+	lastSaveAtByUserId[userId] = os.clock()
+	return true
 end
 
-local function scheduleSave(userId: number)
-	local existing = pendingSaveTaskByUserId[userId]
-	if existing then
-		task.cancel(existing)
-	end
-	pendingSaveTaskByUserId[userId] = task.delay(SAVE_DEBOUNCE_SECONDS, function()
+local function scheduleSave(userId: number, delaySeconds: number?)
+	clearPendingSave(userId)
+
+	local targetDelay = delaySeconds or SAVE_DEBOUNCE_SECONDS
+	pendingSaveTaskByUserId[userId] = task.delay(targetDelay, function()
 		pendingSaveTaskByUserId[userId] = nil
-		saveForUserId(userId)
+
+		if not dirtyByUserId[userId] then
+			return
+		end
+
+		local now = os.clock()
+		local lastSaveAt = lastSaveAtByUserId[userId] or 0
+		local elapsed = now - lastSaveAt
+		if elapsed < MIN_SAVE_INTERVAL_SECONDS then
+			scheduleSave(userId, MIN_SAVE_INTERVAL_SECONDS - elapsed)
+			return
+		end
+
+		if not saveForUserId(userId) then
+			scheduleSave(userId, MIN_SAVE_INTERVAL_SECONDS)
+		end
 	end)
 end
 
 local function flushSave(userId: number)
-	local existing = pendingSaveTaskByUserId[userId]
-	if existing then
-		task.cancel(existing)
-		pendingSaveTaskByUserId[userId] = nil
-	end
+	clearPendingSave(userId)
 	saveForUserId(userId)
 end
 
@@ -104,6 +135,7 @@ local function loadSettingsForPlayer(player: Player)
 
 	local sanitized = PlayerSettingsSchema.sanitize(loaded)
 	settingsByUserId[player.UserId] = sanitized
+	dirtyByUserId[player.UserId] = false
 	fireSettingsChanged(player, sanitized)
 end
 
@@ -127,6 +159,7 @@ local function onUpdateSettings(player: Player, patch: any)
 	end
 
 	settingsByUserId[userId] = merged
+	dirtyByUserId[userId] = true
 	fireSettingsChanged(player, merged)
 	scheduleSave(userId)
 end
@@ -205,7 +238,9 @@ function PlayerSettingsService.init()
 		local userId = player.UserId
 		flushSave(userId)
 		settingsByUserId[userId] = nil
+		dirtyByUserId[userId] = nil
 		updateReadyAtByUserId[userId] = nil
+		lastSaveAtByUserId[userId] = nil
 	end)
 
 	for _, player in ipairs(Players:GetPlayers()) do

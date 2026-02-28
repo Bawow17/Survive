@@ -65,6 +65,7 @@ type AoeConfig = {
 
 type CollisionConfig = {
 	useRaycast: boolean?,
+	collideWithWorld: boolean?,
 }
 
 type OrbitConfig = {
@@ -163,6 +164,7 @@ type ProjectileRecord = {
 	timeStopCollisionBoostUntil: number?,
 	procCoefficient: number?,
 	splitProcCoefficient: number?,
+	lastStateSyncAt: number?,
 }
 
 local world: any
@@ -194,6 +196,7 @@ local ProjectilesDespawnBatch: RemoteEvent
 local ProjectilesImpactBatch: RemoteEvent
 local ProjectilesFreezeBatch: RemoteEvent
 local ProjectilesResumeBatch: RemoteEvent
+local ProjectilesStateBatch: RemoteEvent
 
 local SIM_HZ = 15
 local SIM_INTERVAL = 1 / SIM_HZ
@@ -258,6 +261,7 @@ local pendingDespawns: {[Player]: {any}} = {}
 local pendingImpacts: {[Player]: {any}} = {}
 local pendingFreezes: {[Player]: {any}} = {}
 local pendingResumes: {[Player]: {any}} = {}
+local pendingStates: {[Player]: {any}} = {}
 local petalRetargetRequests: {[number]: boolean} = {}
 local freezeProjectile: (ProjectileRecord, Vector3?, number?) -> () = function() end
 local unfreezeProjectile: (ProjectileRecord, number?) -> () = function() end
@@ -386,15 +390,17 @@ local function queueForPlayer(bucket: {[Player]: {any}}, player: Player, entry: 
 	table.insert(list, entry)
 end
 
-local function queueSpawnForPlayer(player: Player, record: ProjectileRecord)
+local function queueSpawnForPlayer(player: Player, record: ProjectileRecord, nowOverride: number?)
+	local now = nowOverride or getSimTime()
+	local remainingLifetime = math.max(record.expiresAt - now, 0.05)
 	queueForPlayer(pendingSpawns, player, {
 		id = record.id,
 		kind = record.kind,
-		origin = record.origin,
+		origin = record.lastPos,
 		dir = record.direction,
 		speed = record.speed,
-		spawnTime = tick(),
-		lifetime = record.expiresAt - record.spawnTime,
+		spawnTime = now,
+		lifetime = remainingLifetime,
 		scale = record.visualScale,
 		color = record.visualColor,
 		modelPath = record.modelPath,
@@ -437,6 +443,21 @@ local function queueSpawnForPlayer(player: Player, record: ProjectileRecord)
 		frozen = record.timeStopFrozen == true,
 		timeStopSessionId = record.timeStopSessionId,
 	})
+end
+
+local function queueStateForRecipients(record: ProjectileRecord, now: number)
+	local homingTarget = if record.homing then record.homing.targetEntity else nil
+	for player in pairs(record.recipients) do
+		if player and player.Parent == Players then
+			queueForPlayer(pendingStates, player, {
+				id = record.id,
+				pos = record.lastPos,
+				dir = record.direction,
+				targetEntity = homingTarget,
+				serverTime = now,
+			})
+		end
+	end
 end
 
 local function queueFreezeForRecipients(record: ProjectileRecord, position: Vector3, sessionId: number?)
@@ -946,8 +967,9 @@ local function updateHoming(record: ProjectileRecord, now: number)
 		return
 	end
 
-	local maxTurn = homing.maxTurnDeg and math.rad(homing.maxTurnDeg) or math.huge
-	local maxStep = math.rad(homing.strengthDeg) * (now - record.lastSimTime)
+	local simDt = math.max(now - record.lastSimTime, 0)
+	local maxTurn = homing.maxTurnDeg and (math.rad(homing.maxTurnDeg) * simDt) or math.huge
+	local maxStep = math.rad(homing.strengthDeg) * simDt
 	local turn = math.min(angle, maxTurn, maxStep)
 	local axis = current:Cross(desired)
 	if axis.Magnitude <= 0.0001 then
@@ -1114,6 +1136,13 @@ function ProjectileService.init(worldRef: any, components: any, getPlayerFromEnt
 		ProjectilesResumeBatch.Parent = projectileRemotesFolder
 	end
 
+	ProjectilesStateBatch = projectileRemotesFolder:FindFirstChild("ProjectilesStateBatch") :: RemoteEvent
+	if not ProjectilesStateBatch then
+		ProjectilesStateBatch = Instance.new("RemoteEvent")
+		ProjectilesStateBatch.Name = "ProjectilesStateBatch"
+		ProjectilesStateBatch.Parent = projectileRemotesFolder
+	end
+
 	Players.PlayerAdded:Connect(function(player: Player)
 		if #projectileList == 0 then
 			return
@@ -1148,6 +1177,7 @@ function ProjectileService.init(worldRef: any, components: any, getPlayerFromEnt
 		pendingImpacts[player] = nil
 		pendingFreezes[player] = nil
 		pendingResumes[player] = nil
+		pendingStates[player] = nil
 		spawnCounts[player] = nil
 	end)
 end
@@ -1270,6 +1300,7 @@ function ProjectileService.spawnProjectile(payload: {
 		timeStopCollisionBoostUntil = nil,
 		procCoefficient = payload.procCoefficient,
 		splitProcCoefficient = payload.splitProcCoefficient,
+		lastStateSyncAt = now,
 	}
 
 	if record.homing and typeof(record.homing.targetEntity) ~= "number" then
@@ -1304,7 +1335,7 @@ function ProjectileService.spawnProjectile(payload: {
 			local playerPos = Vector3.new(pos.x, pos.y, pos.z)
 			if distanceSq(playerPos, record.origin) <= SPAWN_SEND_RADIUS * SPAWN_SEND_RADIUS then
 				record.recipients[playerStats.player] = true
-				queueSpawnForPlayer(playerStats.player, record)
+				queueSpawnForPlayer(playerStats.player, record, now)
 			end
 		end
 	end
@@ -1594,7 +1625,7 @@ function ProjectileService.step(dt: number)
 		invincibleDiagCounters.projectilesTotalSeen += #projectileList
 	end
 	if #projectileList == 0 and #activeExplosions == 0 then
-		if next(pendingSpawns) or next(pendingDespawns) or next(pendingImpacts) or next(pendingFreezes) or next(pendingResumes) then
+		if next(pendingSpawns) or next(pendingDespawns) or next(pendingImpacts) or next(pendingFreezes) or next(pendingResumes) or next(pendingStates) then
 			for player, payloads in pairs(pendingSpawns) do
 				if player and player.Parent == Players then
 					ProjectilesSpawnBatch:FireClient(player, payloads)
@@ -1624,6 +1655,12 @@ function ProjectileService.step(dt: number)
 					ProjectilesResumeBatch:FireClient(player, payloads)
 				end
 				pendingResumes[player] = nil
+			end
+			for player, payloads in pairs(pendingStates) do
+				if player and player.Parent == Players then
+					ProjectilesStateBatch:FireClient(player, payloads)
+				end
+				pendingStates[player] = nil
 			end
 		end
 		return
@@ -1659,7 +1696,7 @@ function ProjectileService.step(dt: number)
 								local count = perPlayerSpawnCount[player] or 0
 								if count < MAX_RECIPIENT_SPAWNS_PER_TICK then
 									record.recipients[player] = true
-									queueSpawnForPlayer(player, record)
+									queueSpawnForPlayer(player, record, now)
 									perPlayerSpawnCount[player] = count + 1
 								end
 							end
@@ -1969,9 +2006,11 @@ function ProjectileService.step(dt: number)
 				end
 			end
 
-			-- IceShardSpecial should collide with world geometry (walls/terrain) for
-			-- both primary and split shards.
-			if record.kind == "IceShardSpecial" and not record.beam then
+			local collideWithWorld = not record.beam and (
+				record.kind == "IceShardSpecial"
+				or (record.collision and record.collision.collideWithWorld == true)
+			)
+			if collideWithWorld then
 				local worldHit = getWorldCollisionHit(record, segmentStart, segmentEnd)
 				if worldHit then
 					hit = true
@@ -1980,6 +2019,9 @@ function ProjectileService.step(dt: number)
 						record.splitOnHit.used = true
 						spawnSplitProjectiles(record, hitPos, now, nil)
 						hitReason = "split"
+					elseif record.aoe and record.aoe.trigger == "hit" then
+						startExplosion(record, hitPos, "exploded", true)
+						hitReason = "exploded"
 					else
 						hitReason = "wall"
 					end
@@ -2281,6 +2323,11 @@ function ProjectileService.step(dt: number)
 				))
 			end
 			despawnProjectile(record, hitReason, impactPos)
+		elseif record.homing then
+			if not record.lastStateSyncAt or (now - record.lastStateSyncAt) >= SIM_INTERVAL then
+				record.lastStateSyncAt = now
+				queueStateForRecipients(record, now)
+			end
 		end
 	end
 
@@ -2324,6 +2371,12 @@ function ProjectileService.step(dt: number)
 			ProjectilesResumeBatch:FireClient(player, payloads)
 		end
 		pendingResumes[player] = nil
+	end
+	for player, payloads in pairs(pendingStates) do
+		if player and player.Parent == Players then
+			ProjectilesStateBatch:FireClient(player, payloads)
+		end
+		pendingStates[player] = nil
 	end
 end
 

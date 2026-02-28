@@ -1,5 +1,5 @@
 --!strict
--- ItemInventoryController - Drives TopBar item viewports from replicated item state.
+-- ItemInventoryController - Drives TopBar item slots from replicated item state.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -36,20 +36,61 @@ if not itemsFrame or not itemsFrame:IsA("GuiObject") then
 	return
 end
 
-local function collectViewports(): {[string]: ViewportFrame}
-	local viewports = {}
-	for _, child in ipairs(itemsFrame:GetChildren()) do
-		if child:IsA("ViewportFrame") then
-			viewports[child.Name] = child
-		end
+local grid = itemsFrame:FindFirstChildOfClass("UIGridLayout")
+
+local PLACEHOLDER_NAMES = {
+	["1ViewportFrame"] = true,
+	["2ViewportFrame"] = true,
+	["1ImageLabel"] = true,
+	["2ImageLabel"] = true,
+}
+
+local function isItemSlot(child: Instance): boolean
+	if child == grid then
+		return false
 	end
-	return viewports
+	if not child:IsA("GuiObject") then
+		return false
+	end
+	if PLACEHOLDER_NAMES[child.Name] then
+		return false
+	end
+	return true
 end
 
-local viewportByName = collectViewports()
+local function collectSlots(): {[string]: GuiObject}
+	local slots = {}
+	for _, child in ipairs(itemsFrame:GetChildren()) do
+		if isItemSlot(child) then
+			slots[child.Name] = child
+		end
+	end
+	return slots
+end
 
-local function setCountLabel(viewport: ViewportFrame, count: number)
-	local label = viewport:FindFirstChild("CountLabel", true)
+local slotByName = collectSlots()
+
+local function resolveSlot(slotName: string): GuiObject?
+	local exact = slotByName[slotName]
+	if exact then
+		return exact
+	end
+
+	if string.sub(slotName, -13) == "ViewportFrame" then
+		local imageLabelName = string.sub(slotName, 1, #slotName - 13) .. "ImageLabel"
+		return slotByName[imageLabelName]
+	end
+
+	if string.sub(slotName, -10) == "ImageLabel" then
+		local viewportName = string.sub(slotName, 1, #slotName - 10) .. "ViewportFrame"
+		return slotByName[viewportName]
+	end
+
+	return nil
+end
+
+local function setCountLabel(slot: GuiObject, count: number)
+	local label = slot:FindFirstChild("CountLabel", true)
 	if not label or not label:IsA("TextLabel") then
 		return
 	end
@@ -62,25 +103,26 @@ local function setCountLabel(viewport: ViewportFrame, count: number)
 end
 
 local function hideAll()
-	for _, viewport in pairs(viewportByName) do
-		viewport.Visible = false
-		setCountLabel(viewport, 0)
+	for _, slot in pairs(slotByName) do
+		slot.Visible = false
+		setCountLabel(slot, 0)
 	end
 end
 
 hideAll()
 
 itemsFrame.ChildAdded:Connect(function(child: Instance)
-	if child:IsA("ViewportFrame") then
-		viewportByName[child.Name] = child
-		child.Visible = false
-		setCountLabel(child, 0)
+	if isItemSlot(child) then
+		local slot = child :: GuiObject
+		slotByName[slot.Name] = slot
+		slot.Visible = false
+		setCountLabel(slot, 0)
 	end
 end)
 
 itemsFrame.ChildRemoved:Connect(function(child: Instance)
-	if child:IsA("ViewportFrame") then
-		viewportByName[child.Name] = nil
+	if child:IsA("GuiObject") then
+		slotByName[child.Name] = nil
 	end
 end)
 
@@ -116,12 +158,12 @@ local function applyState(payload: any)
 		if typeof(item) ~= "table" then
 			continue
 		end
-		local viewportName = item.viewportFrameName
-		if typeof(viewportName) ~= "string" or viewportName == "" then
+		local slotName = item.viewportFrameName
+		if typeof(slotName) ~= "string" or slotName == "" then
 			continue
 		end
-		local viewport = viewportByName[viewportName]
-		if not viewport then
+		local slot = resolveSlot(slotName)
+		if not slot then
 			continue
 		end
 
@@ -130,9 +172,9 @@ local function applyState(payload: any)
 			continue
 		end
 
-		viewport.Visible = true
-		viewport.LayoutOrder = index
-		setCountLabel(viewport, count)
+		slot.Visible = true
+		slot.LayoutOrder = index
+		setCountLabel(slot, count)
 	end
 end
 

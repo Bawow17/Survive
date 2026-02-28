@@ -1,5 +1,5 @@
 --!strict
--- ItemGridLayoutController - Keeps TopBar item viewports in a responsive integer-column grid.
+-- ItemGridLayoutController - Keeps TopBar item slots in a responsive integer-column grid.
 
 local Players = game:GetService("Players")
 
@@ -42,19 +42,29 @@ if not grid or not grid:IsA("UIGridLayout") then
 	return
 end
 
-local function ensureSquareConstraint(viewport: ViewportFrame)
-	local constraint = viewport:FindFirstChildOfClass("UIAspectRatioConstraint")
-	if not constraint then
-		constraint = Instance.new("UIAspectRatioConstraint")
-		constraint.Parent = viewport
+local PLACEHOLDER_NAMES = {
+	["1ViewportFrame"] = true,
+	["2ViewportFrame"] = true,
+	["1ImageLabel"] = true,
+	["2ImageLabel"] = true,
+}
+
+local function isItemSlot(child: Instance): boolean
+	if child == grid then
+		return false
 	end
-	constraint.AspectRatio = 1
-	constraint.DominantAxis = Enum.DominantAxis.Height
+	if not child:IsA("GuiObject") then
+		return false
+	end
+	if PLACEHOLDER_NAMES[child.Name] then
+		return false
+	end
+	return true
 end
 
 local isApplyingLayout = false
 local layoutQueued = false
-local viewportVisibleConnections: {[ViewportFrame]: RBXScriptConnection} = {}
+local slotVisibleConnections: {[GuiObject]: RBXScriptConnection} = {}
 local baseItemsSize = itemsFrame.Size
 local MIN_ROWS = 2
 
@@ -79,12 +89,12 @@ local function applyLayout()
 		return
 	end
 
-	local visibleViewportCount = 0
+	local visibleSlotCount = 0
 	for _, child in ipairs(itemsFrame:GetChildren()) do
-		if child:IsA("ViewportFrame") then
-			ensureSquareConstraint(child)
-			if child.Visible then
-				visibleViewportCount += 1
+		if isItemSlot(child) then
+			local slot = child :: GuiObject
+			if slot.Visible then
+				visibleSlotCount += 1
 			end
 		end
 	end
@@ -101,16 +111,16 @@ local function applyLayout()
 	local rows = MIN_ROWS
 	local columns = 1
 	local cellSide = containerHeight / rows
-	local maxRows = math.max(MIN_ROWS, visibleViewportCount, 200)
+	local maxRows = math.max(MIN_ROWS, visibleSlotCount, 200)
 
 	while true do
 		cellSide = containerHeight / rows
 		columns = math.max(1, math.floor(maxAvailableWidth / cellSide))
 
-		if visibleViewportCount <= 0 then
+		if visibleSlotCount <= 0 then
 			break
 		end
-		if (columns * rows) >= visibleViewportCount then
+		if (columns * rows) >= visibleSlotCount then
 			break
 		end
 		if rows >= maxRows then
@@ -144,31 +154,32 @@ local function queueLayout()
 	end)
 end
 
-local function disconnectViewportListeners()
-	for viewport, conn in pairs(viewportVisibleConnections) do
+local function disconnectSlotListeners()
+	for slot, conn in pairs(slotVisibleConnections) do
 		if conn.Connected then
 			conn:Disconnect()
 		end
-		viewportVisibleConnections[viewport] = nil
+		slotVisibleConnections[slot] = nil
 	end
 end
 
-local function reconnectViewportListeners()
-	disconnectViewportListeners()
+local function reconnectSlotListeners()
+	disconnectSlotListeners()
 	for _, child in ipairs(itemsFrame:GetChildren()) do
-		if child:IsA("ViewportFrame") then
-			viewportVisibleConnections[child] = child:GetPropertyChangedSignal("Visible"):Connect(queueLayout)
+		if isItemSlot(child) then
+			local slot = child :: GuiObject
+			slotVisibleConnections[slot] = slot:GetPropertyChangedSignal("Visible"):Connect(queueLayout)
 		end
 	end
 end
 
 itemsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueLayout)
 itemsFrame.ChildAdded:Connect(function()
-	reconnectViewportListeners()
+	reconnectSlotListeners()
 	queueLayout()
 end)
 itemsFrame.ChildRemoved:Connect(function()
-	reconnectViewportListeners()
+	reconnectSlotListeners()
 	queueLayout()
 end)
 
@@ -177,5 +188,5 @@ if itemsParent and itemsParent:IsA("GuiObject") then
 	itemsParent:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueLayout)
 end
 
-reconnectViewportListeners()
+reconnectSlotListeners()
 queueLayout()

@@ -574,7 +574,13 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 	local didApplyDamage = false
 	local deferredDamage = false
 	local procCoefficient = Oathkeeper.primaryProcCoefficient or 1.0
-	if DamageSystem and DamageSystem.notifyAttackAttempt then
+	local stasisClip = TemporalStasisSystem and TemporalStasisSystem.clipHitscan and TemporalStasisSystem.clipHitscan(shot.origin, shot.impactPosition) or nil
+	local boundaryHoldImpact = stasisClip and stasisClip.holdImpactPosition or nil
+	local boundaryHoldPoint = if typeof(boundaryHoldImpact) == "Vector3" then boundaryHoldImpact else nil
+	local hasBoundaryHold = stasisClip and stasisClip.hasBoundaryHold == true
+	local shouldHoldTracer = stasisClip and stasisClip.active == true
+		and (stasisClip.touchesFrozenVolume == true or hasBoundaryHold or stasisClip.startInside == true or stasisClip.targetInside == true)
+	if (not shouldHoldTracer) and DamageSystem and DamageSystem.notifyAttackAttempt then
 		DamageSystem.notifyAttackAttempt({
 			sourceEntity = playerEntity,
 			targetEntity = shot.hitEnemyEntity,
@@ -583,55 +589,40 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 			aimPoint = targetPoint,
 		})
 	end
-	local stasisClip = TemporalStasisSystem and TemporalStasisSystem.clipHitscan and TemporalStasisSystem.clipHitscan(shot.origin, shot.impactPosition) or nil
-	local boundaryHoldImpact = stasisClip and stasisClip.holdImpactPosition or nil
-	local boundaryHoldPoint = if typeof(boundaryHoldImpact) == "Vector3" then boundaryHoldImpact else nil
-	local hasBoundaryHold = stasisClip and stasisClip.hasBoundaryHold == true
-	local shouldHoldTracer = stasisClip and stasisClip.active == true
-		and (stasisClip.touchesFrozenVolume == true or hasBoundaryHold or stasisClip.startInside == true or stasisClip.targetInside == true)
 	local visualHoldPoint = if shouldHoldTracer
 		then computeShortHoldPoint(shot.origin, shot.impactPosition, HITSCAN_STASIS_VISUAL_HOLD_DISTANCE)
 		else boundaryHoldPoint
-	local holdBoundaryDistance = if boundaryHoldPoint then (boundaryHoldPoint - shot.origin).Magnitude else nil
 	local stasisSessionId = stasisClip and stasisClip.sessionId or (TemporalStasisSystem and TemporalStasisSystem.getActiveSessionId and TemporalStasisSystem.getActiveSessionId() or nil)
 	local finalImpactForVfx = shot.impactPosition
 	local finalImpactNormalForVfx = shot.impactNormal
-	if shot.hitEnemyEntity then
-		local damageAmount = getEffectivePrimaryDamage(playerEntity)
-		local hitDistance = (shot.impactPosition - shot.origin).Magnitude
-		local hitPastBoundary = hasBoundaryHold
-			and typeof(holdBoundaryDistance) == "number"
-			and hitDistance > (holdBoundaryDistance + 1e-3)
-		local shouldDeferFrozenTarget = false
-		if TemporalStasisSystem and TemporalStasisSystem.shouldDeferDamage then
-			shouldDeferFrozenTarget = TemporalStasisSystem.shouldDeferDamage(shot.hitEnemyEntity, playerEntity) == true
+	local damageAmount = getEffectivePrimaryDamage(playerEntity)
+	if shouldHoldTracer and TemporalStasisSystem and TemporalStasisSystem.deferDamagePacket then
+		local replaySegmentEnd = shot.pathEndPosition
+		if typeof(replaySegmentEnd) ~= "Vector3" then
+			replaySegmentEnd = shot.impactPosition
 		end
-		if (hitPastBoundary or shouldDeferFrozenTarget) and TemporalStasisSystem and TemporalStasisSystem.deferDamagePacket then
-			local replaySegmentEnd = shot.pathEndPosition
-			if typeof(replaySegmentEnd) ~= "Vector3" then
-				replaySegmentEnd = shot.impactPosition
-			end
-			local deferred = TemporalStasisSystem.deferDamagePacket({
-				targetEntity = shot.hitEnemyEntity,
-				sourceEntity = playerEntity,
-				damageAmount = damageAmount,
-				damageType = "weapon",
-				abilityId = "OathkeeperPrimary",
-				procCoefficient = procCoefficient,
-				timestamp = now,
-				forceDefer = hitPastBoundary,
-				replayHitscan = true,
-				replayOrigin = shot.origin,
-				replayEnd = replaySegmentEnd,
-			})
-			deferredDamage = deferred == true
-			if deferredDamage and typeof(replaySegmentEnd) == "Vector3" then
-				finalImpactForVfx = replaySegmentEnd
-				finalImpactNormalForVfx = if typeof(shot.pathEndNormal) == "Vector3" then shot.pathEndNormal else shot.impactNormal
-			end
+		local deferred = TemporalStasisSystem.deferDamagePacket({
+			targetEntity = shot.hitEnemyEntity,
+			sourceEntity = playerEntity,
+			damageAmount = damageAmount,
+			damageType = "weapon",
+			abilityId = "OathkeeperPrimary",
+			procCoefficient = procCoefficient,
+			timestamp = now,
+			forceDefer = true,
+			replayHitscan = true,
+			replayOrigin = shot.origin,
+			replayEnd = replaySegmentEnd,
+		})
+		deferredDamage = deferred == true
+		if deferredDamage and typeof(replaySegmentEnd) == "Vector3" then
+			finalImpactForVfx = replaySegmentEnd
+			finalImpactNormalForVfx = if typeof(shot.pathEndNormal) == "Vector3" then shot.pathEndNormal else shot.impactNormal
 		end
+	end
 
-		if (not deferredDamage) and TemporalStasisSystem and TemporalStasisSystem.submitEnemyHit then
+	if (not deferredDamage) and shot.hitEnemyEntity then
+		if TemporalStasisSystem and TemporalStasisSystem.submitEnemyHit then
 			local _, applied, deferred = TemporalStasisSystem.submitEnemyHit({
 				targetEntity = shot.hitEnemyEntity,
 				sourceEntity = playerEntity,
@@ -754,7 +745,13 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 		if #shot.enemyHits > 0 and typeof(shot.enemyHits[1]) == "table" then
 			preferredSilverTarget = shot.enemyHits[1].enemyEntity
 		end
-		if DamageSystem and DamageSystem.notifyAttackAttempt then
+		local stasisClip = TemporalStasisSystem and TemporalStasisSystem.clipHitscan and TemporalStasisSystem.clipHitscan(shot.origin, shot.impactPosition) or nil
+		local boundaryHoldImpact = stasisClip and stasisClip.holdImpactPosition or nil
+		local boundaryHoldPoint = if typeof(boundaryHoldImpact) == "Vector3" then boundaryHoldImpact else nil
+		local hasBoundaryHold = stasisClip and stasisClip.hasBoundaryHold == true
+		local shouldHoldTracer = stasisClip and stasisClip.active == true
+			and (stasisClip.touchesFrozenVolume == true or hasBoundaryHold or stasisClip.startInside == true or stasisClip.targetInside == true)
+		if (not shouldHoldTracer) and DamageSystem and DamageSystem.notifyAttackAttempt then
 			DamageSystem.notifyAttackAttempt({
 				sourceEntity = livePlayerEntity,
 				targetEntity = preferredSilverTarget,
@@ -763,27 +760,16 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 				aimPoint = castState.targetPoint,
 			})
 		end
-		local stasisClip = TemporalStasisSystem and TemporalStasisSystem.clipHitscan and TemporalStasisSystem.clipHitscan(shot.origin, shot.impactPosition) or nil
-		local boundaryHoldImpact = stasisClip and stasisClip.holdImpactPosition or nil
-		local boundaryHoldPoint = if typeof(boundaryHoldImpact) == "Vector3" then boundaryHoldImpact else nil
-		local hasBoundaryHold = stasisClip and stasisClip.hasBoundaryHold == true
-		local shouldHoldTracer = stasisClip and stasisClip.active == true
-			and (stasisClip.touchesFrozenVolume == true or hasBoundaryHold or stasisClip.startInside == true or stasisClip.targetInside == true)
 		local visualHoldPoint = if shouldHoldTracer
 			then computeShortHoldPoint(shot.origin, shot.impactPosition, HITSCAN_STASIS_VISUAL_HOLD_DISTANCE)
 			else boundaryHoldPoint
-		local holdBoundaryDistance = if boundaryHoldPoint then (boundaryHoldPoint - shot.origin).Magnitude else nil
 		local stasisSessionId = stasisClip and stasisClip.sessionId or (TemporalStasisSystem and TemporalStasisSystem.getActiveSessionId and TemporalStasisSystem.getActiveSessionId() or nil)
 		local didAnyDeferred = false
 		local enemyHitPayload: {any} = {}
 		for _, hit in ipairs(shot.enemyHits) do
 			local applied = false
 			local deferred = false
-			local hitDistance = (hit.hitPoint - shot.origin).Magnitude
-			local hitPastBoundary = hasBoundaryHold
-				and typeof(holdBoundaryDistance) == "number"
-				and hitDistance > (holdBoundaryDistance + 1e-3)
-			if hitPastBoundary and TemporalStasisSystem and TemporalStasisSystem.deferDamagePacket then
+			if shouldHoldTracer and TemporalStasisSystem and TemporalStasisSystem.deferDamagePacket then
 				local didDefer = TemporalStasisSystem.deferDamagePacket({
 					targetEntity = hit.enemyEntity,
 					sourceEntity = livePlayerEntity,

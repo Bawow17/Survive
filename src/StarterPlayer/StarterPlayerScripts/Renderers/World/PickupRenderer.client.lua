@@ -2,11 +2,28 @@
 -- PickupRenderer - Client-side rendering + pickup requests for EXP orbs and interactable item drops.
 
 local Players = game:GetService("Players")
+local GuiService = game:GetService("GuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
+local playerScripts = player:FindFirstChild("PlayerScripts")
+if not playerScripts then
+	playerScripts = player:WaitForChild("PlayerScripts", 10)
+end
+local scriptsContainer = playerScripts or script:FindFirstAncestor("StarterPlayerScripts")
+local PickupPromptState: any = nil
+if scriptsContainer then
+	local localSharedFolder = scriptsContainer:WaitForChild("_Shared", 10)
+	if localSharedFolder then
+		PickupPromptState = require(localSharedFolder:WaitForChild("PickupPromptState"))
+	else
+		warn("[PickupRenderer] Could not locate _Shared folder; item pickup prompt disabled")
+	end
+else
+	warn("[PickupRenderer] Could not locate PlayerScripts container; item pickup prompt disabled")
+end
 
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local pickupRemotesFolder = remotesFolder:WaitForChild("Pickups")
@@ -33,8 +50,8 @@ local CONTACT_DESPAWN_DISTANCE_SQ = CONTACT_DESPAWN_DISTANCE * CONTACT_DESPAWN_D
 local MAGNET_RADIUS_MULTIPLIER = 6
 local GLOBAL_MAGNET_RADIUS = 1000
 local ORB_TEMPLATE_PATH = {"ContentDrawer", "ItemModels", "OrbTemplate"}
-local DEFAULT_INTERACT_RADIUS = 10
-local DEFAULT_AUTO_PICKUP_RADIUS = 0
+local DEFAULT_INTERACT_RADIUS = 20
+local DEFAULT_AUTO_PICKUP_RADIUS = 5
 local DEFAULT_SPIN_PERIOD = 8
 
 local COLOR_BY_KIND = {
@@ -66,6 +83,8 @@ type PickupRecord = {
 	visualOnly: boolean?,
 	modelPath: string?,
 	itemId: string?,
+	itemDisplayName: string?,
+	itemDescription: string?,
 	requiresInteract: boolean?,
 	interactionRadius: number?,
 	autoPickupRadius: number?,
@@ -82,6 +101,12 @@ local MAX_POOL_SIZE = 300
 local orbTemplate: Model? = nil
 
 local magnetActiveUntil = 0
+
+local function setPickupPrompt(promptData: any)
+	if PickupPromptState and PickupPromptState.setPrompt then
+		PickupPromptState.setPrompt(promptData)
+	end
+end
 
 local function toVector3(value: any): Vector3?
 	if typeof(value) == "Vector3" then
@@ -338,6 +363,8 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			existing.seekOnSpawn = data.seekOnSpawn == true
 			existing.visualOnly = data.visualOnly == true
 			existing.itemId = if typeof(data.itemId) == "string" then data.itemId else existing.itemId
+			existing.itemDisplayName = if typeof(data.itemDisplayName) == "string" then data.itemDisplayName else existing.itemDisplayName
+			existing.itemDescription = if typeof(data.itemDescription) == "string" then data.itemDescription else existing.itemDescription
 			existing.requiresInteract = data.requiresInteract == true
 			existing.interactionRadius = if typeof(data.interactionRadius) == "number" then data.interactionRadius else existing.interactionRadius
 			existing.autoPickupRadius = if typeof(data.autoPickupRadius) == "number" then data.autoPickupRadius else existing.autoPickupRadius
@@ -367,6 +394,8 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			visualOnly = data.visualOnly == true,
 			modelPath = modelPath,
 			itemId = if typeof(data.itemId) == "string" then data.itemId else nil,
+			itemDisplayName = if typeof(data.itemDisplayName) == "string" then data.itemDisplayName else nil,
+			itemDescription = if typeof(data.itemDescription) == "string" then data.itemDescription else nil,
 			requiresInteract = data.requiresInteract == true,
 			interactionRadius = if typeof(data.interactionRadius) == "number" then data.interactionRadius else DEFAULT_INTERACT_RADIUS,
 			autoPickupRadius = if typeof(data.autoPickupRadius) == "number" then data.autoPickupRadius else DEFAULT_AUTO_PICKUP_RADIUS,
@@ -452,9 +481,62 @@ local function requestPickup(record: PickupRecord, now: number)
 	PickupRequest:FireServer(record.id)
 end
 
-local function requestNearestInteractPickup(playerPos: Vector3, now: number)
-	local bestRecord: PickupRecord? = nil
-	local bestDistSq = math.huge
+local function getCursorViewportPosition(): Vector2
+	local insetTopLeft = GuiService:GetGuiInset()
+	return UserInputService:GetMouseLocation() - insetTopLeft
+end
+
+local function getCursorDistanceSqToWorldPoint(worldPos: Vector3, cursorPos: Vector2): number?
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return nil
+	end
+	local viewportPoint, onScreen = camera:WorldToViewportPoint(worldPos)
+	if not onScreen or viewportPoint.Z <= 0 then
+		return nil
+	end
+	local dx = viewportPoint.X - cursorPos.X
+	local dy = viewportPoint.Y - cursorPos.Y
+	return (dx * dx) + (dy * dy)
+end
+
+local function findPickupHighlightColor(record: PickupRecord): Color3?
+	local instance = record.instance
+	if not instance then
+		return nil
+	end
+
+	local highlight = instance:FindFirstChildWhichIsA("Highlight", true)
+	if not highlight then
+		return nil
+	end
+
+	local outlineColor = highlight.OutlineColor
+	if typeof(outlineColor) == "Color3" then
+		return outlineColor
+	end
+
+	local fillColor = highlight.FillColor
+	if typeof(fillColor) == "Color3" then
+		return fillColor
+	end
+
+	return nil
+end
+
+local function color3ToHex(color: Color3): string
+	local r = math.clamp(math.floor((color.R * 255) + 0.5), 0, 255)
+	local g = math.clamp(math.floor((color.G * 255) + 0.5), 0, 255)
+	local b = math.clamp(math.floor((color.B * 255) + 0.5), 0, 255)
+	return string.format("#%02X%02X%02X", r, g, b)
+end
+
+local function findBestInteractRecord(playerPos: Vector3, cursorPos: Vector2?): (PickupRecord?, number)
+	local bestCursorRecord: PickupRecord? = nil
+	local bestCursorScreenDistSq = math.huge
+	local bestCursorWorldDistSq = math.huge
+	local bestFallbackRecord: PickupRecord? = nil
+	local bestFallbackDistSq = math.huge
 
 	for _, record in pairs(activePickups) do
 		if not record.requiresInteract then
@@ -466,14 +548,36 @@ local function requestNearestInteractPickup(playerPos: Vector3, now: number)
 		local radius = record.interactionRadius or DEFAULT_INTERACT_RADIUS
 		local delta = record.currentPos - playerPos
 		local distSq = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
-		if distSq <= radius * radius and distSq < bestDistSq then
-			bestRecord = record
-			bestDistSq = distSq
+		if distSq > radius * radius then
+			continue
+		end
+		if distSq < bestFallbackDistSq then
+			bestFallbackRecord = record
+			bestFallbackDistSq = distSq
+		end
+		if cursorPos then
+			local cursorDistSq = getCursorDistanceSqToWorldPoint(record.currentPos, cursorPos)
+			if cursorDistSq then
+				if cursorDistSq < bestCursorScreenDistSq
+					or (cursorDistSq == bestCursorScreenDistSq and distSq < bestCursorWorldDistSq)
+				then
+					bestCursorRecord = record
+					bestCursorScreenDistSq = cursorDistSq
+					bestCursorWorldDistSq = distSq
+				end
+			end
 		end
 	end
 
+	local bestRecord = bestCursorRecord or bestFallbackRecord
+	local bestDistSq = if bestCursorRecord then bestCursorWorldDistSq else bestFallbackDistSq
+	return bestRecord, bestDistSq
+end
+
+local function requestNearestInteractPickup(playerPos: Vector3, now: number, cursorPos: Vector2?)
+	local bestRecord = select(1, findBestInteractRecord(playerPos, cursorPos))
 	if bestRecord then
-		requestPickup(bestRecord, now)
+		requestPickup(bestRecord :: PickupRecord, now)
 	end
 end
 
@@ -488,7 +592,7 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 	if not hrp then
 		return
 	end
-	requestNearestInteractPickup(hrp.Position, tick())
+	requestNearestInteractPickup(hrp.Position, tick(), getCursorViewportPosition())
 end)
 
 local checkAccumulator = 0
@@ -496,6 +600,7 @@ local checkAccumulator = 0
 RunService.Heartbeat:Connect(function(dt: number)
 	local hrp = getCharacterRoot()
 	if not hrp then
+		setPickupPrompt(nil)
 		return
 	end
 
@@ -519,6 +624,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 	end
 
 	local instantDespawnIds = {}
+	local promptCursorPos = getCursorViewportPosition()
 
 	for _, record in pairs(activePickups) do
 		local isInteractItem = record.requiresInteract == true
@@ -553,9 +659,10 @@ RunService.Heartbeat:Connect(function(dt: number)
 		end
 
 		if isInteractItem then
+			local radius = record.interactionRadius or DEFAULT_INTERACT_RADIUS
+			local delta = record.currentPos - playerPos
+			local distSq = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
 			if doCheck and record.collectible ~= false and record.visualOnly ~= true then
-				local delta = record.currentPos - playerPos
-				local distSq = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
 				local autoRadius = record.autoPickupRadius or DEFAULT_AUTO_PICKUP_RADIUS
 				if autoRadius > 0 and distSq <= autoRadius * autoRadius then
 					requestPickup(record, now)
@@ -605,11 +712,27 @@ RunService.Heartbeat:Connect(function(dt: number)
 		end
 	end
 
+	local nearestPromptRecord, nearestPromptDistSq = findBestInteractRecord(playerPos, promptCursorPos)
 	for _, pickupId in ipairs(instantDespawnIds) do
 		local record = activePickups[pickupId]
 		if record then
 			releaseVisual(record)
 			activePickups[pickupId] = nil
 		end
+	end
+
+	if nearestPromptRecord and nearestPromptRecord.itemId then
+		local highlightColor = findPickupHighlightColor(nearestPromptRecord)
+		setPickupPrompt({
+			pickupId = nearestPromptRecord.id,
+			itemId = nearestPromptRecord.itemId,
+			displayName = nearestPromptRecord.itemDisplayName,
+			description = nearestPromptRecord.itemDescription,
+			nameColorHex = if highlightColor then color3ToHex(highlightColor) else "#000000",
+			distance = math.sqrt(nearestPromptDistSq),
+			canPickup = true,
+		})
+	else
+		setPickupPrompt(nil)
 	end
 end)
