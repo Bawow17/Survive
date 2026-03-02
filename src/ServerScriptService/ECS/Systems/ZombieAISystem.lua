@@ -41,6 +41,7 @@ local EntityTypeComponent: any
 local FacingDirection: any
 local EnemyTimeStopped: any
 local EnemyFreeze: any
+local EnemyStun: any
 
 local enemyLogAccumulator = 0
 
@@ -547,6 +548,7 @@ function ZombieAISystem.init(worldRef: any, components: any, dirtyService: any, 
 	FacingDirection = Components.FacingDirection
 	EnemyTimeStopped = Components.EnemyTimeStopped
 	EnemyFreeze = Components.EnemyFreeze
+	EnemyStun = Components.EnemyStun
 	
 	-- Create cached queries for performance (CRITICAL FIX - was creating new queries every frame!)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing
@@ -867,6 +869,11 @@ function ZombieAISystem.step(dt: number)
 		local cooldownRemaining = math.clamp(originalRemaining - dt, 0, configuredCooldownMax)
 		if cooldownRemaining ~= originalRemaining or originalMax ~= configuredCooldownMax then
 			setAttackCooldown(enemyEntity, cooldownRemaining, configuredCooldownMax)
+		end
+		local enemyStun = EnemyStun and world:get(enemyEntity, EnemyStun)
+		if enemyStun and (enemyStun.endTime or 0) > tick() then
+			setVelocity(enemyEntity, { x = 0, y = 0, z = 0 })
+			continue
 		end
 
 		if not hasPlayers then

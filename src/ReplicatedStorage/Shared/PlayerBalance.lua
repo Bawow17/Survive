@@ -22,7 +22,7 @@ return {
 
 	-- Regeneration & Survival
 	HealthRegenRate = 1.0,
-	HealthRegenDelay = 5.0,
+	HealthRegenDelay = 2.0,
 
 	-- Experience & Progression
 	BaseExpMultiplier = 1.0,

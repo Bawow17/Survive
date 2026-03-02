@@ -54,6 +54,9 @@ PlayerComponents.MobilityCooldown = world:component()
 -- HealthRegen component - Tracks health regeneration state
 PlayerComponents.HealthRegen = world:component()
 
+-- PlayerArmorBuffs component - Tracks independent timed armor instances
+PlayerComponents.PlayerArmorBuffs = world:component()
+
 -- PlayerPauseState component - Per-player pause state (for individual pause mode)
 PlayerComponents.PlayerPauseState = world:component()
 

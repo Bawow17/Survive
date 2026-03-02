@@ -12,6 +12,7 @@ local playerGui = localPlayer:WaitForChild("PlayerGui")
 local sharedFolder = ReplicatedStorage:WaitForChild("Shared")
 local PlayerBalance = require(sharedFolder:WaitForChild("PlayerBalance"))
 local CombatScaling = require(sharedFolder:WaitForChild("CombatScaling"))
+local RegenMath = require(sharedFolder:WaitForChild("RegenMath"))
 
 local remotes = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("ECS")
 local entitySync = remotes:WaitForChild("EntitySync")
@@ -20,6 +21,7 @@ local entityUpdateUnreliable = remotes:FindFirstChild("EntityUpdateUnreliable")
 local entityDespawn = remotes:FindFirstChild("EntityDespawn")
 local requestInitialSync = remotes:WaitForChild("RequestInitialSync")
 local gameTimeUpdate = ReplicatedStorage:WaitForChild("RemoteEvents"):FindFirstChild("GameTimeUpdate")
+local itemStateRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("Items"):WaitForChild("ItemState")
 
 local playerEntityId: number? = nil
 local playerComponentState: {[string]: any} = {}
@@ -29,6 +31,11 @@ local serverGameTime: number? = nil
 local lastCooldownBaseMult: number? = nil
 local lastDamageStats: any = nil
 local lastTotalDamage: number = 0
+local itemCounts: {[string]: number} = {}
+
+local REGEN_COIL_BASE_PER_STACK = 0.8
+local REGEN_COIL_OUT_OF_COMBAT_PER_STACK = 4.0
+local REGEN_COIL_OUT_OF_COMBAT_DELAY = 7.0
 
 local sharedComponents: {[string]: {[number]: any}} = {
 	EntityType = {},
@@ -294,6 +301,14 @@ local function formatNumber(value: number, decimals: number?): string
 	return string.format(fmt, value)
 end
 
+local function formatPointValue(value: number): string
+	local rounded = if value >= 0 then math.floor(value + 0.5) else math.ceil(value - 0.5)
+	if math.abs(value - rounded) <= 0.001 then
+		return tostring(rounded)
+	end
+	return formatNumber(value, 1)
+end
+
 local function formatInt(value: number?): string
 	local raw = value or 0
 	local rounded = math.floor(raw + 0.0001)
@@ -434,13 +449,13 @@ local GENERAL_ROW_IDS: {[string]: boolean} = {
 	health = true,
 	armor = true,
 	regen = true,
-	regenDelay = true,
 	lifesteal = true,
 	baseDamage = true,
 	damage = true,
 	critChance = true,
 	critDamage = true,
 	cooldown = true,
+	attackSpeed = true,
 	moveSpeed = true,
 	totalDamage = true,
 }
@@ -483,6 +498,7 @@ end
 
 local function updateGeneralStats()
 	local effects = playerComponentState.PassiveEffects or {}
+	local healthRegen = playerComponentState.HealthRegen or {}
 	local buffState = playerComponentState.BuffState or {}
 	local now = getGameTimeNow()
 
@@ -523,18 +539,24 @@ local function updateGeneralStats()
 
 	local baseHealth = PlayerBalance.BaseMaxHealth or 100
 	local baseWalk = PlayerBalance.BaseWalkSpeed or 16
-	local baseRegen = PlayerBalance.HealthRegenRate or 0
-	local baseRegenDelay = PlayerBalance.HealthRegenDelay or 0
-
 	local healthMult = effects.healthMultiplier or 1.0
 	local healthFlat = effects.healthFlatBonus or 0
 	local finalHealth = baseHealth * healthMult + healthFlat
 	local finalSpeed = baseWalk * totalSpeedMult
-	local regenFlat = effects.regenFlatBonus or 0
-	local finalRegen = (baseRegen * (effects.regenMultiplier or 1.0)) + regenFlat
-	local finalRegenDelay = baseRegenDelay * (effects.regenDelayMultiplier or 1.0)
 
 	local playerLevel = resolvePlayerLevel()
+	local lastDamageTime = if typeof(healthRegen) == "table" and typeof(healthRegen.lastDamageTime) == "number"
+		then healthRegen.lastDamageTime
+		else 0
+	local timeSinceDamage = math.max(0, now - lastDamageTime)
+	local coilStacks = itemCounts["regeneration_coil"] or 0
+	local currentRegenPerSecond = RegenMath.getCurrentRegenPerSecond(playerLevel, effects, timeSinceDamage, {
+		playerBalance = PlayerBalance,
+		coilStacks = coilStacks,
+		coilBasePerStack = REGEN_COIL_BASE_PER_STACK,
+		coilOutOfCombatPerStack = REGEN_COIL_OUT_OF_COMBAT_PER_STACK,
+		coilOutOfCombatDelay = REGEN_COIL_OUT_OF_COMBAT_DELAY,
+	})
 	local baseDamage = CombatScaling.getBaseDamageAtLevel(playerLevel, PlayerBalance)
 	local finalDamage = baseDamage * effectiveDamageMultiplier
 
@@ -564,15 +586,15 @@ local function updateGeneralStats()
 	end
 
 	setGeneralRow("health", "Max Health", formatNumber(finalHealth, 1), 1, false)
-	setGeneralRow("armor", "Armor", formatPercent(effects.armorReduction or 0), 2, false)
-	setGeneralRow("regen", "Regen / sec", formatNumber(finalRegen, 2), 3, false)
-	setGeneralRow("regenDelay", "Regen Delay", formatNumber(finalRegenDelay, 2) .. "s", 4, false)
-	setGeneralRow("lifesteal", "Lifesteal", formatPercent(effects.lifesteal or 0, 2), 5, false)
-	setGeneralRow("baseDamage", "Base Damage", formatNumber(baseDamage, 1), 6, false)
-	setGeneralRow("damage", "Damage", formatNumber(finalDamage, 1), 7, hasDamageBuff)
-	setGeneralRow("critChance", "Crit Chance", formatPercent(effects.critChance or 0), 8, false)
-	setGeneralRow("critDamage", "Crit Damage", string.format("x%.2f", 2 + (effects.critDamage or 0)), 9, false)
-	setGeneralRow("cooldown", "Cooldown", formatMultiplierPercent(cooldownMult), 10, hasCooldownBuff)
+	setGeneralRow("armor", "Armor", formatPointValue((typeof(effects.armor) == "number" and effects.armor) or 0), 2, false)
+	setGeneralRow("regen", "Regen / sec", formatNumber(currentRegenPerSecond, 2), 3, false)
+	setGeneralRow("lifesteal", "Lifesteal", formatPercent(effects.lifesteal or 0, 2), 4, false)
+	setGeneralRow("baseDamage", "Base Damage", formatNumber(baseDamage, 1), 5, false)
+	setGeneralRow("damage", "Damage", formatNumber(finalDamage, 1), 6, hasDamageBuff)
+	setGeneralRow("critChance", "Crit Chance", formatPercent(effects.critChance or 0), 7, false)
+	setGeneralRow("critDamage", "Crit Damage", string.format("x%.2f", 2 + (effects.critDamage or 0)), 8, false)
+	setGeneralRow("cooldown", "Cooldown", formatMultiplierPercent(cooldownMult), 9, hasCooldownBuff)
+	setGeneralRow("attackSpeed", "Attack Speed", formatPercent(math.max(0, effects.primaryAttackSpeedBonus or 0)), 10, false)
 	setGeneralRow("moveSpeed", "Move Speed", formatNumber(finalSpeed, 1), 11, hasSpeedBuff)
 	setGeneralRow("totalDamage", "Total Damage", formatInt(totalDamage), 12, false)
 
@@ -582,6 +604,31 @@ end
 local function refreshUI()
 	updateGeneralStats()
 end
+
+itemStateRemote.OnClientEvent:Connect(function(payload: any)
+	table.clear(itemCounts)
+
+	if typeof(payload) == "table" and typeof(payload.items) == "table" then
+		for _, item in ipairs(payload.items) do
+			if typeof(item) ~= "table" then
+				continue
+			end
+
+			local itemId = item.itemId
+			local count = item.count
+			if typeof(itemId) == "string" and typeof(count) == "number" then
+				local normalizedCount = math.max(0, math.floor(count + 0.0001))
+				if normalizedCount > 0 then
+					itemCounts[itemId] = normalizedCount
+				end
+			end
+		end
+	end
+
+	if screenGui.Enabled then
+		refreshUI()
+	end
+end)
 
 local function toggleGui()
 	screenGui.Enabled = not screenGui.Enabled

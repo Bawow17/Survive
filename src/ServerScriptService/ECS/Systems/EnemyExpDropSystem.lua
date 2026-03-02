@@ -9,6 +9,7 @@ local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff
 local EnemyRegistry = require(game.ServerScriptService.Enemies.EnemyRegistry)
 local ExpSystem = require(game.ServerScriptService.ECS.Systems.ExpSystem)
 local GameStateManager = require(game.ServerScriptService.ECS.Systems.GameStateManager)
+local TixService = require(game.ServerScriptService.Services.TixService)
 
 local EnemyExpDropSystem = {}
 
@@ -191,6 +192,23 @@ local function getKillXpForTeam(enemyEntity: number, activePlayerCount: number):
 	return math.floor(math.max(1, baseKillXp * teamMult))
 end
 
+local function getKillTixPerPlayer(enemyEntity: number): number
+	local cfg = ItemBalance.RoR2Tix or {}
+	if cfg.Enabled == false then
+		return 0
+	end
+
+	local rewardMultiplier = typeof(cfg.RewardMultiplier) == "number" and cfg.RewardMultiplier or 0.2
+	rewardMultiplier = math.max(0.001, rewardMultiplier)
+
+	local coeff = DifficultyCoeff.getCoeff()
+	local monsterValue = resolveMonsterValue(enemyEntity)
+	local _, tierCostMult = getTierData(enemyEntity)
+	local scaledMonsterValue = monsterValue * tierCostMult
+
+	return math.floor(math.max(1, coeff * scaledMonsterValue * rewardMultiplier))
+end
+
 local function spawnVisualDrops(enemyEntity: number, deathPosition: Vector3, activePlayers: {{entity: number, player: Player}})
 	if not PickupService or #activePlayers == 0 then
 		return
@@ -255,10 +273,14 @@ function EnemyExpDropSystem.onEnemyDeath(enemyEntity: number, deathPosition: Vec
 	end
 
 	local sharedKillXp = getKillXpForTeam(enemyEntity, #activePlayers)
+	local tixPerKill = getKillTixPerPlayer(enemyEntity)
 	for _, entry in ipairs(activePlayers) do
 		local expMult = entry.player:GetAttribute("ExpMultiplier") or 1.0
 		local playerXp = math.floor(math.max(1, sharedKillXp * expMult))
 		ExpSystem.addExperience(entry.entity, playerXp)
+		if tixPerKill > 0 then
+			TixService.addTix(entry.player, tixPerKill)
+		end
 	end
 
 	spawnVisualDrops(enemyEntity, deathPosition, activePlayers)

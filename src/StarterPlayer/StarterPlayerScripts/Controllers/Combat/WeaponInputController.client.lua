@@ -14,6 +14,7 @@ local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local weaponRemotesFolder = remotesFolder:WaitForChild("Weapons")
 local timeStopStateRemote = remotesFolder:WaitForChild("TimeStopState")
 local primaryFireRequestRemote = weaponRemotesFolder:WaitForChild("PrimaryFireRequest")
+local primaryFireReleaseRemote = weaponRemotesFolder:WaitForChild("PrimaryFireRelease")
 local primaryShotRemote = weaponRemotesFolder:WaitForChild("PrimaryShot")
 local secondaryFireRequestRemote = weaponRemotesFolder:WaitForChild("SecondaryFireRequest")
 local secondaryShotRemote = weaponRemotesFolder:WaitForChild("SecondaryShot")
@@ -49,10 +50,21 @@ local ATTR_WEAPON_TRACER_LIFETIME = "StarterWeaponTracerLifetime"
 local ATTR_WEAPON_TRACER_FADE_DURATION = "StarterWeaponTracerFadeDuration"
 local ATTR_WEAPON_M2_CAST_DURATION = "StarterWeaponM2CastDuration"
 local ATTR_WEAPON_M2_FIRE_DELAY = "StarterWeaponM2FireDelay"
+local ATTR_WEAPON_M2_CHARGES = "StarterWeaponM2Charges"
+local ATTR_WEAPON_M2_RECHARGE_END = "StarterWeaponM2RechargeEnd"
 local ATTR_LOCAL_M2_CAST_ACTIVE = "WeaponM2CastActiveLocal"
 local ATTR_LOCAL_M2_CAST_SERIAL = "WeaponM2CastSerialLocal"
 local ATTR_LOCAL_SHARED_LOCKOUT_END = "WeaponSharedLockoutEndLocal"
+local ATTR_LOCAL_ATTACK_LOCK = "WeaponAttackLockLocal"
 local ATTR_LOCAL_M2_AIM_DIRECTION = "WeaponM2AimDirectionLocal"
+local ATTR_SETTING_ACTIVATABLE_M2_FROM_CURSOR = "Setting_controls_activatableM2FromCursor"
+local ATTR_SHIFT_LOCK_ENABLED = "ShiftLockEnabledLocal"
+local ATTR_ULTIMATE_BUFFER_ACTIVE = "UltimateBufferActiveLocal"
+local ATTR_EQUIPMENT_BUFFER_ACTIVE = "EquipmentBufferActiveLocal" -- Reserved for future Q equipment input.
+local ATTR_MOBILITY_BUFFER_ACTIVE = "MobilityBufferActiveLocal"
+local ATTR_ICESHARD_BUFFER_ACTIVE = "IceShardBufferActiveLocal"
+local ATTR_WEAPON_SECONDARY_BUFFER_ACTIVE = "WeaponSecondaryBufferActiveLocal"
+local ATTR_WEAPON_PRIMARY_HELD = "WeaponPrimaryHeldLocal"
 
 local m1Held = false
 local predictedCooldown = DEFAULT_COOLDOWN
@@ -62,8 +74,14 @@ local shotSequence = 0
 local secondaryShotSequence = 0
 local localSharedLockoutUntil = 0
 local localM2CastToken = 0
+local localM2AttackBlockedUntil = 0
+local localM1ToM2BlockedUntil = 0
+local m2Held = false
+local pendingSecondaryBuffered = false
 local secondaryCastStartedAtByShotId: {[number]: number} = {}
 local isTimeStopActive = false
+local canSecondaryBufferPreempt: () -> boolean
+local isM2AimInputAllowed: () -> boolean
 
 local aimRayParams = RaycastParams.new()
 aimRayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -107,6 +125,28 @@ local function setLocalCharacterAttribute(attributeName: string, value: any)
 	if character then
 		character:SetAttribute(attributeName, value)
 	end
+end
+
+local function setLocalPlayerAttribute(attributeName: string, value: any)
+	localPlayer:SetAttribute(attributeName, value)
+end
+
+local function refreshWeaponBufferAttributes()
+	setLocalPlayerAttribute(ATTR_WEAPON_PRIMARY_HELD, m1Held)
+	local isBuffered = pendingSecondaryBuffered or m2Held
+	setLocalPlayerAttribute(ATTR_WEAPON_SECONDARY_BUFFER_ACTIVE, isBuffered and canSecondaryBufferPreempt())
+end
+
+local function hasHigherPriorityBufferedForSecondary(): boolean
+	return localPlayer:GetAttribute(ATTR_ULTIMATE_BUFFER_ACTIVE) == true
+		or localPlayer:GetAttribute(ATTR_EQUIPMENT_BUFFER_ACTIVE) == true
+		or localPlayer:GetAttribute(ATTR_MOBILITY_BUFFER_ACTIVE) == true
+		or localPlayer:GetAttribute(ATTR_ICESHARD_BUFFER_ACTIVE) == true
+end
+
+local function hasHigherPriorityBufferedForPrimary(): boolean
+	return hasHigherPriorityBufferedForSecondary()
+		or localPlayer:GetAttribute(ATTR_WEAPON_SECONDARY_BUFFER_ACTIVE) == true
 end
 
 local function setLocalSharedLockoutEnd(endTime: number, authoritative: boolean)
@@ -179,9 +219,6 @@ local function bindCharacter(character: Model?)
 end
 
 local function canAttemptFire(): boolean
-	if tick() < localSharedLockoutUntil then
-		return false
-	end
 	if localPlayer:GetAttribute("CooldownsFrozen") == true then
 		return false
 	end
@@ -195,8 +232,20 @@ local function canAttemptFire(): boolean
 	if not character or character:GetAttribute("StarterWeaponId") ~= WEAPON_ID then
 		return false
 	end
+	local currentCharges = character:GetAttribute(ATTR_WEAPON_M2_CHARGES)
+	local rechargeEnd = character:GetAttribute(ATTR_WEAPON_M2_RECHARGE_END)
+	if typeof(currentCharges) == "number"
+		and currentCharges <= 0
+		and typeof(rechargeEnd) == "number"
+		and rechargeEnd > tick()
+	then
+		return false
+	end
 	local humanoidRef = humanoid
 	if not humanoidRef or humanoidRef.Health <= 0.01 then
+		return false
+	end
+	if tick() < localM2AttackBlockedUntil then
 		return false
 	end
 	if localM2CastToken > 0 then
@@ -208,10 +257,63 @@ local function canAttemptFire(): boolean
 	return true
 end
 
+local function shouldRetainSecondaryBuffer(): boolean
+	local character = localPlayer.Character
+	if localPlayer:GetAttribute("CooldownsFrozen") == true then
+		return false
+	end
+	if GuiService.MenuIsOpen then
+		return false
+	end
+	if UserInputService:GetFocusedTextBox() then
+		return false
+	end
+	if not character or character:GetAttribute("StarterWeaponId") ~= WEAPON_ID then
+		return false
+	end
+	if not isM2AimInputAllowed() then
+		return false
+	end
+	local humanoidRef = humanoid
+	if not humanoidRef or humanoidRef.Health <= 0.01 then
+		return false
+	end
+	local availableCharges = character:GetAttribute(ATTR_WEAPON_M2_CHARGES)
+	if (not m2Held) and (typeof(availableCharges) ~= "number" or availableCharges <= 0) then
+		return false
+	end
+	return true
+end
+
+function canSecondaryBufferPreempt(): boolean
+	if hasHigherPriorityBufferedForSecondary() then
+		return false
+	end
+	if not canAttemptFire() then
+		return false
+	end
+	if not isM2AimInputAllowed() then
+		return false
+	end
+	if tick() < localM1ToM2BlockedUntil then
+		return false
+	end
+	local character = localPlayer.Character
+	local availableCharges = if character then character:GetAttribute(ATTR_WEAPON_M2_CHARGES) else nil
+	return typeof(availableCharges) == "number" and availableCharges > 0
+end
+
 local function isMouseLocked(): boolean
 	local behavior = UserInputService.MouseBehavior
 	return behavior == Enum.MouseBehavior.LockCenter
 		or behavior == Enum.MouseBehavior.LockCurrentPosition
+end
+
+function isM2AimInputAllowed(): boolean
+	if localPlayer:GetAttribute(ATTR_SETTING_ACTIVATABLE_M2_FROM_CURSOR) == true then
+		return true
+	end
+	return localPlayer:GetAttribute(ATTR_SHIFT_LOCK_ENABLED) == true
 end
 
 local function buildAimPoint(): Vector3?
@@ -274,6 +376,9 @@ local function attemptPrimaryFire()
 	if now < nextLocalFireAt then
 		return
 	end
+	if hasHigherPriorityBufferedForPrimary() then
+		return
+	end
 	if not canAttemptFire() then
 		return
 	end
@@ -309,27 +414,41 @@ local function attemptPrimaryFire()
 	end
 
 	nextLocalFireAt = now + predictedCooldown
+	localM1ToM2BlockedUntil = math.max(localM1ToM2BlockedUntil, now + 0.1)
 end
 
-local function attemptSecondaryFire()
-	if not canAttemptFire() then
-		return
+local function attemptSecondaryFire(): boolean
+	if hasHigherPriorityBufferedForSecondary() then
+		return false
 	end
-	if not isMouseLocked() then
-		return
+	if not canAttemptFire() then
+		return false
+	end
+	if not isM2AimInputAllowed() then
+		return false
 	end
 
 	local character = localPlayer.Character
 	local castDuration = getM2CastDuration(character)
 	local fireDelay = getM2FireDelay(character)
+	if tick() < localM1ToM2BlockedUntil then
+		return false
+	end
+	local availableCharges = if character then character:GetAttribute(ATTR_WEAPON_M2_CHARGES) else nil
+	if typeof(availableCharges) ~= "number" or availableCharges <= 0 then
+		return false
+	end
 	local aimPoint = buildAimPoint()
 	if not aimPoint then
-		return
+		return false
 	end
 
 	secondaryShotSequence += 1
 	local clientShotId = secondaryShotSequence
 	local castStart = tick()
+	localM2AttackBlockedUntil = math.max(localM2AttackBlockedUntil, castStart + castDuration)
+	pendingSecondaryBuffered = false
+	refreshWeaponBufferAttributes()
 	secondaryCastStartedAtByShotId[clientShotId] = castStart
 	local aimDirection = computeAimDirectionFromPoint(character, aimPoint)
 	setLocalCharacterAttribute(ATTR_LOCAL_M2_AIM_DIRECTION, aimDirection)
@@ -372,20 +491,26 @@ local function attemptSecondaryFire()
 		})
 	end)
 
-	task.delay(castDuration, function()
-		local startedAt = secondaryCastStartedAtByShotId[clientShotId]
-		if not startedAt then
-			return
-		end
-		setLocalSharedLockoutEnd(startedAt + castDuration + DEFAULT_M2_SHARED_LOCKOUT, false)
-	end)
-
 	task.delay(castDuration + DEFAULT_M2_SHARED_LOCKOUT + 2.0, function()
 		local startedAt = secondaryCastStartedAtByShotId[clientShotId]
 		if startedAt == castStart then
 			secondaryCastStartedAtByShotId[clientShotId] = nil
 		end
 	end)
+	return true
+end
+
+local function processBufferedSecondaryFire()
+	if not pendingSecondaryBuffered then
+		return
+	end
+	if attemptSecondaryFire() then
+		return
+	end
+	if not shouldRetainSecondaryBuffer() then
+		pendingSecondaryBuffered = false
+		refreshWeaponBufferAttributes()
+	end
 end
 
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
@@ -394,11 +519,15 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 	end
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
 		m1Held = true
+		refreshWeaponBufferAttributes()
 		attemptPrimaryFire()
 		return
 	end
 	if input.UserInputType == Enum.UserInputType.MouseButton2 then
-		attemptSecondaryFire()
+		m2Held = true
+		pendingSecondaryBuffered = true
+		refreshWeaponBufferAttributes()
+		processBufferedSecondaryFire()
 	end
 end)
 
@@ -410,10 +539,20 @@ timeStopStateRemote.OnClientEvent:Connect(function(payload: any)
 end)
 
 UserInputService.InputEnded:Connect(function(input: InputObject, _gameProcessed: boolean)
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		m2Held = false
+		refreshWeaponBufferAttributes()
+		return
+	end
 	if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
 		return
 	end
+	local wasHeld = m1Held
 	m1Held = false
+	refreshWeaponBufferAttributes()
+	if wasHeld then
+		primaryFireReleaseRemote:FireServer()
+	end
 end)
 
 primaryShotRemote.OnClientEvent:Connect(function(payload: any)
@@ -464,6 +603,14 @@ secondaryShotRemote.OnClientEvent:Connect(function(payload: any)
 end)
 
 RunService.RenderStepped:Connect(function()
+	refreshWeaponBufferAttributes()
+	if m2Held and (not pendingSecondaryBuffered) then
+		pendingSecondaryBuffered = true
+		refreshWeaponBufferAttributes()
+	end
+	if pendingSecondaryBuffered then
+		processBufferedSecondaryFire()
+	end
 	if m1Held then
 		attemptPrimaryFire()
 	end
@@ -474,6 +621,11 @@ localPlayer.CharacterRemoving:Connect(function()
 	m1Held = false
 	localM2CastToken += 1
 	localSharedLockoutUntil = 0
+	localM2AttackBlockedUntil = 0
+	localM1ToM2BlockedUntil = 0
+	m2Held = false
+	pendingSecondaryBuffered = false
+	refreshWeaponBufferAttributes()
 	table.clear(secondaryCastStartedAtByShotId)
 	setLocalCharacterAttribute(ATTR_LOCAL_M2_CAST_ACTIVE, false)
 	setLocalCharacterAttribute(ATTR_LOCAL_SHARED_LOCKOUT_END, nil)
@@ -484,3 +636,5 @@ end)
 if localPlayer.Character then
 	bindCharacter(localPlayer.Character)
 end
+
+refreshWeaponBufferAttributes()

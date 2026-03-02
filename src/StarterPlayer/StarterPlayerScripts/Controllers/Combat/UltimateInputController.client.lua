@@ -4,6 +4,7 @@
 local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
@@ -17,12 +18,16 @@ local AIM_RAY_DISTANCE = 5000
 local ABILITY_CAST_ACTIVE_ATTRIBUTE = "AbilityCastActiveLocal"
 local WEAPON_M2_CAST_ACTIVE_LOCAL_ATTRIBUTE = "WeaponM2CastActiveLocal"
 local UTILITY_CAST_ACTIVE_LOCAL_ATTRIBUTE = "UtilityCastActiveLocal"
+local ATTR_ULTIMATE_BUFFER_ACTIVE = "UltimateBufferActiveLocal"
 
 local isReady = false
 local movementLocked = false
 local cachedControls: any = nil
 local abilityCastActiveConnection: RBXScriptConnection? = nil
 local sawLocalCastActiveForCurrentServerLock = false
+local castHeld = false
+local pendingBufferedCast = false
+local isLocallyReadyToCast: () -> boolean
 
 local aimRayParams = RaycastParams.new()
 aimRayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -147,25 +152,42 @@ local function buildAimPoint(): Vector3?
 	return ray.Origin + rayDirection
 end
 
-local function canAttemptCast(): boolean
-	if not isReady then
-		-- Server is authoritative for charge; allow request even if local ready state is stale.
+local function refreshBufferAttribute()
+	local isBuffered = pendingBufferedCast or castHeld
+	local isActive = isBuffered and isLocallyReadyToCast()
+	localPlayer:SetAttribute(ATTR_ULTIMATE_BUFFER_ACTIVE, isActive)
+end
+
+local function canAttemptCast(requireReady: boolean, suppressWarnings: boolean?): boolean
+	if requireReady and (not isReady) then
+		return false
+	end
+	if (not requireReady) and (not isReady) and not suppressWarnings then
+		-- Server is authoritative for charge; allow initial request even if local ready state is stale.
 		warn("[UltimateInputController] G pressed while local ready=false; sending request to server for authoritative check")
 	end
 	if GuiService.MenuIsOpen then
-		warn("[UltimateInputController] G blocked: menu open")
+		if not suppressWarnings then
+			warn("[UltimateInputController] G blocked: menu open")
+		end
 		return false
 	end
 	if UserInputService:GetFocusedTextBox() then
-		warn("[UltimateInputController] G blocked: textbox focused")
+		if not suppressWarnings then
+			warn("[UltimateInputController] G blocked: textbox focused")
+		end
 		return false
 	end
 	if localPlayer:GetAttribute("CooldownsFrozen") == true then
-		warn("[UltimateInputController] G blocked: CooldownsFrozen=true")
+		if not suppressWarnings then
+			warn("[UltimateInputController] G blocked: CooldownsFrozen=true")
+		end
 		return false
 	end
 	if localPlayer:GetAttribute("UltimateInputLocked") == true then
-		warn("[UltimateInputController] G blocked: UltimateInputLocked=true")
+		if not suppressWarnings then
+			warn("[UltimateInputController] G blocked: UltimateInputLocked=true")
+		end
 		return false
 	end
 
@@ -174,24 +196,97 @@ local function canAttemptCast(): boolean
 		return false
 	end
 	if character:GetAttribute(WEAPON_M2_CAST_ACTIVE_LOCAL_ATTRIBUTE) == true then
-		warn("[UltimateInputController] G blocked: WeaponM2CastActiveLocal=true")
+		if not suppressWarnings then
+			warn("[UltimateInputController] G blocked: WeaponM2CastActiveLocal=true")
+		end
 		return false
 	end
 	if character:GetAttribute(UTILITY_CAST_ACTIVE_LOCAL_ATTRIBUTE) == true then
-		warn("[UltimateInputController] G blocked: UtilityCastActiveLocal=true")
+		if not suppressWarnings then
+			warn("[UltimateInputController] G blocked: UtilityCastActiveLocal=true")
+		end
 		return false
 	end
 	if character:GetAttribute(ABILITY_CAST_ACTIVE_ATTRIBUTE) == true then
-		warn("[UltimateInputController] G blocked: AbilityCastActiveLocal=true")
+		if not suppressWarnings then
+			warn("[UltimateInputController] G blocked: AbilityCastActiveLocal=true")
+		end
 		return false
 	end
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not humanoid or humanoid.Health <= 0.01 then
-		warn("[UltimateInputController] G blocked: character not alive")
+		if not suppressWarnings then
+			warn("[UltimateInputController] G blocked: character not alive")
+		end
 		return false
 	end
 
 	return true
+end
+
+function isLocallyReadyToCast(): boolean
+	return canAttemptCast(true, true)
+end
+
+local function canRetainBufferedCast(): boolean
+	if not castHeld then
+		return false
+	end
+	if GuiService.MenuIsOpen then
+		return false
+	end
+	if UserInputService:GetFocusedTextBox() then
+		return false
+	end
+	if localPlayer:GetAttribute("CooldownsFrozen") == true then
+		return false
+	end
+	local character = localPlayer.Character
+	if not character then
+		return false
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0.01 then
+		return false
+	end
+	return true
+end
+
+local function attemptCast(requireReady: boolean, suppressWarnings: boolean?): boolean
+	if not canAttemptCast(requireReady, suppressWarnings) then
+		return false
+	end
+
+	local targetPoint = buildAimPoint()
+	if not targetPoint then
+		return false
+	end
+
+	pendingBufferedCast = false
+	refreshBufferAttribute()
+	isReady = false
+
+	ultimateCastRequestRemote:FireServer({
+		targetPoint = targetPoint,
+		clientPressedAt = tick(),
+	})
+	if not suppressWarnings then
+		warn("[UltimateInputController] Sent UltimateCastRequest")
+	end
+	return true
+end
+
+local function processBufferedCast()
+	if not pendingBufferedCast then
+		return
+	end
+	if attemptCast(true, true) then
+		return
+	end
+	if not canRetainBufferedCast() then
+		pendingBufferedCast = false
+		refreshBufferAttribute()
+	end
 end
 
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
@@ -201,20 +296,22 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 	if input.KeyCode ~= CAST_KEY then
 		return
 	end
-	if not canAttemptCast() then
+	castHeld = true
+	pendingBufferedCast = true
+	refreshBufferAttribute()
+	if attemptCast(false, false) then
 		return
 	end
+	processBufferedCast()
+end)
 
-	local targetPoint = buildAimPoint()
-	if not targetPoint then
+UserInputService.InputEnded:Connect(function(input: InputObject, _gameProcessed: boolean)
+	if input.KeyCode ~= CAST_KEY then
 		return
 	end
-
-	ultimateCastRequestRemote:FireServer({
-		targetPoint = targetPoint,
-		clientPressedAt = tick(),
-	})
-	warn("[UltimateInputController] Sent UltimateCastRequest")
+	castHeld = false
+	pendingBufferedCast = false
+	refreshBufferAttribute()
 end)
 
 ultimateStateUpdateRemote.OnClientEvent:Connect(function(payload: any)
@@ -222,6 +319,9 @@ ultimateStateUpdateRemote.OnClientEvent:Connect(function(payload: any)
 		return
 	end
 	isReady = payload.ready == true
+	if pendingBufferedCast then
+		processBufferedCast()
+	end
 end)
 
 localPlayer:GetAttributeChangedSignal("UltimateInputLocked"):Connect(refreshMovementLock)
@@ -230,6 +330,9 @@ localPlayer.CharacterAdded:Connect(function()
 	refreshMovementLock()
 end)
 localPlayer.CharacterRemoving:Connect(function()
+	castHeld = false
+	pendingBufferedCast = false
+	refreshBufferAttribute()
 	bindCharacter(nil)
 	sawLocalCastActiveForCurrentServerLock = false
 	setMovementLocked(false)
@@ -237,3 +340,16 @@ end)
 
 bindCharacter(localPlayer.Character)
 refreshMovementLock()
+
+RunService.RenderStepped:Connect(function()
+	refreshBufferAttribute()
+	if castHeld and (not pendingBufferedCast) then
+		pendingBufferedCast = true
+		refreshBufferAttribute()
+	end
+	if pendingBufferedCast then
+		processBufferedCast()
+	end
+end)
+
+refreshBufferAttribute()

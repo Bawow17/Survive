@@ -17,6 +17,7 @@ local CAMERA_OFFSET_SMOOTH_SPEED = 14.0
 local SHIFT_LOCK_ACTION = "CustomShiftLockToggle"
 local SHIFT_LOCK_ACTION_PRIORITY = Enum.ContextActionPriority.High.Value + 100
 local ATTR_SETTINGS_OPEN = "UI_SettingsOpen"
+local ATTR_SHIFT_LOCK_ENABLED = "ShiftLockEnabledLocal"
 local ATTR_WEAPON_ACTIVE_LOCAL = "WeaponPrimaryActiveLocal"
 local ATTR_LOCAL_UTILITY_FACING_LOCK = "UtilityFacingLockActiveLocal"
 local FACING_LOCK_RENDERSTEP = "ShiftLockActiveFacingLock"
@@ -100,6 +101,7 @@ end
 
 local function setShiftLockState(enabled: boolean)
 	shiftLockEnabled = enabled
+	localPlayer:SetAttribute(ATTR_SHIFT_LOCK_ENABLED, enabled)
 	UserInputService.MouseBehavior = enabled and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
 	UserInputService.MouseIconEnabled = not enabled
 	setShiftLockIndicatorState(enabled)
@@ -479,6 +481,7 @@ end)
 tryBindShiftLockFrame()
 tryBindMainMenuFrame()
 setShiftLockState(false)
+localPlayer:SetAttribute(ATTR_SHIFT_LOCK_ENABLED, false)
 settingsOpen = (localPlayer:GetAttribute(ATTR_SETTINGS_OPEN) == true)
 syncSettingsLockout()
 syncMainMenuLockout()

@@ -15,18 +15,20 @@ local world: any = nil
 local Components: any = nil
 local PassiveEffectSystem: any = nil
 local DamageSystem: any = nil
+local ItemSystemRef: any = nil
 local TemporalStasisSystem: any = nil
 local getPlayerEntity: ((Player) -> number?)? = nil
 
 local primaryFireRequestRemote: RemoteEvent? = nil
+local primaryFireReleaseRemote: RemoteEvent? = nil
 local primaryShotRemote: RemoteEvent? = nil
 local secondaryFireRequestRemote: RemoteEvent? = nil
 local secondaryShotRemote: RemoteEvent? = nil
 local sprintForceOffRemote: RemoteEvent? = nil
 
 local nextFireAtByPlayer: {[Player]: number} = {}
-local sharedLockoutUntilByPlayer: {[Player]: number} = {}
 local secondaryCastStateByPlayer: {[Player]: {[string]: any}} = {}
+local secondaryChargeStateByPlayer: {[Player]: {[string]: any}} = {}
 local warned: {[string]: boolean} = {}
 local ENEMY_CANDIDATE_BASE_BUFFER = 30.0
 local ENEMY_CANDIDATE_HORIZONTAL_BUFFER = 18.0
@@ -34,6 +36,10 @@ local DIAGONAL_VERTICAL_DELTA_THRESHOLD = 0.25
 local HITSCAN_THICKNESS = 0.5
 local HITSCAN_STASIS_VISUAL_HOLD_DISTANCE = 1.5
 local M2_CAST_ACTIVE_ATTRIBUTE = "WeaponM2CastActiveServer"
+local M2_CHARGES_ATTRIBUTE = "StarterWeaponM2Charges"
+local M2_MAX_CHARGES_ATTRIBUTE = "StarterWeaponM2MaxCharges"
+local M2_RECHARGE_DURATION_ATTRIBUTE = "StarterWeaponM2RechargeDuration"
+local M2_RECHARGE_END_ATTRIBUTE = "StarterWeaponM2RechargeEnd"
 
 local RAYCAST_PARAMS = RaycastParams.new()
 RAYCAST_PARAMS.FilterType = Enum.RaycastFilterType.Exclude
@@ -96,6 +102,12 @@ local function getEffectiveCooldown(playerEntity: number): number
 			cooldown *= mult
 		end
 	end
+	if world and Components and Components.PassiveEffects then
+		local effects = world:get(playerEntity, Components.PassiveEffects)
+		if effects and typeof(effects.primaryAttackSpeedBonus) == "number" then
+			cooldown /= math.max(0.05, 1 + math.max(0, effects.primaryAttackSpeedBonus))
+		end
+	end
 	return math.max(0.05, cooldown)
 end
 
@@ -145,6 +157,137 @@ local function getEffectiveSharedLockout(playerEntity: number): number
 	return math.max(0.05, lockout)
 end
 
+local function setSecondaryChargeAttributes(player: Player, state: {[string]: any}?)
+	local character = player.Character
+	if not character then
+		return
+	end
+	if not state then
+		character:SetAttribute(M2_CHARGES_ATTRIBUTE, 1)
+		character:SetAttribute(M2_MAX_CHARGES_ATTRIBUTE, 1)
+		character:SetAttribute(M2_RECHARGE_DURATION_ATTRIBUTE, math.max(0.05, Oathkeeper.m2SharedLockout))
+		character:SetAttribute(M2_RECHARGE_END_ATTRIBUTE, 0)
+		return
+	end
+	character:SetAttribute(M2_CHARGES_ATTRIBUTE, state.currentCharges)
+	character:SetAttribute(M2_MAX_CHARGES_ATTRIBUTE, state.maxCharges)
+	character:SetAttribute(M2_RECHARGE_DURATION_ATTRIBUTE, state.rechargeDuration)
+	character:SetAttribute(M2_RECHARGE_END_ATTRIBUTE, state.nextRechargeAt or 0)
+end
+
+local function getPepperoniPizzaModifiers(playerEntity: number): (number, number)
+	if not ItemSystemRef or not ItemSystemRef.getPepperoniPizzaModifiers then
+		return 1.0, 0
+	end
+	local modifiers = ItemSystemRef.getPepperoniPizzaModifiers(playerEntity)
+	if typeof(modifiers) ~= "table" then
+		return 1.0, 0
+	end
+	local cooldownMultiplier = if typeof(modifiers.cooldownMultiplier) == "number" and modifiers.cooldownMultiplier > 0
+		then modifiers.cooldownMultiplier
+		else 1.0
+	local bonusCharges = if typeof(modifiers.bonusCharges) == "number"
+		then math.max(0, math.floor(modifiers.bonusCharges + 0.5))
+		else 0
+	return cooldownMultiplier, bonusCharges
+end
+
+local function getDesiredSecondaryChargeProfile(playerEntity: number): (number, number)
+	local cooldownMultiplier, bonusCharges = getPepperoniPizzaModifiers(playerEntity)
+	local maxCharges = math.max(1, 1 + bonusCharges)
+	local rechargeDuration = math.max(0.05, getEffectiveSharedLockout(playerEntity) * cooldownMultiplier)
+	return maxCharges, rechargeDuration
+end
+
+local function syncSecondaryChargeStateForPlayer(player: Player, playerEntity: number, now: number): {[string]: any}
+	local maxCharges, rechargeDuration = getDesiredSecondaryChargeProfile(playerEntity)
+	local state = secondaryChargeStateByPlayer[player]
+	if not state then
+		state = {
+			currentCharges = maxCharges,
+			maxCharges = maxCharges,
+			nextRechargeAt = 0,
+			rechargeDuration = rechargeDuration,
+		}
+		secondaryChargeStateByPlayer[player] = state
+		setSecondaryChargeAttributes(player, state)
+		return state
+	end
+
+	local changed = false
+	local previousMax = state.maxCharges or maxCharges
+	if state.maxCharges ~= maxCharges then
+		state.maxCharges = maxCharges
+		changed = true
+	end
+	if state.rechargeDuration ~= rechargeDuration then
+		state.rechargeDuration = rechargeDuration
+		changed = true
+	end
+
+	if state.currentCharges == nil then
+		state.currentCharges = maxCharges
+		changed = true
+	end
+	if state.currentCharges > maxCharges then
+		state.currentCharges = maxCharges
+		changed = true
+	elseif maxCharges > previousMax then
+		state.currentCharges = math.min(maxCharges, state.currentCharges + (maxCharges - previousMax))
+		changed = true
+	end
+
+	if state.currentCharges >= state.maxCharges then
+		state.currentCharges = state.maxCharges
+		if state.nextRechargeAt ~= 0 then
+			state.nextRechargeAt = 0
+			changed = true
+		end
+	else
+		if typeof(state.nextRechargeAt) ~= "number" or state.nextRechargeAt <= 0 then
+			state.nextRechargeAt = now + rechargeDuration
+			changed = true
+		else
+			local nextRechargeAt = math.min(state.nextRechargeAt, now + rechargeDuration)
+			if nextRechargeAt ~= state.nextRechargeAt then
+				state.nextRechargeAt = nextRechargeAt
+				changed = true
+			end
+		end
+	end
+
+	if changed then
+		setSecondaryChargeAttributes(player, state)
+	end
+	return state
+end
+
+local function spendSecondaryCharge(player: Player, playerEntity: number, now: number): (boolean, {[string]: any}?)
+	local state = syncSecondaryChargeStateForPlayer(player, playerEntity, now)
+	if state.currentCharges <= 0 then
+		setSecondaryChargeAttributes(player, state)
+		return false, state
+	end
+
+	local wasFull = state.currentCharges >= state.maxCharges
+	state.currentCharges -= 1
+	if state.currentCharges < state.maxCharges then
+		if wasFull or typeof(state.nextRechargeAt) ~= "number" or state.nextRechargeAt <= 0 then
+			state.nextRechargeAt = now + state.rechargeDuration
+		end
+	else
+		state.nextRechargeAt = 0
+	end
+
+	setSecondaryChargeAttributes(player, state)
+	return true, state
+end
+
+local function isSecondaryReloading(player: Player, playerEntity: number, now: number): boolean
+	local state = syncSecondaryChargeStateForPlayer(player, playerEntity, now)
+	return state.currentCharges <= 0 and typeof(state.nextRechargeAt) == "number" and state.nextRechargeAt > now
+end
+
 local function parseFireRequestPayload(requestPayload: any): (Vector3?, number?)
 	local targetPoint: Vector3? = nil
 	local clientShotId: number? = nil
@@ -164,18 +307,6 @@ local function parseFireRequestPayload(requestPayload: any): (Vector3?, number?)
 	end
 
 	return targetPoint, clientShotId
-end
-
-local function isSharedLockedOut(player: Player, now: number): boolean
-	local lockoutUntil = sharedLockoutUntilByPlayer[player]
-	if not lockoutUntil then
-		return false
-	end
-	if now >= lockoutUntil then
-		sharedLockoutUntilByPlayer[player] = nil
-		return false
-	end
-	return true
 end
 
 local function isSecondaryCastActive(player: Player, now: number): boolean
@@ -511,7 +642,7 @@ local function buildPiercingShotResult(player: Player, targetPoint: Vector3): {[
 	}
 end
 
-local function canFire(player: Player, playerEntity: number): boolean
+local function canUseWeapon(player: Player, playerEntity: number): boolean
 	if not world or not Components then
 		return false
 	end
@@ -530,6 +661,16 @@ local function canFire(player: Player, playerEntity: number): boolean
 	return true
 end
 
+local function canStartNewAttack(player: Player, playerEntity: number): boolean
+	if not canUseWeapon(player, playerEntity) then
+		return false
+	end
+	if isSecondaryReloading(player, playerEntity, tick()) then
+		return false
+	end
+	return true
+end
+
 local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 	local targetPoint, clientShotId = parseFireRequestPayload(requestPayload)
 	if not targetPoint then
@@ -543,11 +684,11 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 	if not playerEntity then
 		return
 	end
-	if not canFire(player, playerEntity) then
+	if not canStartNewAttack(player, playerEntity) then
 		return
 	end
 	local now = tick()
-	if isSharedLockedOut(player, now) or isSecondaryCastActive(player, now) then
+	if isSecondaryCastActive(player, now) then
 		return
 	end
 
@@ -681,12 +822,12 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 	if not playerEntity then
 		return
 	end
-	if not canFire(player, playerEntity) then
+	if not canStartNewAttack(player, playerEntity) then
 		return
 	end
 
 	local now = tick()
-	if isSharedLockedOut(player, now) or isSecondaryCastActive(player, now) then
+	if isSecondaryCastActive(player, now) then
 		return
 	end
 
@@ -698,7 +839,10 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 	if typeof(castDuration) ~= "number" or castDuration <= 0 then
 		castDuration = 0.60
 	end
-	local effectiveSharedLockout = getEffectiveSharedLockout(playerEntity)
+	local didSpendCharge, chargeState = spendSecondaryCharge(player, playerEntity, now)
+	if not didSpendCharge or not chargeState then
+		return
+	end
 
 	local castState = {
 		startedAt = now,
@@ -706,7 +850,7 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 		fireAt = now + fireDelay,
 		targetPoint = targetPoint,
 		clientShotId = clientShotId,
-		effectiveSharedLockout = effectiveSharedLockout,
+		effectiveSharedLockout = chargeState.rechargeDuration,
 	}
 	secondaryCastStateByPlayer[player] = castState
 	player:SetAttribute(M2_CAST_ACTIVE_ATTRIBUTE, true)
@@ -730,7 +874,7 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 			return
 		end
 		local livePlayerEntity = getPlayerEntity(player)
-		if not livePlayerEntity or not canFire(player, livePlayerEntity) then
+		if not livePlayerEntity or not canUseWeapon(player, livePlayerEntity) then
 			return
 		end
 
@@ -853,8 +997,20 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 		if player.Parent then
 			player:SetAttribute(M2_CAST_ACTIVE_ATTRIBUTE, false)
 		end
-		sharedLockoutUntilByPlayer[player] = tick() + castState.effectiveSharedLockout
 	end)
+end
+
+local function handlePrimaryFireRelease(player: Player)
+	if not getPlayerEntity or not ItemSystemRef or not ItemSystemRef.onPrimaryFireReleased then
+		return
+	end
+
+	local playerEntity = getPlayerEntity(player)
+	if not playerEntity then
+		return
+	end
+
+	ItemSystemRef.onPrimaryFireReleased(playerEntity)
 end
 
 function WeaponService.init(options: {[string]: any})
@@ -866,30 +1022,76 @@ function WeaponService.init(options: {[string]: any})
 	Components = options.Components
 	PassiveEffectSystem = options.PassiveEffectSystem
 	DamageSystem = options.DamageSystem
+	ItemSystemRef = options.ItemSystem
 	getPlayerEntity = options.getPlayerEntity
 
 	primaryFireRequestRemote = options.PrimaryFireRequest
+	primaryFireReleaseRemote = options.PrimaryFireRelease
 	primaryShotRemote = options.PrimaryShot
 	secondaryFireRequestRemote = options.SecondaryFireRequest
 	secondaryShotRemote = options.SecondaryShot
 	sprintForceOffRemote = options.SprintForceOff
 
 	if not primaryFireRequestRemote
+		or not primaryFireReleaseRemote
 		or not primaryShotRemote
 		or not secondaryFireRequestRemote
 		or not secondaryShotRemote
-		or not sprintForceOffRemote then
-		error("[WeaponService] Missing weapon remotes during initialization.")
+		or not sprintForceOffRemote
+		or not ItemSystemRef then
+		error("[WeaponService] Missing weapon dependencies during initialization.")
 	end
 
 	primaryFireRequestRemote.OnServerEvent:Connect(handlePrimaryFireRequest)
+	primaryFireReleaseRemote.OnServerEvent:Connect(handlePrimaryFireRelease)
 	secondaryFireRequestRemote.OnServerEvent:Connect(handleSecondaryFireRequest)
 	Players.PlayerRemoving:Connect(function(player)
 		nextFireAtByPlayer[player] = nil
-		sharedLockoutUntilByPlayer[player] = nil
 		secondaryCastStateByPlayer[player] = nil
+		secondaryChargeStateByPlayer[player] = nil
 		player:SetAttribute(M2_CAST_ACTIVE_ATTRIBUTE, false)
 	end)
+end
+
+function WeaponService.setItemSystem(itemSystemRef: any)
+	ItemSystemRef = itemSystemRef
+end
+
+function WeaponService.step(_dt: number)
+	if not getPlayerEntity then
+		return
+	end
+
+	local now = tick()
+	for _, player in ipairs(Players:GetPlayers()) do
+		local character = player.Character
+		if not character or character:GetAttribute("StarterWeaponId") ~= Oathkeeper.id then
+			secondaryChargeStateByPlayer[player] = nil
+			continue
+		end
+
+		local playerEntity = getPlayerEntity(player)
+		if not playerEntity then
+			continue
+		end
+
+		local state = syncSecondaryChargeStateForPlayer(player, playerEntity, now)
+		if state.currentCharges < state.maxCharges and typeof(state.nextRechargeAt) == "number" and state.nextRechargeAt > 0 then
+			local recharged = false
+			while state.currentCharges < state.maxCharges and now >= state.nextRechargeAt do
+				state.currentCharges += 1
+				recharged = true
+				if state.currentCharges < state.maxCharges then
+					state.nextRechargeAt += state.rechargeDuration
+				else
+					state.nextRechargeAt = 0
+				end
+			end
+			if recharged then
+				setSecondaryChargeAttributes(player, state)
+			end
+		end
+	end
 end
 
 function WeaponService.setTemporalStasisSystem(temporalStasisSystem: any)

@@ -6,6 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GameSessionTimer = require(game.ServerScriptService.ECS.Systems.GameSessionTimer)
 local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff)
+local TixService = require(game.ServerScriptService.Services.TixService)
 
 local GameStateManager = {}
 
@@ -330,6 +331,7 @@ function GameStateManager.addPlayerToGame(player: Player)
 	-- Re-enable ambient spawning now that player is in game.
 	-- Exp orb spawner is optional in simplified game modes.
 	setSpawnerEnabled(true)
+	TixService.resetPlayer(player)
 	
 	-- Initialize session stats tracking for this player
 	local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
@@ -591,6 +593,7 @@ function GameStateManager.resetGame()
 	-- Full run-state reset for non-wipe transitions too.
 	local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
 	SessionStatsTracker.reset()
+	TixService.resetAll()
 	local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 	GameTimeSystem.reset()
 	GameSessionTimer.resetSession()
@@ -792,6 +795,7 @@ function handleStartCleanup(player: Player)
 			targetPlayer:SetAttribute(attrName, nil)
 		end
 	end
+	TixService.resetAll()
 	
 	-- Clear pause states and unfreeze cooldowns
 	-- CRITICAL: Unpause the server-side PauseSystem first

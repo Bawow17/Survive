@@ -98,6 +98,7 @@ local DeathBodyFadeSystem = require(game.ServerScriptService.ECS.Systems.DeathBo
 local KnockbackSystem = require(game.ServerScriptService.ECS.Systems.KnockbackSystem)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 local EnemyFrostSystem = require(game.ServerScriptService.ECS.Systems.EnemyFrostSystem)
+local EnemyStunSystem = require(game.ServerScriptService.ECS.Systems.EnemyStunSystem)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local GlobalBalance = require(game.ServerScriptService.Balance.GlobalBalance)
 local ItemBalance = require(game.ServerScriptService.Balance.ItemBalance)
@@ -107,6 +108,7 @@ local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
 local INVINCIBLE_ENEMY_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.InvincibleEnemyDiagnostics or false
 local ENEMY_VISUAL_HITBOX_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.EnemyVisualHitboxDiagnostics or false
 local ENEMY_COLLIDER_OVERLAY = GameOptions.Debug and GameOptions.Debug.EnemyColliderOverlay or false
+local COMMON_ITEM_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.CommonItemDiagnostics or false
 
 -- Ability Registry - Auto-discovers and loads all abilities
 local AbilityRegistry = require(game.ServerScriptService.Abilities.AbilityRegistry)
@@ -131,6 +133,7 @@ local WeaponService = require(game.ServerScriptService.Services.WeaponService)
 local LoopGameService = require(game.ServerScriptService.Services.LoopGameService)
 local DebugModMenuService = require(game.ServerScriptService.Services.DebugModMenuService)
 local PlayerSettingsService = require(game.ServerScriptService.Services.PlayerSettingsService)
+local TixService = require(game.ServerScriptService.Services.TixService)
 local DifficultyCoeff = require(game.ServerScriptService.Balance.DifficultyCoeff)
 local GameSessionTimer = require(game.ServerScriptService.ECS.Systems.GameSessionTimer)
 local ChunkGenerationService = require(game.ServerScriptService.WorldGen.ChunkGenerationService)
@@ -225,6 +228,10 @@ local STARTER_WEAPON_TRACER_LIFETIME_ATTRIBUTE = "StarterWeaponTracerLifetime"
 local STARTER_WEAPON_TRACER_FADE_DURATION_ATTRIBUTE = "StarterWeaponTracerFadeDuration"
 local STARTER_WEAPON_M2_CAST_DURATION_ATTRIBUTE = "StarterWeaponM2CastDuration"
 local STARTER_WEAPON_M2_FIRE_DELAY_ATTRIBUTE = "StarterWeaponM2FireDelay"
+local STARTER_WEAPON_M2_CHARGES_ATTRIBUTE = "StarterWeaponM2Charges"
+local STARTER_WEAPON_M2_MAX_CHARGES_ATTRIBUTE = "StarterWeaponM2MaxCharges"
+local STARTER_WEAPON_M2_RECHARGE_DURATION_ATTRIBUTE = "StarterWeaponM2RechargeDuration"
+local STARTER_WEAPON_M2_RECHARGE_END_ATTRIBUTE = "StarterWeaponM2RechargeEnd"
 local STARTER_WEAPON_PATH = Oathkeeper.assetPaths.weaponFolder
 local STARTER_WEAPON_MODEL_NAME = Oathkeeper.assetPaths.model
 local STARTER_WEAPON_GRIP_C0_NAME = Oathkeeper.assetPaths.gripC0
@@ -306,10 +313,12 @@ local function disableWorkspaceFluidForces()
 		end)
 		if not writeSuccess and not warnedWorkspaceFluidForcesRuntimeConfig then
 			warnedWorkspaceFluidForcesRuntimeConfig = true
-			warn(string.format(
-				"[Bootstrap] Workspace.FluidForces cannot be configured at runtime in this environment; configure it in Studio/engine settings instead. Details: %s",
-				tostring(writeError)
-			))
+			if RunService:IsStudio() then
+				warn(string.format(
+					"[Bootstrap] Workspace.FluidForces cannot be configured at runtime in this environment; configure it in Studio/engine settings instead. Details: %s",
+					tostring(writeError)
+				))
+			end
 		end
 	end
 end
@@ -373,6 +382,10 @@ local function clearStarterWeaponAttributes(character: Model)
 	character:SetAttribute(STARTER_WEAPON_TRACER_FADE_DURATION_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_M2_CAST_DURATION_ATTRIBUTE, nil)
 	character:SetAttribute(STARTER_WEAPON_M2_FIRE_DELAY_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_M2_CHARGES_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_M2_MAX_CHARGES_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_M2_RECHARGE_DURATION_ATTRIBUTE, nil)
+	character:SetAttribute(STARTER_WEAPON_M2_RECHARGE_END_ATTRIBUTE, nil)
 end
 
 local function attachStarterWeapon(character: Model)
@@ -499,6 +512,10 @@ local function attachStarterWeapon(character: Model)
 	character:SetAttribute(STARTER_WEAPON_TRACER_FADE_DURATION_ATTRIBUTE, configuredTracerFadeDuration)
 	character:SetAttribute(STARTER_WEAPON_M2_CAST_DURATION_ATTRIBUTE, configuredM2CastDuration)
 	character:SetAttribute(STARTER_WEAPON_M2_FIRE_DELAY_ATTRIBUTE, configuredM2FireDelay)
+	character:SetAttribute(STARTER_WEAPON_M2_CHARGES_ATTRIBUTE, 1)
+	character:SetAttribute(STARTER_WEAPON_M2_MAX_CHARGES_ATTRIBUTE, 1)
+	character:SetAttribute(STARTER_WEAPON_M2_RECHARGE_DURATION_ATTRIBUTE, Oathkeeper.m2SharedLockout)
+	character:SetAttribute(STARTER_WEAPON_M2_RECHARGE_END_ATTRIBUTE, 0)
 end
 
 local function setComponent(entity: number, component: any, value: any, componentName: string)
@@ -536,6 +553,7 @@ function ECSWorldService.Initialize()
 
 	local weaponsRemotesFolder = ensureFolder(remotesFolder, "Weapons")
 	local primaryFireRequestRemote = ensureRemoteEvent(weaponsRemotesFolder, "PrimaryFireRequest")
+	local primaryFireReleaseRemote = ensureRemoteEvent(weaponsRemotesFolder, "PrimaryFireRelease")
 	local primaryShotRemote = ensureRemoteEvent(weaponsRemotesFolder, "PrimaryShot")
 	local secondaryFireRequestRemote = ensureRemoteEvent(weaponsRemotesFolder, "SecondaryFireRequest")
 	local secondaryShotRemote = ensureRemoteEvent(weaponsRemotesFolder, "SecondaryShot")
@@ -568,6 +586,17 @@ function ECSWorldService.Initialize()
 		enemyVisualHitboxDiagFlag.Parent = debugFlags
 	end
 	enemyVisualHitboxDiagFlag.Value = ENEMY_VISUAL_HITBOX_DIAGNOSTICS
+
+	local commonItemDiagFlag = debugFlags:FindFirstChild("CommonItemDiagnostics")
+	if not commonItemDiagFlag or not commonItemDiagFlag:IsA("BoolValue") then
+		if commonItemDiagFlag then
+			commonItemDiagFlag:Destroy()
+		end
+		commonItemDiagFlag = Instance.new("BoolValue")
+		commonItemDiagFlag.Name = "CommonItemDiagnostics"
+		commonItemDiagFlag.Parent = debugFlags
+	end
+	commonItemDiagFlag.Value = COMMON_ITEM_DIAGNOSTICS
 
 	local enemyColliderOverlayFlag = debugFlags:FindFirstChild("EnemyColliderOverlay")
 	if not enemyColliderOverlayFlag or not enemyColliderOverlayFlag:IsA("BoolValue") then
@@ -603,6 +632,10 @@ function ECSWorldService.Initialize()
 	ModelReplicationService.replicateModel(
 		Oathkeeper.assetPaths.weaponFolder .. ".VFX",
 		"ContentDrawer.WeaponModels.HandCannons.Oathkeeper"
+	)
+	ModelReplicationService.replicateModel(
+		"ContentDrawer.ItemModels.VFX.CommonAura",
+		"ContentDrawer.ItemModels.VFX"
 	)
 	EnemyColliderService.init(world, Components)
 	EnemyColliderOverlayService.init(world, Components)
@@ -680,6 +713,7 @@ function ECSWorldService.Initialize()
 	GameStateManager.init(world, Components, DirtyService, ECSWorldService)
 	GameStateManager.setStatusEffectSystem(StatusEffectSystem)
 	GameStateManager.setPauseSystem(PauseSystem)
+	TixService.init()
 	UltimateSystem.init(world, Components, DirtyService)
 	
 	-- Initialize Session Stats Tracker
@@ -727,6 +761,7 @@ function ECSWorldService.Initialize()
 	EnemyFrostSystem.init(world, Components, DirtyService, {
 		DamageSystem = DamageSystem,
 	})
+	EnemyStunSystem.init(world, Components, DirtyService)
 	TemporalStasisSystem.init(world, Components, DirtyService, {
 		DamageSystem = DamageSystem,
 		EnemyFrostSystem = EnemyFrostSystem,
@@ -747,7 +782,12 @@ function ECSWorldService.Initialize()
 		PickupService = PickupService,
 		ProjectileService = ProjectileService,
 		ModelReplicationService = ModelReplicationService,
+		PassiveEffectSystem = PassiveEffectSystem,
+		ExpSystem = ExpSystem,
 	})
+	ItemSystem.setEnemyStunSystem(EnemyStunSystem)
+	HealthRegenSystem.setItemSystem(ItemSystem)
+	AbilitySystemBase.setItemSystem(ItemSystem)
 	ProjectileService.setTemporalStasisSystem(TemporalStasisSystem)
 	DamageSystem.setItemSystem(ItemSystem)
 	WeaponService.init({
@@ -755,15 +795,18 @@ function ECSWorldService.Initialize()
 		Components = Components,
 		PassiveEffectSystem = PassiveEffectSystem,
 		DamageSystem = DamageSystem,
+		ItemSystem = ItemSystem,
 		getPlayerEntity = function(player: Player): number?
 			return playerEntities[player]
 		end,
 		PrimaryFireRequest = primaryFireRequestRemote,
+		PrimaryFireRelease = primaryFireReleaseRemote,
 		PrimaryShot = primaryShotRemote,
 		SecondaryFireRequest = secondaryFireRequestRemote,
 		SecondaryShot = secondaryShotRemote,
 		SprintForceOff = sprintForceOffRemote,
 	})
+	WeaponService.setItemSystem(ItemSystem)
 	WeaponService.setTemporalStasisSystem(TemporalStasisSystem)
 	LoopGameService.init(world, Components, ExpSystem)
 	DebugModMenuService.init(world, Components, GameTimeSystem, DifficultyCoeff, GameSessionTimer, ItemSystem)
@@ -1310,7 +1353,11 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		cooldownMultiplier = PlayerBalance.BaseCooldownMultiplier,
 		expMultiplier = PlayerBalance.BaseExpMultiplier,
 		healthMultiplier = 1.0,
+		healthFlatBonus = 0,
 		moveSpeedMultiplier = 1.0,  -- Haste passive only
+		levelExpCostMultiplier = 1.0,
+		sprintMoveSpeedMultiplier = 1.0,
+		closeRangeDamageMultiplier = 1.0,
 		sizeMultiplier = 1.0,
 		durationMultiplier = 1.0,
 		pickupRangeMultiplier = 1.0,
@@ -1325,6 +1372,7 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		critChance = 0,
 		critDamage = 0,
 		armor = 0,
+		primaryAttackSpeedBonus = 0,
 		lifesteal = 0,
 		luck = 0,
 		powerupChance = 0,
@@ -1343,6 +1391,10 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		lastDamageTime = 0,
 		isRegenerating = false,
 	}, "HealthRegen")
+
+	setComponent(entity, Components.PlayerArmorBuffs, {
+		instances = {},
+	}, "PlayerArmorBuffs")
 	
 	resetPlayerProgressionToBaseline(entity)
 
@@ -1606,6 +1658,10 @@ local function stepWorld(dt: number)
 	debug.profilebegin("GameTime")
 	GameTimeSystem.step(dt)
 	debug.profileend()
+
+	debug.profilebegin("WeaponService")
+	WeaponService.step(dt)
+	debug.profileend()
 	
 	-- Player data and AI updates
 	debug.profilebegin("PlayerPositionSync")
@@ -1634,6 +1690,10 @@ local function stepWorld(dt: number)
 
 	debug.profilebegin("EnemyFrost")
 	EnemyFrostSystem.step(dt)
+	debug.profileend()
+
+	debug.profilebegin("EnemyStun")
+	EnemyStunSystem.step(dt)
 	debug.profileend()
 
 	debug.profilebegin("ZombieAI")

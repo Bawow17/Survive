@@ -18,6 +18,7 @@ local world: any
 local Components: any
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
+local POOL_INIT_LOGS = GameOptions.Debug and GameOptions.Debug.PoolInitializationLogs or false
 
 local function flushRecycleQueue(now: number)
 	if recycleCount <= 0 then
@@ -64,6 +65,9 @@ local function resetEnemyEntity(entity: number, enemyType: string, position: Vec
 	end
 	if Components.EnemyFreeze and world:has(entity, Components.EnemyFreeze) then
 		world:remove(entity, Components.EnemyFreeze)
+	end
+	if Components.EnemyStun and world:has(entity, Components.EnemyStun) then
+		world:remove(entity, Components.EnemyStun)
 	end
 	if Components.EnemyTimeStopped and world:has(entity, Components.EnemyTimeStopped) then
 		world:remove(entity, Components.EnemyTimeStopped)
@@ -133,7 +137,7 @@ function EnemyPool.init(worldRef: any, components: any)
 	Components = components
 	
 	-- Pre-allocate 100 enemy entities on startup
-	if DEBUG then
+	if POOL_INIT_LOGS then
 		print("[EnemyPool] Initializing pool with " .. MAX_POOL_SIZE .. " entities...")
 	end
 	for i = 1, MAX_POOL_SIZE do
@@ -141,7 +145,7 @@ function EnemyPool.init(worldRef: any, components: any)
 		table.insert(pool, entity)
 	end
 	poolCount = MAX_POOL_SIZE
-	if DEBUG then
+	if POOL_INIT_LOGS then
 		print("[EnemyPool] Pool initialized: " .. poolCount .. "/" .. MAX_POOL_SIZE .. " available")
 	end
 end
@@ -276,6 +280,9 @@ function EnemyPool.release(entity: number)
 		end
 		if Components.EnemyFreeze and world:has(entity, Components.EnemyFreeze) then
 			world:remove(entity, Components.EnemyFreeze)
+		end
+		if Components.EnemyStun and world:has(entity, Components.EnemyStun) then
+			world:remove(entity, Components.EnemyStun)
 		end
 		if Components.EnemyTimeStopped and world:has(entity, Components.EnemyTimeStopped) then
 			world:remove(entity, Components.EnemyTimeStopped)

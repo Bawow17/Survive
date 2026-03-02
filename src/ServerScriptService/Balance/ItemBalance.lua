@@ -71,6 +71,11 @@ return {
 		VisualOrbLifetime = 1.25,
 		VisualOrbSeekOnSpawn = true,
 	},
+
+	RoR2Tix = {
+		Enabled = true,
+		RewardMultiplier = 0.2,
+	},
 	
 	-- Exp-Sink (Red Orb) Settings
 	ExpSink = {

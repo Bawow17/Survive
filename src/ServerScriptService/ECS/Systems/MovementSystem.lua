@@ -29,6 +29,7 @@ local _RepulsionVelocity: any
 local _Knockback: any
 local _EnemyTimeStopped: any
 local _EnemyFreeze: any
+local _EnemyStun: any
 
 local CHARGER_DASH_STATE = 3
 local ENEMY_DISPLACEMENT_MULT = 2.5
@@ -328,6 +329,7 @@ function MovementSystem.init(worldRef: any, components: any, dirtyService: any)
 	_Knockback = Components.Knockback
 	_EnemyTimeStopped = Components.EnemyTimeStopped
 	_EnemyFreeze = Components.EnemyFreeze
+	_EnemyStun = Components.EnemyStun
 	
 	-- Create cached query for performance
 	movingQuery = world:query(Components.Position, Components.Velocity, Components.EntityType):cached()
@@ -459,6 +461,12 @@ function MovementSystem.step(dt: number)
 			end
 			local freezeData = _EnemyFreeze and world:get(entity, _EnemyFreeze)
 			if freezeData and (freezeData.endTime or 0) > tick() then
+				velocity = { x = 0, y = 0, z = 0 }
+				DirtyService.setIfChanged(world, entity, _Velocity, velocity, "Velocity")
+				continue
+			end
+			local stunData = _EnemyStun and world:get(entity, _EnemyStun)
+			if stunData and (stunData.endTime or 0) > tick() then
 				velocity = { x = 0, y = 0, z = 0 }
 				DirtyService.setIfChanged(world, entity, _Velocity, velocity, "Velocity")
 				continue

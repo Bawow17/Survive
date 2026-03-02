@@ -66,6 +66,9 @@ EnemyComponents.EnemyFreeze = world:component()
 -- EnemyTimeStopped component - Tracks active Tempus Gelidum freeze state
 EnemyComponents.EnemyTimeStopped = world:component()
 
+-- EnemyStun component - Tracks timed stun state for item procs
+EnemyComponents.EnemyStun = world:component()
+
 -- EnemyArmor component - Tracks additive armor points used by DamageSystem
 EnemyComponents.EnemyArmor = world:component()
 

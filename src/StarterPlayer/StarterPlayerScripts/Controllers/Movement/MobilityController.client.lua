@@ -12,11 +12,17 @@ local TweenService = game:GetService("TweenService")
 
 local MOBILITY_KEY = Enum.KeyCode.LeftShift
 local DOUBLE_JUMP_ALT_KEY = Enum.KeyCode.Space
+local ATTR_ULTIMATE_BUFFER_ACTIVE = "UltimateBufferActiveLocal"
+local ATTR_EQUIPMENT_BUFFER_ACTIVE = "EquipmentBufferActiveLocal" -- Reserved for future Q equipment input.
+local ATTR_MOBILITY_BUFFER_ACTIVE = "MobilityBufferActiveLocal"
 
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local humanoid = character:WaitForChild("Humanoid") :: Humanoid
 local rootPart = character:WaitForChild("HumanoidRootPart") :: BasePart
+local mobilityHeld = false
+local pendingMobilityBuffered = false
+local isMobilityReadyNow: () -> boolean
 
 -- Mobility configs (hardcoded on client for responsiveness)
 local DASH_CONFIG = {
@@ -3103,28 +3109,128 @@ end
 local function onMobilityKeyPressed()
 	-- Don't allow mobility while paused
 	if isPaused then
-		return
+		return false
 	end
 	if player:GetAttribute("CooldownsFrozen") == true or player:GetAttribute("UltimateInputLocked") == true then
-		return
+		return false
 	end
 	
 	if not equippedMobility then
-		return
+		return false
 	end
 	
 	if equippedMobility == "Dash" then
-		executeDash()
+		return executeDash()
 	elseif equippedMobility == "IceTracer" then
-		executeIceTracer()
+		return executeIceTracer()
 	elseif equippedMobility == "ShieldBash" then
-		executeDash()  -- Shield Bash uses the same dash function with combat logic
+		return executeDash()  -- Shield Bash uses the same dash function with combat logic
 	elseif equippedMobility == "DoubleJump" then
-		executeDoubleJump()
+		return executeDoubleJump()
 	elseif equippedMobility == "Blink" then
-		executeBlink()
+		return executeBlink()
 	elseif equippedMobility == "ManaGrapple" then
-		executeManaGrapple()
+		return executeManaGrapple()
+	end
+
+	return false
+end
+
+local function refreshMobilityBufferAttribute()
+	local isBuffered = pendingMobilityBuffered or mobilityHeld
+	local isActive = isBuffered and isMobilityReadyNow()
+	player:SetAttribute(ATTR_MOBILITY_BUFFER_ACTIVE, isActive)
+end
+
+local function hasHigherPriorityBufferedAction(): boolean
+	return player:GetAttribute(ATTR_ULTIMATE_BUFFER_ACTIVE) == true
+		or player:GetAttribute(ATTR_EQUIPMENT_BUFFER_ACTIVE) == true
+end
+
+local function canRetainMobilityBuffer(): boolean
+	if not mobilityHeld then
+		return false
+	end
+	if isPaused then
+		return false
+	end
+	if player:GetAttribute("CooldownsFrozen") == true or player:GetAttribute("UltimateInputLocked") == true then
+		return false
+	end
+	if not equippedMobility then
+		return false
+	end
+	return humanoid ~= nil and humanoid.Health > 0
+end
+
+function isMobilityReadyNow(): boolean
+	if isPaused then
+		return false
+	end
+	if player:GetAttribute("CooldownsFrozen") == true or player:GetAttribute("UltimateInputLocked") == true then
+		return false
+	end
+	if not equippedMobility then
+		return false
+	end
+	if not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+
+	if equippedMobility == "Dash" or equippedMobility == "ShieldBash" then
+		if isDashing then
+			return false
+		end
+		local effectiveCooldown = serverCooldown or DASH_CONFIG.cooldown
+		return not isOnCooldown({ cooldown = effectiveCooldown })
+	elseif equippedMobility == "IceTracer" then
+		if isDashing or isBlinking or isGrappling then
+			return false
+		end
+		local config = getIceTracerConfig()
+		return not isOnCooldown({ cooldown = config.cooldown })
+	elseif equippedMobility == "DoubleJump" then
+		if humanoid.FloorMaterial ~= Enum.Material.Air then
+			return false
+		end
+		local effectiveCooldown = serverCooldown or DOUBLE_JUMP_CONFIG.cooldown
+		return not isOnCooldown({ cooldown = effectiveCooldown })
+	elseif equippedMobility == "Blink" then
+		if isBlinking or isDashing then
+			return false
+		end
+		if tick() < blinkLocalCooldownEnd then
+			return false
+		end
+		local isAir = humanoid.FloorMaterial == Enum.Material.Air
+		local effectiveCooldown = if isAir then (serverAirCooldown or BLINK_CONFIG.airCooldown) else (serverGroundCooldown or BLINK_CONFIG.groundCooldown)
+		return not isOnCooldownValue(effectiveCooldown)
+	elseif equippedMobility == "ManaGrapple" then
+		if isGrappling or isDashing or isBlinking then
+			return false
+		end
+		local cooldown = serverGrappleCooldown or MANA_GRAPPLE_CONFIG.grappleCooldown
+		return not isOnCooldownValue(cooldown)
+	end
+
+	return false
+end
+
+local function processBufferedMobility()
+	if not pendingMobilityBuffered then
+		return
+	end
+	if hasHigherPriorityBufferedAction() then
+		return
+	end
+	if onMobilityKeyPressed() then
+		pendingMobilityBuffered = false
+		refreshMobilityBufferAttribute()
+		return
+	end
+	if not canRetainMobilityBuffer() then
+		pendingMobilityBuffered = false
+		refreshMobilityBufferAttribute()
 	end
 end
 
@@ -3135,7 +3241,10 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 	
 	if input.KeyCode == MOBILITY_KEY then
-		onMobilityKeyPressed()
+		mobilityHeld = true
+		pendingMobilityBuffered = true
+		refreshMobilityBufferAttribute()
+		processBufferedMobility()
 		return
 	end
 
@@ -3150,9 +3259,23 @@ UserInputService.InputEnded:Connect(function(input, gameProcessed)
 		return
 	end
 	if input.KeyCode == MOBILITY_KEY then
+		mobilityHeld = false
+		pendingMobilityBuffered = false
+		refreshMobilityBufferAttribute()
 		if isGrappling then
 			grappleHoldActive = false
 		end
+	end
+end)
+
+RunService.RenderStepped:Connect(function()
+	refreshMobilityBufferAttribute()
+	if mobilityHeld and (not pendingMobilityBuffered) then
+		pendingMobilityBuffered = true
+		refreshMobilityBufferAttribute()
+	end
+	if pendingMobilityBuffered then
+		processBufferedMobility()
 	end
 end)
 
@@ -3174,6 +3297,9 @@ player.CharacterAdded:Connect(function(newCharacter)
 	blinkToken += 1
 	grappleToken += 1
 	isGrappling = false
+	mobilityHeld = false
+	pendingMobilityBuffered = false
+	refreshMobilityBufferAttribute()
 	setMobilityVelocityOverrideLocal(false)
 	grappleHoldActive = false
 	setUtilityCastActive(false)
@@ -3216,6 +3342,8 @@ player.CharacterAdded:Connect(function(newCharacter)
 		activeGravityEffect = nil
 	end
 end)
+
+refreshMobilityBufferAttribute()
 
 -- Pause/Unpause event listeners
 local function setupPauseListeners()

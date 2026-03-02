@@ -71,6 +71,11 @@ overhealFill.Visible = false
 -- CRITICAL: Parent to HPFrame (becomes PlayerGui.MainHUD.BottomBarFrame.HPFrame at runtime)
 overhealFill.Parent = hpFrame
 
+if healthLabel then
+	-- Keep the numeric HP text above the overheal overlay so the fill never covers it.
+	healthLabel.ZIndex = math.max(healthLabel.ZIndex, overhealFill.ZIndex + 1)
+end
+
 -- Match rounded corners with HP fill for seamless rounded UI
 local hpCorner = hpFill:FindFirstChildOfClass("UICorner") or hpFrame:FindFirstChildOfClass("UICorner")
 if hpCorner then
@@ -98,7 +103,7 @@ local baseHealthColor = hpFill.BackgroundColor3
 local lowHealthColor = Color3.fromRGB(255, 0, 0)
 local flashColor = Color3.fromRGB(255, 120, 120)
 local baseHealthTransparency = 0.2  -- Visible but slightly transparent
-local OVERHEAL_OVERLAP = 10  -- pixels overlap to hide seam between rounded bars
+local OVERHEAL_POSITION_OFFSET = -2
 
 local flashActive = false
 local flashToken = 0
@@ -510,8 +515,8 @@ local function updateHealthUI(current: number, maxHealthValue: number)
 
 			overhealFill.AnchorPoint = Vector2.new(0, 0)
 			tweenOverheal(
-				UDim2.new(healthShare, -OVERHEAL_OVERLAP, 0, 0),  -- Start slightly inside white
-				UDim2.new(overhealShare, OVERHEAL_OVERLAP * 2, 1, 0)  -- Extend both sides
+				UDim2.new(healthShare, OVERHEAL_POSITION_OFFSET, 0, 0),
+				UDim2.new(overhealShare, 0, 1, 0)
 			)
 		else
 			-- Non-overflow additive mode.
@@ -519,8 +524,8 @@ local function updateHealthUI(current: number, maxHealthValue: number)
 			
 			overhealFill.AnchorPoint = Vector2.new(0, 0)
 			tweenOverheal(
-				UDim2.new(healthRatio, -OVERHEAL_OVERLAP, 0, 0),  -- Start slightly inside white
-				UDim2.new(overhealRatio, OVERHEAL_OVERLAP * 2, 1, 0)  -- Extend both sides
+				UDim2.new(healthRatio, OVERHEAL_POSITION_OFFSET, 0, 0),
+				UDim2.new(overhealRatio, 0, 1, 0)
 			)
 		end
 	else

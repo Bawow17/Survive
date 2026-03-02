@@ -10,11 +10,15 @@ local Workspace = game:GetService("Workspace")
 
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local GameStateManager = require(game.ServerScriptService.ECS.Systems.GameStateManager)
+local DirtyService = require(game.ServerScriptService.ECS.DirtyService)
 local DamageSystem = require(game.ServerScriptService.ECS.Systems.DamageSystem)
 local OctreeSystem = require(game.ServerScriptService.ECS.Systems.OctreeSystem)
 local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
 local BuffSystem = require(game.ServerScriptService.ECS.Systems.BuffSystem)
+local OverhealSystem = require(game.ServerScriptService.ECS.Systems.OverhealSystem)
 local RunItems = require(game.ServerScriptService.Balance.RunItems)
+local Oathkeeper = require(game.ServerScriptService.Balance.Weapons.Oathkeeper)
+local TixService = require(game.ServerScriptService.Services.TixService)
 local CombatScaling = require(ReplicatedStorage.Shared.CombatScaling)
 
 local ItemSystem = {}
@@ -29,6 +33,16 @@ type ItemState = {
 		maxCharges: number,
 		nextRechargeAt: number,
 	},
+	timmy: {
+		lastPrimaryShotAt: number,
+		holdStartedAt: number,
+		lockedUntil: number,
+		bonusAtLastEval: number,
+	},
+	teddy: {
+		nextStuffingAt: number,
+	},
+	healingPotionReadyAt: number,
 }
 
 type PendingFuseBomb = {
@@ -45,6 +59,9 @@ local Components: any
 local PickupService: any
 local ProjectileService: any
 local ModelReplicationService: any
+local PassiveEffectSystemRef: any
+local ExpSystemRef: any
+local EnemyStunSystem: any
 
 local Position: any
 local PlayerStats: any
@@ -52,11 +69,14 @@ local EntityType: any
 local Level: any
 local PassiveEffects: any
 local Health: any
+local PlayerArmorBuffs: any
+local PlayerPauseState: any
 
 local itemStateByEntity: {[number]: ItemState} = {}
 local pendingFuseBombs: {PendingFuseBomb} = {}
 local activeItemDropIds: {[number]: boolean} = {}
 local itemStateRemote: RemoteEvent
+local reapplyPassiveEffects: (playerEntity: number) -> ()
 
 local RNG = Random.new()
 
@@ -82,6 +102,13 @@ local function buildReplicatedCommonItemPath(modelName: string): string
 	return "ReplicatedStorage.ContentDrawer.ItemModels.CommonItems." .. modelName
 end
 
+local function isCommonItemVisualInstance(instance: Instance?): boolean
+	if not instance then
+		return false
+	end
+	return instance:IsA("Model") or instance:IsA("BasePart")
+end
+
 local function getCommonItemsFolder(): Instance?
 	local contentDrawer = ServerStorage:FindFirstChild("ContentDrawer")
 	if not contentDrawer then
@@ -94,7 +121,25 @@ local function getCommonItemsFolder(): Instance?
 	return itemModels:FindFirstChild("CommonItems")
 end
 
+local function getReplicatedCommonItemsFolder(): Instance?
+	local contentDrawer = ReplicatedStorage:FindFirstChild("ContentDrawer")
+	if not contentDrawer then
+		return nil
+	end
+	local itemModels = contentDrawer:FindFirstChild("ItemModels")
+	if not itemModels then
+		return nil
+	end
+	return itemModels:FindFirstChild("CommonItems")
+end
+
 local function resolveCommonItemModelName(modelName: string): string
+	if ModelReplicationService and ModelReplicationService.resolveCommonItemVisualName then
+		local resolved = ModelReplicationService.resolveCommonItemVisualName(modelName)
+		if typeof(resolved) == "string" and resolved ~= "" then
+			return resolved
+		end
+	end
 	if ModelReplicationService and ModelReplicationService.resolveCommonItemName then
 		local resolved = ModelReplicationService.resolveCommonItemName(modelName)
 		if typeof(resolved) == "string" and resolved ~= "" then
@@ -107,13 +152,13 @@ local function resolveCommonItemModelName(modelName: string): string
 		return modelName
 	end
 	local exact = commonItems:FindFirstChild(modelName)
-	if exact and exact:IsA("Model") then
+	if isCommonItemVisualInstance(exact) then
 		return exact.Name
 	end
 
 	local wanted = normalizeLookupKey(modelName)
 	for _, child in ipairs(commonItems:GetChildren()) do
-		if child:IsA("Model") and normalizeLookupKey(child.Name) == wanted then
+		if isCommonItemVisualInstance(child) and normalizeLookupKey(child.Name) == wanted then
 			return child.Name
 		end
 	end
@@ -122,25 +167,43 @@ local function resolveCommonItemModelName(modelName: string): string
 end
 
 local function replicateCommonItemModel(modelName: string)
+	local replicatedCommonItems = getReplicatedCommonItemsFolder()
+	if replicatedCommonItems then
+		local exact = replicatedCommonItems:FindFirstChild(modelName)
+		if isCommonItemVisualInstance(exact) then
+			return
+		end
+
+		local wanted = normalizeLookupKey(modelName)
+		for _, child in ipairs(replicatedCommonItems:GetChildren()) do
+			if isCommonItemVisualInstance(child) and normalizeLookupKey(child.Name) == wanted then
+				return
+			end
+		end
+	end
+	if ModelReplicationService and ModelReplicationService.replicateCommonItemVisual then
+		ModelReplicationService.replicateCommonItemVisual(modelName)
+		return
+	end
 	if ModelReplicationService and ModelReplicationService.replicateCommonItem then
 		ModelReplicationService.replicateCommonItem(modelName)
 	end
 end
 
-local function getCommonItemTemplate(modelName: string): Model?
+local function getCommonItemTemplate(modelName: string): Instance?
 	local commonItems = getCommonItemsFolder()
 	if not commonItems then
 		return nil
 	end
 
 	local model = commonItems:FindFirstChild(modelName)
-	if model and model:IsA("Model") then
+	if isCommonItemVisualInstance(model) then
 		return model
 	end
 
 	local wanted = normalizeLookupKey(modelName)
 	for _, child in ipairs(commonItems:GetChildren()) do
-		if child:IsA("Model") and normalizeLookupKey(child.Name) == wanted then
+		if isCommonItemVisualInstance(child) and normalizeLookupKey(child.Name) == wanted then
 			return child
 		end
 	end
@@ -148,27 +211,48 @@ local function getCommonItemTemplate(modelName: string): Model?
 	return nil
 end
 
-local function configureAnchoredModel(model: Model)
-	local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-	if primary and not model.PrimaryPart then
-		model.PrimaryPart = primary
-	end
-	for _, desc in ipairs(model:GetDescendants()) do
-		if desc:IsA("BasePart") then
-			desc.Anchored = true
-			desc.CanCollide = false
-			desc.CanTouch = false
-			desc.CanQuery = false
-			desc.Massless = true
-		elseif desc:IsA("Highlight") then
-			desc.Enabled = false
+local function configureAnchoredModel(model: Instance)
+	if model:IsA("Model") then
+		local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+		if primary and not model.PrimaryPart then
+			model.PrimaryPart = primary
 		end
+		for _, desc in ipairs(model:GetDescendants()) do
+			if desc:IsA("BasePart") then
+				desc.Anchored = true
+				desc.CanCollide = false
+				desc.CanTouch = false
+				desc.CanQuery = false
+				desc.Massless = true
+			elseif desc:IsA("Highlight") then
+				desc.Enabled = false
+			end
+		end
+		return
+	end
+
+	if model:IsA("BasePart") then
+		model.Anchored = true
+		model.CanCollide = false
+		model.CanTouch = false
+		model.CanQuery = false
+		model.Massless = true
 	end
 end
 
-local function getModelGroundPivotLift(modelName: string, fallback: number): number
-	local template = getCommonItemTemplate(modelName)
+local function getTemplateGroundPivotLift(template: Instance?, fallback: number): number
 	if not template then
+		return fallback
+	end
+
+	if template:IsA("BasePart") then
+		local lift = template.Size.Y * 0.5
+		if lift ~= lift or lift < 0 then
+			return fallback
+		end
+		return lift
+	end
+	if not template:IsA("Model") then
 		return fallback
 	end
 
@@ -189,6 +273,11 @@ local function getModelGroundPivotLift(modelName: string, fallback: number): num
 	return lift
 end
 
+local function getModelGroundPivotLift(modelName: string, fallback: number): number
+	local template = getCommonItemTemplate(modelName)
+	return getTemplateGroundPivotLift(template, fallback)
+end
+
 local function spawnWorldModel(modelName: string, position: Vector3, stripHighlight: boolean?): Instance?
 	local template = getCommonItemTemplate(modelName)
 	if not template then
@@ -197,14 +286,20 @@ local function spawnWorldModel(modelName: string, position: Vector3, stripHighli
 	local clone = template:Clone()
 	configureAnchoredModel(clone)
 	if stripHighlight == true then
-		for _, desc in ipairs(clone:GetDescendants()) do
-			if desc:IsA("Highlight") then
-				desc.Enabled = false
+		if clone:IsA("Model") then
+			for _, desc in ipairs(clone:GetDescendants()) do
+				if desc:IsA("Highlight") then
+					desc.Enabled = false
+				end
 			end
 		end
 	end
 	clone.Parent = Workspace
-	clone:PivotTo(CFrame.new(position))
+	if clone:IsA("Model") then
+		clone:PivotTo(CFrame.new(position))
+	elseif clone:IsA("BasePart") then
+		clone.CFrame = CFrame.new(position)
+	end
 	return clone
 end
 
@@ -300,6 +395,32 @@ local function getForwardGroundedDropPosition(player: Player, forwardDistance: n
 	return snapToGround(basePos, character, lift)
 end
 
+local function getStuffingTemplate(): Instance?
+	local commonItems = getCommonItemsFolder()
+	if not commonItems then
+		return nil
+	end
+
+	local topLevel = commonItems:FindFirstChild("Stuffing")
+	if isCommonItemVisualInstance(topLevel) then
+		return topLevel
+	end
+
+	return nil
+end
+
+local function replicateStuffingModel()
+	local replicatedCommonItems = getReplicatedCommonItemsFolder()
+	if replicatedCommonItems and isCommonItemVisualInstance(replicatedCommonItems:FindFirstChild("Stuffing")) then
+		return
+	end
+	if ModelReplicationService and ModelReplicationService.replicateCommonItemWithExtracts then
+		ModelReplicationService.replicateCommonItemWithExtracts("TeddyBloxpin", { "Stuffing" })
+		return
+	end
+	replicateCommonItemModel("TeddyBloxpin")
+end
+
 local function ensureEntityState(playerEntity: number): ItemState
 	local state = itemStateByEntity[playerEntity]
 	if state then
@@ -315,6 +436,16 @@ local function ensureEntityState(playerEntity: number): ItemState
 			maxCharges = 0,
 			nextRechargeAt = 0,
 		},
+		timmy = {
+			lastPrimaryShotAt = 0,
+			holdStartedAt = 0,
+			lockedUntil = 0,
+			bonusAtLastEval = 0,
+		},
+		teddy = {
+			nextStuffingAt = 0,
+		},
+		healingPotionReadyAt = 0,
 	}
 	itemStateByEntity[playerEntity] = state
 	return state
@@ -353,6 +484,32 @@ local function sendItemState(playerEntity: number)
 end
 
 local function clearEntityState(playerEntity: number, sendEmptyState: boolean)
+	if world and world:contains(playerEntity) then
+		if PassiveEffects then
+			local effects = world:get(playerEntity, PassiveEffects)
+			if effects then
+				effects.critChance = 0
+				effects.healthMultiplier = 1.0
+				effects.healthFlatBonus = 0
+				effects.moveSpeedMultiplier = 1.0
+				effects.levelExpCostMultiplier = 1.0
+				effects.sprintMoveSpeedMultiplier = 1.0
+				effects.closeRangeDamageMultiplier = 1.0
+				effects.primaryAttackSpeedBonus = 0
+				effects.armor = 0
+			end
+		end
+		if PlayerArmorBuffs then
+			local armorBuffs = world:get(playerEntity, PlayerArmorBuffs)
+			if armorBuffs then
+				armorBuffs.instances = {}
+			end
+		end
+		reapplyPassiveEffects(playerEntity)
+		if ExpSystemRef and ExpSystemRef.recalculateCurrentRequirement then
+			ExpSystemRef.recalculateCurrentRequirement(playerEntity)
+		end
+	end
 	itemStateByEntity[playerEntity] = nil
 	if sendEmptyState then
 		sendItemState(playerEntity)
@@ -367,12 +524,434 @@ local function getItemStackCount(playerEntity: number, itemId: string): number
 	return state.counts[itemId] or 0
 end
 
+local function applyFlatHealToPlayer(playerEntity: number, healAmount: number): boolean
+	if healAmount <= 0 or not world or not Health or not world:contains(playerEntity) then
+		return false
+	end
+
+	local health = world:get(playerEntity, Health)
+	if not health or typeof(health.current) ~= "number" or typeof(health.max) ~= "number" then
+		return false
+	end
+
+	local newHealth = math.min(health.current + healAmount, health.max)
+	if newHealth <= health.current then
+		return false
+	end
+
+	local healthSnapshot = {
+		current = newHealth,
+		max = health.max,
+	}
+	DirtyService.setIfChanged(world, playerEntity, Health, healthSnapshot, "Health")
+
+	local player = getPlayerFromEntity(playerEntity)
+	if player and player.Character then
+		local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+		if humanoid and humanoid.Health > 0 then
+			humanoid.Health = math.min(newHealth, humanoid.MaxHealth)
+		end
+	end
+
+	return true
+end
+
+local function tryUseHealingPotion(playerEntity: number, itemState: ItemState, now: number)
+	local stacks = itemState.counts[RunItems.Ids.HealingPotion] or 0
+	if stacks <= 0 or now < itemState.healingPotionReadyAt then
+		return
+	end
+	if not world or not Health or not world:contains(playerEntity) then
+		return
+	end
+
+	local pauseState = PlayerPauseState and world:get(playerEntity, PlayerPauseState) or nil
+	if pauseState and pauseState.pauseReason == "death" then
+		return
+	end
+
+	local health = world:get(playerEntity, Health)
+	if not health or typeof(health.current) ~= "number" or typeof(health.max) ~= "number" then
+		return
+	end
+	if health.max <= 0 or health.current <= 0.01 then
+		return
+	end
+
+	local potionCfg = RunItems.Definitions[RunItems.Ids.HealingPotion].healingPotion
+	local triggerHealth = health.max * potionCfg.triggerHealthThreshold
+	if health.current > triggerHealth then
+		return
+	end
+
+	local extraStacks = math.max(0, stacks - 1)
+	local healAmount = potionCfg.baseHeal + (potionCfg.healPerAdditionalStack * extraStacks)
+	if not applyFlatHealToPlayer(playerEntity, healAmount) then
+		return
+	end
+
+	local cooldown = potionCfg.baseCooldown * (potionCfg.stackCooldownMultiplier ^ extraStacks)
+	itemState.healingPotionReadyAt = now + cooldown
+end
+
+local function tryProcLaserElectrocutor(sourcePlayerEntity: number, targetEnemyEntity: number, procCoefficient: number?)
+	if not EnemyStunSystem or not EnemyStunSystem.applyStun then
+		return
+	end
+
+	local stacks = getItemStackCount(sourcePlayerEntity, RunItems.Ids.LaserElectrocutor)
+	if stacks <= 0 or getEntityTypeName(targetEnemyEntity) ~= "Enemy" then
+		return
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.LaserElectrocutor].laserElectrocutor
+	local extraStacks = math.max(0, stacks - 1)
+	local chance = 1 - ((1 - cfg.baseProcChance) * ((1 - cfg.procChancePerAdditionalStack) ^ extraStacks))
+	local coeff = clampProcCoefficient(procCoefficient)
+	local effectiveChance = math.clamp(chance * coeff, 0, 1)
+	if effectiveChance <= 0 or RNG:NextNumber() > effectiveChance then
+		return
+	end
+
+	-- TODO: Exclude boss enemies once a boss classification exists in the ECS.
+	EnemyStunSystem.applyStun(targetEnemyEntity, cfg.stunDuration, "Stun")
+end
+
+local function tryGrantBuildersClubHardHatTix(targetPlayerEntity: number)
+	local stacks = getItemStackCount(targetPlayerEntity, RunItems.Ids.BuildersClubHardHat)
+	if stacks <= 0 then
+		return
+	end
+
+	local player = getPlayerFromEntity(targetPlayerEntity)
+	if not player then
+		return
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.BuildersClubHardHat].buildersClubHardHat
+	local tixAmount = math.max(0, cfg.smallChestCost) * math.max(0, cfg.tixRefundFraction)
+	if tixAmount <= 0 then
+		return
+	end
+
+	TixService.addTix(player, tixAmount)
+end
+
+local function tryGrantAppleOverheal(sourcePlayerEntity: number)
+	local stacks = getItemStackCount(sourcePlayerEntity, RunItems.Ids.Apple)
+	if stacks <= 0 then
+		return
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.Apple].apple
+	local overhealAmount = cfg.baseOverhealOnKill
+		+ (cfg.overhealOnKillPerAdditionalStack * math.max(0, stacks - 1))
+	if overhealAmount > 0 then
+		OverhealSystem.grantOverheal(sourcePlayerEntity, overhealAmount)
+	end
+end
+
 local function getSilverMaxCharges(stacks: number): number
 	if stacks <= 0 then
 		return 0
 	end
 	local silverCfg = RunItems.Definitions[RunItems.Ids.SilverNinjaStarOfTheBrilliantLight].silverStar
 	return silverCfg.baseCharges + (math.max(0, stacks - 1) * silverCfg.chargesPerStack)
+end
+
+local function getStaticPrimaryAttackSpeedBonus(playerEntity: number): number
+	local total = 0
+
+	local bloxyColaStacks = getItemStackCount(playerEntity, RunItems.Ids.BloxyCola)
+	if bloxyColaStacks > 0 then
+		local cfg = RunItems.Definitions[RunItems.Ids.BloxyCola].bloxyCola
+		total += bloxyColaStacks * cfg.primaryAttackSpeedBonusPerStack
+	end
+
+	local bloxiadeStacks = getItemStackCount(playerEntity, RunItems.Ids.Bloxiade)
+	if bloxiadeStacks > 0 then
+		local cfg = RunItems.Definitions[RunItems.Ids.Bloxiade].bloxiade
+		total += bloxiadeStacks * cfg.primaryAttackSpeedBonusPerStack
+	end
+
+	return math.max(0, total)
+end
+
+local function setCombinedPrimaryAttackSpeedBonus(playerEntity: number)
+	if not world or not PassiveEffects or not world:contains(playerEntity) then
+		return
+	end
+	local effects = world:get(playerEntity, PassiveEffects)
+	if not effects then
+		return
+	end
+
+	local totalBonus = getStaticPrimaryAttackSpeedBonus(playerEntity)
+	local state = itemStateByEntity[playerEntity]
+	if state and state.timmy and (state.timmy.holdStartedAt or 0) > 0 then
+		totalBonus += math.max(0, state.timmy.bonusAtLastEval or 0)
+	end
+
+	effects.primaryAttackSpeedBonus = math.max(0, totalBonus)
+end
+
+local function recomputeStaticItemPassives(playerEntity: number)
+	if not world or not PassiveEffects or not world:contains(playerEntity) then
+		return
+	end
+
+	local effects = world:get(playerEntity, PassiveEffects)
+	if not effects then
+		return
+	end
+
+	local critChance = 0
+	local moveSpeedBonus = 0
+	local healthMultiplierBonus = 0
+	local healthFlatBonus = 0
+	local levelExpCostMultiplier = 1.0
+	local sprintMoveSpeedMultiplier = 1.0
+	local closeRangeDamageMultiplier = 1.0
+
+	local aduriteStacks = getItemStackCount(playerEntity, RunItems.Ids.AduriteCape)
+	if aduriteStacks > 0 then
+		local cfg = RunItems.Definitions[RunItems.Ids.AduriteCape].aduriteCape
+		critChance = cfg.baseCritChance + (cfg.critChancePerAdditionalStack * math.max(0, aduriteStacks - 1))
+	end
+
+	local speedCoilStacks = getItemStackCount(playerEntity, RunItems.Ids.SpeedCoil)
+	if speedCoilStacks > 0 then
+		local cfg = RunItems.Definitions[RunItems.Ids.SpeedCoil].speedCoil
+		moveSpeedBonus += speedCoilStacks * cfg.moveSpeedBonusPerStack
+	end
+
+	local cheezburgerStacks = getItemStackCount(playerEntity, RunItems.Ids.Cheezburger)
+	if cheezburgerStacks > 0 then
+		local cfg = RunItems.Definitions[RunItems.Ids.Cheezburger].cheezburger
+		local extraStacks = math.max(0, cheezburgerStacks - 1)
+		healthFlatBonus = cfg.baseHealthFlat + (cfg.healthFlatPerAdditionalStack * extraStacks)
+		healthMultiplierBonus = cfg.baseHealthMultiplier + (cfg.healthMultiplierPerAdditionalStack * extraStacks)
+	end
+
+	local bloxiadeStacks = getItemStackCount(playerEntity, RunItems.Ids.Bloxiade)
+	if bloxiadeStacks > 0 then
+		local cfg = RunItems.Definitions[RunItems.Ids.Bloxiade].bloxiade
+		moveSpeedBonus += bloxiadeStacks * cfg.moveSpeedBonusPerStack
+	end
+
+	local cakeStacks = getItemStackCount(playerEntity, RunItems.Ids.Cake)
+	if cakeStacks > 0 then
+		local cfg = RunItems.Definitions[RunItems.Ids.Cake].cake
+		local extraStacks = math.max(0, cakeStacks - 1)
+		local levelExpReduction = cfg.baseLevelExpCostReduction
+			+ (cfg.levelExpCostReductionPerAdditionalStack * extraStacks)
+		levelExpCostMultiplier = math.max(cfg.minimumLevelExpCostMultiplier, 1.0 - levelExpReduction)
+		sprintMoveSpeedMultiplier = 1.0
+			+ cfg.baseSprintMoveSpeedBonus
+			+ (cfg.sprintMoveSpeedBonusPerAdditionalStack * extraStacks)
+	end
+
+	local energySwordStacks = getItemStackCount(playerEntity, RunItems.Ids.EnergySword)
+	if energySwordStacks > 0 then
+		local cfg = RunItems.Definitions[RunItems.Ids.EnergySword].energySword
+		local extraStacks = math.max(0, energySwordStacks - 1)
+		closeRangeDamageMultiplier = 1.0
+			+ cfg.baseCloseRangeDamageBonus
+			+ (cfg.closeRangeDamageBonusPerAdditionalStack * extraStacks)
+	end
+
+	effects.critChance = math.max(0, critChance)
+	effects.moveSpeedMultiplier = math.max(0.1, 1.0 + moveSpeedBonus)
+	effects.healthMultiplier = math.max(0.1, 1.0 + healthMultiplierBonus)
+	effects.healthFlatBonus = math.max(0, healthFlatBonus)
+	effects.levelExpCostMultiplier = math.max(0.05, levelExpCostMultiplier)
+	effects.sprintMoveSpeedMultiplier = math.max(1.0, sprintMoveSpeedMultiplier)
+	effects.closeRangeDamageMultiplier = math.max(1.0, closeRangeDamageMultiplier)
+	setCombinedPrimaryAttackSpeedBonus(playerEntity)
+end
+
+reapplyPassiveEffects = function(playerEntity: number)
+	if not world or not PassiveEffects or not world:contains(playerEntity) then
+		return
+	end
+	DirtyService.mark(playerEntity, "PassiveEffects")
+	if PassiveEffectSystemRef and PassiveEffectSystemRef.applyToPlayer then
+		PassiveEffectSystemRef.applyToPlayer(playerEntity)
+	end
+end
+
+local function recomputePlayerArmorFromTimedSources(playerEntity: number, now: number)
+	if not world or not PlayerArmorBuffs or not PassiveEffects or not world:contains(playerEntity) then
+		return
+	end
+
+	local armorBuffs = world:get(playerEntity, PlayerArmorBuffs)
+	local effects = world:get(playerEntity, PassiveEffects)
+	if not armorBuffs or not effects then
+		return
+	end
+
+	if typeof(armorBuffs.instances) ~= "table" then
+		armorBuffs.instances = {}
+	end
+
+	local totalArmor = 0
+	for i = #armorBuffs.instances, 1, -1 do
+		local instance = armorBuffs.instances[i]
+		if typeof(instance) ~= "table"
+			or typeof(instance.endTime) ~= "number"
+			or typeof(instance.amount) ~= "number"
+			or instance.endTime <= now
+		then
+			table.remove(armorBuffs.instances, i)
+		else
+			totalArmor += instance.amount
+		end
+	end
+
+	effects.armor = totalArmor
+end
+
+local function getHistoricTimmyConfig(): {[string]: any}
+	return RunItems.Definitions[RunItems.Ids.HistoricTimmyGun].timmy
+end
+
+local function computeHistoricTimmyAttackSpeedBonus(playerEntity: number, now: number): number
+	local stacks = getItemStackCount(playerEntity, RunItems.Ids.HistoricTimmyGun)
+	if stacks <= 0 then
+		return 0
+	end
+
+	local state = ensureEntityState(playerEntity)
+	local timmyState = state.timmy
+	local cfg = getHistoricTimmyConfig()
+	if timmyState.holdStartedAt <= 0 or now < timmyState.lockedUntil then
+		return 0
+	end
+
+	local stackBonusCount = math.max(0, stacks - 1)
+	local minBonus = cfg.baseMinAttackSpeedBonus + (cfg.stackMinAttackSpeedBonus * stackBonusCount)
+	local maxBonus = cfg.baseMaxAttackSpeedBonus + (cfg.stackMaxAttackSpeedBonus * stackBonusCount)
+	local elapsed = math.max(0, now - timmyState.holdStartedAt)
+	local alpha = math.clamp(elapsed / cfg.fullRampDuration, 0, 1)
+	return minBonus + ((maxBonus - minBonus) * alpha)
+end
+
+local function breakHistoricTimmy(playerEntity: number, now: number, applyLockout: boolean)
+	if getItemStackCount(playerEntity, RunItems.Ids.HistoricTimmyGun) <= 0 then
+		setCombinedPrimaryAttackSpeedBonus(playerEntity)
+		return
+	end
+
+	local state = itemStateByEntity[playerEntity]
+	if not state then
+		return
+	end
+	local cfg = getHistoricTimmyConfig()
+	local wasActivelyRamping = (state.timmy.holdStartedAt or 0) > 0
+	state.timmy.lastPrimaryShotAt = 0
+	state.timmy.holdStartedAt = 0
+	state.timmy.bonusAtLastEval = 0
+	if applyLockout and wasActivelyRamping then
+		state.timmy.lockedUntil = math.max(state.timmy.lockedUntil, now + cfg.breakCooldown)
+	end
+	setCombinedPrimaryAttackSpeedBonus(playerEntity)
+end
+
+local function handleHistoricTimmyPrimaryAttack(playerEntity: number, now: number)
+	local stacks = getItemStackCount(playerEntity, RunItems.Ids.HistoricTimmyGun)
+	if stacks <= 0 then
+		setCombinedPrimaryAttackSpeedBonus(playerEntity)
+		return
+	end
+
+	local state = ensureEntityState(playerEntity)
+	local timmyState = state.timmy
+
+	if now < timmyState.lockedUntil then
+		timmyState.lastPrimaryShotAt = now
+		timmyState.holdStartedAt = 0
+		timmyState.bonusAtLastEval = 0
+		setCombinedPrimaryAttackSpeedBonus(playerEntity)
+		return
+	end
+
+	if timmyState.holdStartedAt <= 0 then
+		timmyState.holdStartedAt = now
+	end
+
+	timmyState.lastPrimaryShotAt = now
+	local bonus = computeHistoricTimmyAttackSpeedBonus(playerEntity, now)
+	timmyState.bonusAtLastEval = bonus
+	setCombinedPrimaryAttackSpeedBonus(playerEntity)
+end
+
+local function spawnTeddyStuffingDrop(playerEntity: number, stackCountAtDrop: number)
+	if not PickupService then
+		return
+	end
+
+	local player = getPlayerFromEntity(playerEntity)
+	local sourcePos = getEntityPosition(playerEntity)
+	if not player or not sourcePos then
+		return
+	end
+
+	local teddyCfg = RunItems.Definitions[RunItems.Ids.TeddyBloxpin].teddy
+	replicateStuffingModel()
+	local stuffingTemplate = getStuffingTemplate()
+	local stuffingLift = getTemplateGroundPivotLift(stuffingTemplate, 0.25) + 0.05
+	local character = player.Character
+	local ignoreModel = if character and character:IsA("Model") then character else nil
+	local angle = RNG:NextNumber(0, math.pi * 2)
+	local radius = math.sqrt(RNG:NextNumber()) * teddyCfg.dropRadius
+	local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+	local spawnPos = snapToGround(sourcePos + offset, ignoreModel, stuffingLift)
+
+	PickupService.spawnPickup(spawnPos, 0, "teddyStuffing", playerEntity, teddyCfg.stuffingLifetime, {
+		allowMerge = false,
+		itemId = nil,
+		itemDisplayName = nil,
+		itemDescription = nil,
+		modelPath = teddyCfg.stuffingModelPath,
+		requiresInteract = false,
+		autoPickupRadius = teddyCfg.stuffingPickupRadius,
+		collectible = true,
+		visualOnly = false,
+		noDespawn = false,
+		onCollect = function(_record: any, _collectorPlayer: Player, collectorEntity: number)
+			if not world or not world:contains(collectorEntity) then
+				return
+			end
+
+			local collectedAt = GameTimeSystem.getGameTime()
+			local health = Health and world:get(collectorEntity, Health) or nil
+			local maxHealth = if health and typeof(health.max) == "number" then health.max else 0
+			local overhealAmount = maxHealth * teddyCfg.baseOverhealthPercent
+			if overhealAmount > 0 then
+				OverhealSystem.grantOverheal(collectorEntity, overhealAmount)
+			end
+
+			if not PlayerArmorBuffs then
+				return
+			end
+
+			local armorBuffs = world:get(collectorEntity, PlayerArmorBuffs)
+			if not armorBuffs then
+				return
+			end
+			if typeof(armorBuffs.instances) ~= "table" then
+				armorBuffs.instances = {}
+			end
+
+			local extraStacks = math.max(0, stackCountAtDrop - 1)
+			table.insert(armorBuffs.instances, {
+				amount = teddyCfg.baseArmor + (teddyCfg.armorPerStack * extraStacks),
+				endTime = collectedAt + teddyCfg.baseDuration + (teddyCfg.durationPerStack * extraStacks),
+			})
+			recomputePlayerArmorFromTimedSources(collectorEntity, collectedAt)
+		end,
+	})
 end
 
 local function ensureSilverCapacity(state: ItemState, stacks: number, isNewStack: boolean)
@@ -423,6 +1002,11 @@ local function addItemToEntity(playerEntity: number, itemId: string)
 		ensureSilverCapacity(state, newCount, true)
 	end
 
+	recomputeStaticItemPassives(playerEntity)
+	reapplyPassiveEffects(playerEntity)
+	if ExpSystemRef and ExpSystemRef.recalculateCurrentRequirement then
+		ExpSystemRef.recalculateCurrentRequirement(playerEntity)
+	end
 	sendItemState(playerEntity)
 end
 
@@ -733,6 +1317,13 @@ function ItemSystem.onAttackAttempt(data: {[string]: any})
 		return
 	end
 
+	local now = GameTimeSystem.getGameTime()
+	if abilityId == "OathkeeperPrimary" then
+		handleHistoricTimmyPrimaryAttack(sourceEntity, now)
+	else
+		breakHistoricTimmy(sourceEntity, now, true)
+	end
+
 	local targetEntity = if typeof(data.targetEntity) == "number" then data.targetEntity else nil
 	local procCoefficient = clampProcCoefficient(data.procCoefficient)
 	local aimPoint = if typeof(data.aimPoint) == "Vector3" then data.aimPoint else nil
@@ -745,6 +1336,8 @@ function ItemSystem.init(worldRef: any, components: any, deps: {[string]: any})
 	PickupService = deps.PickupService
 	ProjectileService = deps.ProjectileService
 	ModelReplicationService = deps.ModelReplicationService
+	PassiveEffectSystemRef = deps.PassiveEffectSystem
+	ExpSystemRef = deps.ExpSystem
 
 	Position = Components.Position
 	PlayerStats = Components.PlayerStats
@@ -752,6 +1345,8 @@ function ItemSystem.init(worldRef: any, components: any, deps: {[string]: any})
 	Level = Components.Level
 	PassiveEffects = Components.PassiveEffects
 	Health = Components.Health
+	PlayerArmorBuffs = Components.PlayerArmorBuffs
+	PlayerPauseState = Components.PlayerPauseState
 
 	local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 	local itemsFolder = remotesFolder:FindFirstChild("Items")
@@ -761,6 +1356,10 @@ function ItemSystem.init(worldRef: any, components: any, deps: {[string]: any})
 		itemsFolder.Parent = remotesFolder
 	end
 	itemStateRemote = ensureRemoteEvent(itemsFolder, "ItemState")
+end
+
+function ItemSystem.setEnemyStunSystem(enemyStunSystemRef: any)
+	EnemyStunSystem = enemyStunSystemRef
 end
 
 function ItemSystem.onEntityRemoved(entity: number)
@@ -841,9 +1440,33 @@ function ItemSystem.onDamageResolved(data: {[string]: any})
 	local abilityId = data.abilityId
 	local targetIsPlayer = data.targetIsPlayer == true
 	local targetIsEnemy = data.targetIsEnemy == true
+	local died = data.died == true
 
 	if targetIsPlayer and typeof(targetEntity) == "number" and getEntityTypeName(targetEntity) == "Player" then
 		triggerFuseBomb(targetEntity, procCoefficient)
+		tryGrantBuildersClubHardHatTix(targetEntity)
+
+		local teddyStacks = getItemStackCount(targetEntity, RunItems.Ids.TeddyBloxpin)
+		if teddyStacks > 0 then
+			local state = ensureEntityState(targetEntity)
+			local now = GameTimeSystem.getGameTime()
+			if now >= state.teddy.nextStuffingAt then
+				local teddyCfg = RunItems.Definitions[RunItems.Ids.TeddyBloxpin].teddy
+				state.teddy.nextStuffingAt = now + teddyCfg.baseCooldown
+				spawnTeddyStuffingDrop(targetEntity, teddyStacks)
+			end
+		end
+	end
+
+	if targetIsEnemy
+		and typeof(targetEntity) == "number"
+		and typeof(sourceEntity) == "number"
+		and getEntityTypeName(sourceEntity) == "Player"
+	then
+		if died then
+			tryGrantAppleOverheal(sourceEntity)
+		end
+		tryProcLaserElectrocutor(sourceEntity, targetEntity, procCoefficient)
 	end
 
 	if targetIsEnemy
@@ -856,6 +1479,29 @@ function ItemSystem.onDamageResolved(data: {[string]: any})
 	then
 		triggerSilverStar(sourceEntity, targetEntity, procCoefficient, nil)
 	end
+end
+
+function ItemSystem.onAbilityUsed(playerEntity: number, abilityId: string?)
+	if typeof(playerEntity) ~= "number" or getEntityTypeName(playerEntity) ~= "Player" then
+		return
+	end
+	if abilityId == "SilverNinjaStaroftheBrilliantLight" then
+		return
+	end
+	breakHistoricTimmy(playerEntity, GameTimeSystem.getGameTime(), true)
+end
+
+function ItemSystem.onPrimaryFireReleased(playerEntity: number)
+	if typeof(playerEntity) ~= "number" or getEntityTypeName(playerEntity) ~= "Player" then
+		return
+	end
+
+	local state = itemStateByEntity[playerEntity]
+	if not state or not state.timmy or (state.timmy.holdStartedAt or 0) <= 0 then
+		return
+	end
+
+	breakHistoricTimmy(playerEntity, GameTimeSystem.getGameTime(), true)
 end
 
 function ItemSystem.step(_dt: number)
@@ -908,6 +1554,18 @@ function ItemSystem.step(_dt: number)
 		if silverStacks > 0 then
 			refreshSilverRecharge(state, silverStacks, now)
 		end
+
+		local timmyStacks = state.counts[RunItems.Ids.HistoricTimmyGun] or 0
+		if timmyStacks > 0 and state.timmy.holdStartedAt > 0 and now >= state.timmy.lockedUntil then
+			local liveBonus = computeHistoricTimmyAttackSpeedBonus(playerEntity, now)
+			state.timmy.bonusAtLastEval = liveBonus
+			setCombinedPrimaryAttackSpeedBonus(playerEntity)
+		elseif timmyStacks <= 0 then
+			setCombinedPrimaryAttackSpeedBonus(playerEntity)
+		end
+
+		recomputePlayerArmorFromTimedSources(playerEntity, now)
+		tryUseHealingPotion(playerEntity, state, now)
 	end
 
 	for i = #pendingFuseBombs, 1, -1 do
@@ -917,6 +1575,33 @@ function ItemSystem.step(_dt: number)
 			table.remove(pendingFuseBombs, i)
 		end
 	end
+end
+
+function ItemSystem.getItemCount(playerEntity: number, itemId: string): number
+	if typeof(playerEntity) ~= "number" or typeof(itemId) ~= "string" then
+		return 0
+	end
+	return getItemStackCount(playerEntity, itemId)
+end
+
+function ItemSystem.getPepperoniPizzaModifiers(playerEntity: number): {[string]: number}
+	local stacks = ItemSystem.getItemCount(playerEntity, RunItems.Ids.PepperoniPizza)
+	if stacks <= 0 then
+		return {
+			cooldownMultiplier = 1.0,
+			bonusCharges = 0,
+		}
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.PepperoniPizza].pepperoniPizza
+	local extraStacks = math.max(0, stacks - 1)
+	local totalReduction = cfg.baseSecondaryCooldownReduction + (cfg.secondaryCooldownReductionPerAdditionalStack * extraStacks)
+	local cooldownMultiplier = math.max(cfg.minimumCooldownMultiplier, 1 - totalReduction)
+	local bonusCharges = math.max(0, stacks * cfg.chargesPerStack)
+	return {
+		cooldownMultiplier = cooldownMultiplier,
+		bonusCharges = bonusCharges,
+	}
 end
 
 return ItemSystem

@@ -113,11 +113,12 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 	
 	local newMaxHealth = baseMaxHealth * healthMult + healthFlat
 
-	-- Keep ECS Health and Humanoid health in sync.
-	-- Damage/regen/death systems use ECS Health as authoritative state.
+	-- Damage/regen/heal systems own current health.
+	-- PassiveEffectSystem should only reconcile health when max health changes.
 	local ecsHealth = world:get(playerEntity, Health)
 	local targetCurrentHealth = humanoid.Health
 	local targetMaxHealth = newMaxHealth
+	local shouldApplyCurrentHealth = false
 
 	if ecsHealth then
 		local oldMax = math.max(ecsHealth.max or targetMaxHealth, 0.01)
@@ -126,19 +127,23 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 
 		-- Preserve current health percentage when max health changes, without reducing
 		-- absolute health on upgrades.
-		if math.abs(oldMax - targetMaxHealth) > 0.1 then
+		local maxHealthChanged = math.abs(oldMax - targetMaxHealth) > 0.1
+		if maxHealthChanged then
 			local healthPercent = oldCurrent / oldMax
 			targetCurrentHealth = math.max(oldCurrent, targetMaxHealth * healthPercent)
+			shouldApplyCurrentHealth = true
 		end
 
 		targetCurrentHealth = math.clamp(targetCurrentHealth, 0, targetMaxHealth)
 
-		if math.abs((ecsHealth.max or 0) - targetMaxHealth) > 0.1
+		if shouldApplyCurrentHealth
+			or math.abs((ecsHealth.max or 0) - targetMaxHealth) > 0.1
 			or math.abs((ecsHealth.current or 0) - targetCurrentHealth) > 0.1 then
 			DirtyService.setIfChanged(world, playerEntity, Health, {
 				current = targetCurrentHealth,
 				max = targetMaxHealth,
 			}, "Health")
+			shouldApplyCurrentHealth = true
 		end
 	else
 		-- Defensive path: create ECS health if missing.
@@ -147,13 +152,13 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 			current = targetCurrentHealth,
 			max = targetMaxHealth,
 		}, "Health")
+		shouldApplyCurrentHealth = true
 	end
 
-	-- Apply the same target values to Humanoid to avoid visual/gameplay desync.
 	if math.abs(humanoid.MaxHealth - targetMaxHealth) > 0.1 then
 		humanoid.MaxHealth = targetMaxHealth
 	end
-	if math.abs(humanoid.Health - targetCurrentHealth) > 0.1 then
+	if shouldApplyCurrentHealth and math.abs(humanoid.Health - targetCurrentHealth) > 0.1 then
 		humanoid.Health = math.clamp(targetCurrentHealth, 0.01, targetMaxHealth)
 	end
 	
@@ -168,8 +173,10 @@ local function applyEffectsToPlayer(playerEntity: number, effects: any)
 	end
 	
 	-- Apply walkspeed
-	local sprintMult = if shouldApplySprint(playerEntity) then SPRINT_MULTIPLIER else 1.0
-	local newWalkSpeed = baseWalkSpeed * totalSpeedMult * sprintMult
+	local isSprinting = shouldApplySprint(playerEntity)
+	local sprintMult = if isSprinting then SPRINT_MULTIPLIER else 1.0
+	local sprintItemMult = if isSprinting then (effects.sprintMoveSpeedMultiplier or 1.0) else 1.0
+	local newWalkSpeed = baseWalkSpeed * totalSpeedMult * sprintMult * sprintItemMult
 	if math.abs(humanoid.WalkSpeed - newWalkSpeed) > 0.1 then
 		humanoid.WalkSpeed = newWalkSpeed
 	end
@@ -299,8 +306,10 @@ function PassiveEffectSystem.refreshPlayerSpeed(playerEntity: number)
 	local baseWalkSpeed = player:GetAttribute("BaseWalkSpeed") or DEFAULT_WALK_SPEED
 	
 	-- Apply walkspeed
-	local sprintMult = if shouldApplySprint(playerEntity) then SPRINT_MULTIPLIER else 1.0
-	humanoid.WalkSpeed = baseWalkSpeed * totalSpeedMult * sprintMult
+	local isSprinting = shouldApplySprint(playerEntity)
+	local sprintMult = if isSprinting then SPRINT_MULTIPLIER else 1.0
+	local sprintItemMult = if isSprinting then (effects.sprintMoveSpeedMultiplier or 1.0) else 1.0
+	humanoid.WalkSpeed = baseWalkSpeed * totalSpeedMult * sprintMult * sprintItemMult
 	
 	-- Mobility abilities: full Mobility Power + 20% Movement Speed bonus.
 	effects.mobilityDistanceMultiplier = calculateMobilityDistanceMultiplier(effects, totalSpeedMult)

@@ -29,6 +29,7 @@ local Experience: any
 local Level: any
 local ExpChunks: any
 local PlayerStats: any
+local PassiveEffectsComp: any
 
 -- Remote for broadcasting player stats to clients
 local PlayerStatsUpdate: RemoteEvent?
@@ -79,6 +80,7 @@ function ExpSystem.init(worldRef: any, components: any, dirtyService: any)
 	Level = Components.Level
 	ExpChunks = Components.ExpChunks
 	PlayerStats = Components.PlayerStats
+	PassiveEffectsComp = Components.PassiveEffects
 	
 	-- Create cached query
 	expChunksQuery = world:query(Components.ExpChunks):cached()
@@ -149,6 +151,22 @@ end
 
 function ExpSystem.getExpRequired(level: number): number
 	return calculateExpRequired(level)
+end
+
+local function calculatePlayerExpRequired(playerEntity: number, level: number): number
+	local baseRequired = calculateExpRequired(level)
+	if not world or not PassiveEffectsComp or not world:contains(playerEntity) then
+		return baseRequired
+	end
+
+	local effects = world:get(playerEntity, PassiveEffectsComp)
+	local multiplier = 1.0
+	if effects and typeof(effects.levelExpCostMultiplier) == "number" then
+		multiplier = effects.levelExpCostMultiplier
+	end
+	multiplier = math.max(0.05, multiplier)
+
+	return math.max(1, math.floor(baseRequired * multiplier))
 end
 
 -- Get highest player level in server (for catch-up system)
@@ -251,6 +269,74 @@ local function onLevelUp(playerEntity: number, _newLevel: number, _oldLevel: num
 	PassiveEffectSystem.applyToPlayer(playerEntity)
 end
 
+local function broadcastPlayerStatsUpdate(playerEntity: number, exp: any, level: any)
+	if not world or not PlayerStatsUpdate then
+		return
+	end
+
+	local playerStats = world:get(playerEntity, PlayerStats)
+	if playerStats and playerStats.player then
+		PlayerStatsUpdate:FireClient(playerStats.player, {
+			xp = exp.current,
+			xpForNext = exp.required,
+			level = level.current,
+			totalExp = exp.total,
+		})
+	end
+end
+
+local function fillQueuedChunksForCurrentLevel(playerEntity: number, expChunks: any, levelNumber: number)
+	if typeof(expChunks.queue) ~= "table" then
+		expChunks.queue = {}
+	end
+	if typeof(expChunks.pendingExp) ~= "number" then
+		expChunks.pendingExp = 0
+	end
+
+	local expForNext = calculatePlayerExpRequired(playerEntity, levelNumber)
+	local chunkSize = math.max(1, math.floor(expForNext / ItemBalance.ChunkCount))
+
+	while expChunks.pendingExp > 0 and #expChunks.queue < ItemBalance.ChunkCount do
+		local thisChunk = math.min(chunkSize, expChunks.pendingExp)
+		table.insert(expChunks.queue, {
+			amount = thisChunk,
+			timeAdded = tick(),
+		})
+		expChunks.pendingExp = expChunks.pendingExp - thisChunk
+	end
+end
+
+local function rebuildQueuedChunksForCurrentLevel(playerEntity: number)
+	if not world or not ExpChunks or not Level or not world:contains(playerEntity) then
+		return
+	end
+
+	local expChunks = world:get(playerEntity, ExpChunks)
+	local level = world:get(playerEntity, Level)
+	if not expChunks or not level then
+		return
+	end
+
+	local queuedTotal = 0
+	if typeof(expChunks.queue) == "table" then
+		for _, chunk in ipairs(expChunks.queue) do
+			if typeof(chunk) == "table" and typeof(chunk.amount) == "number" then
+				queuedTotal += math.max(0, chunk.amount)
+			end
+		end
+	end
+	if typeof(expChunks.pendingExp) == "number" then
+		queuedTotal += math.max(0, expChunks.pendingExp)
+	end
+
+	expChunks.queue = {}
+	expChunks.pendingExp = queuedTotal
+	fillQueuedChunksForCurrentLevel(playerEntity, expChunks, level.current)
+
+	world:set(playerEntity, ExpChunks, expChunks)
+	DirtyService.mark(playerEntity, "ExpChunks")
+end
+
 -- Apply exp directly to player (handles level ups)
 local function applyExpDirect(playerEntity: number, amount: number)
 	local exp = world:get(playerEntity, Experience)
@@ -288,7 +374,7 @@ local function applyExpDirect(playerEntity: number, amount: number)
 		level.current = level.current + 1
 		
 		-- Calculate new exp required (scaling)
-		exp.required = calculateExpRequired(level.current)
+		exp.required = calculatePlayerExpRequired(playerEntity, level.current)
 		
 		-- Queue this level up
 		table.insert(levelUps, {from = oldLevel, to = level.current})
@@ -321,15 +407,7 @@ local function applyExpDirect(playerEntity: number, amount: number)
 		checkAndDeactivateCatchUp(playerEntity, playerStats.player, level.current)
 	end
 	
-	-- Broadcast to client immediately (dedicated remote for player stats)
-	if playerStats and playerStats.player and PlayerStatsUpdate then
-		PlayerStatsUpdate:FireClient(playerStats.player, {
-			xp = exp.current,
-			xpForNext = exp.required,
-			level = level.current,
-			totalExp = exp.total,
-		})
-	end
+	broadcastPlayerStatsUpdate(playerEntity, exp, level)
 end
 
 -- Debug-only: Grant a fixed number of levels instantly (bypasses chunking)
@@ -355,7 +433,7 @@ function ExpSystem.debugGrantLevels(playerEntity: number, levels: number)
 	local currentExp = exp.current
 	
 	for i = 1, grantCount do
-		local required = calculateExpRequired(currentLevel)
+		local required = calculatePlayerExpRequired(playerEntity, currentLevel)
 		if i == 1 then
 			totalExp += math.max(0, required - currentExp)
 		else
@@ -395,33 +473,78 @@ function ExpSystem.addExperience(playerEntity: number, amount: number)
 			expChunks = {queue = {}, nextChunkTime = tick(), pendingExp = 0}
 			world:set(playerEntity, ExpChunks, expChunks)
 		end
+		if typeof(expChunks.queue) ~= "table" then
+			expChunks.queue = {}
+		end
 		
 		-- Add to pending exp pool
 		expChunks.pendingExp = (expChunks.pendingExp or 0) + amount
-		
-		-- Calculate TOTAL exp required for the entire current level
-		-- This gives consistent chunk sizes throughout each level
-		local expForNext = calculateExpRequired(level.current)
-		
-		-- Chunk the TOTAL exp required for the level, not just remaining
-		-- This ensures consistent chunk sizes per level
-		local chunkSize = math.max(1, math.floor(expForNext / ItemBalance.ChunkCount))
-		
-		-- Fill queue with chunks from pending exp
-		while expChunks.pendingExp > 0 and #expChunks.queue < ItemBalance.ChunkCount do
-			local thisChunk = math.min(chunkSize, expChunks.pendingExp)
-			table.insert(expChunks.queue, {
-				amount = thisChunk,
-				timeAdded = tick()
-			})
-			expChunks.pendingExp = expChunks.pendingExp - thisChunk
-		end
+		fillQueuedChunksForCurrentLevel(playerEntity, expChunks, level.current)
 		
 		world:set(playerEntity, ExpChunks, expChunks)
 		DirtyService.mark(playerEntity, "ExpChunks")
 	else
 		-- Apply immediately for small amounts
 		applyExpDirect(playerEntity, amount)
+	end
+end
+
+function ExpSystem.recalculateCurrentRequirement(playerEntity: number)
+	if not world or not Experience or not Level or not world:contains(playerEntity) then
+		return
+	end
+
+	local exp = world:get(playerEntity, Experience)
+	local level = world:get(playerEntity, Level)
+	local playerStats = world:get(playerEntity, PlayerStats)
+	if not exp or not level then
+		return
+	end
+
+	local previousRequired = exp.required
+	local previousLevel = level.current
+	exp.required = calculatePlayerExpRequired(playerEntity, level.current)
+
+	local levelUps = {}
+	while exp.current >= exp.required and level.current < ItemBalance.MaxLevel do
+		exp.current = exp.current - exp.required
+		local oldLevel = level.current
+		level.current = level.current + 1
+		exp.required = calculatePlayerExpRequired(playerEntity, level.current)
+
+		table.insert(levelUps, {from = oldLevel, to = level.current})
+
+		if playerStats and playerStats.player then
+			local GameStateManager = require(game.ServerScriptService.ECS.Systems.GameStateManager)
+			GameStateManager.updatePlayerLevel(playerStats.player, level.current)
+		end
+	end
+
+	for _, levelUp in ipairs(levelUps) do
+		onLevelUp(playerEntity, levelUp.to, levelUp.from)
+		if playerStats and playerStats.player then
+			recordLevelTime(playerEntity, playerStats.player.Name)
+		end
+	end
+
+	if level.current >= ItemBalance.MaxLevel then
+		exp.current = math.min(exp.current, exp.required)
+	end
+
+	local requirementChanged = previousRequired ~= exp.required
+	local levelChanged = previousLevel ~= level.current
+	if requirementChanged or levelChanged then
+		DirtyService.setIfChanged(world, playerEntity, Experience, exp, "Experience")
+		DirtyService.setIfChanged(world, playerEntity, Level, level, "Level")
+		broadcastPlayerStatsUpdate(playerEntity, exp, level)
+	end
+
+	if requirementChanged or levelChanged then
+		rebuildQueuedChunksForCurrentLevel(playerEntity)
+	end
+
+	if levelChanged and playerStats and playerStats.player then
+		checkAndDeactivateCatchUp(playerEntity, playerStats.player, level.current)
 	end
 end
 
@@ -481,7 +604,7 @@ function ExpSystem.skipLevel(playerEntity: number, refundBaseExp: number?)
 	level.current = level.current - 1
 	
 	-- Calculate exp requirement for the NEW (lower) level
-	exp.required = calculateExpRequired(level.current)
+	exp.required = calculatePlayerExpRequired(playerEntity, level.current)
 	
 	-- ADD 40% refund to current exp (don't reset, just add it back)
 	-- This way player keeps any chunked/overflow exp and gets the 40% refund
@@ -492,16 +615,7 @@ function ExpSystem.skipLevel(playerEntity: number, refundBaseExp: number?)
 	DirtyService.setIfChanged(world, playerEntity, Experience, exp, "Experience")
 	DirtyService.setIfChanged(world, playerEntity, Level, level, "Level")
 	
-	-- Broadcast to client immediately
-	local playerStats = world:get(playerEntity, PlayerStats)
-	if playerStats and playerStats.player and PlayerStatsUpdate then
-		PlayerStatsUpdate:FireClient(playerStats.player, {
-			xp = exp.current,
-			xpForNext = exp.required,
-			level = level.current,
-			totalExp = exp.total,
-		})
-	end
+	broadcastPlayerStatsUpdate(playerEntity, exp, level)
 end
 
 function ExpSystem.step(dt: number)
@@ -529,21 +643,7 @@ function ExpSystem.step(dt: number)
 					local level = world:get(entity, Level)
 					
 					if experience and level then
-						-- Calculate TOTAL exp required for the entire new level
-						local expForNext = calculateExpRequired(level.current)
-						
-						-- Chunk the TOTAL exp required for this level
-						local chunkSize = math.max(1, math.floor(expForNext / ItemBalance.ChunkCount))
-						
-						-- Fill queue with new chunks for the next level
-						while expChunks.pendingExp > 0 and #expChunks.queue < ItemBalance.ChunkCount do
-							local thisChunk = math.min(chunkSize, expChunks.pendingExp)
-							table.insert(expChunks.queue, {
-								amount = thisChunk,
-								timeAdded = tick()
-							})
-							expChunks.pendingExp = expChunks.pendingExp - thisChunk
-						end
+						fillQueuedChunksForCurrentLevel(entity, expChunks, level.current)
 					end
 				end
 				

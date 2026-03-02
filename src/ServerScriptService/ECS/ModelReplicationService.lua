@@ -4,6 +4,8 @@
 
 local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 
 local ModelReplicationService = {}
 
@@ -13,6 +15,11 @@ local replicatedModels: {[string]: boolean} = {}
 -- Cache of enemy hitbox data by type: { [enemyType]: { size: Vector3, offset: Vector3 } }
 local enemyHitboxData: {[string]: {size: Vector3, offset: Vector3, rotation: CFrame?}} = {}
 local enemyAttackboxData: {[string]: {size: Vector3, offset: Vector3, rotation: CFrame?}} = {}
+local loggedCommonItemReplicationDebug: {[string]: boolean} = {}
+local COMMON_ITEM_DIAGNOSTICS = GameOptions.Debug and GameOptions.Debug.CommonItemDiagnostics or false
+local COMMON_ITEM_EXTRACTS: {[string]: {string}} = {
+	TeddyBloxpin = { "Stuffing" },
+}
 
 local function normalizeLookupKey(value: string): string
 	return string.lower((value:gsub("[%W_]+", "")))
@@ -30,25 +37,122 @@ local function getCommonItemsFolder(): Instance?
 	return itemModels:FindFirstChild("CommonItems")
 end
 
-function ModelReplicationService.resolveCommonItemName(itemModelName: string): string?
-	local commonItems = getCommonItemsFolder()
+local function getReplicatedCommonItemsFolder(): Instance?
+	local contentDrawer = ReplicatedStorage:FindFirstChild("ContentDrawer")
+	if not contentDrawer then
+		return nil
+	end
+	local itemModels = contentDrawer:FindFirstChild("ItemModels")
+	if not itemModels then
+		return nil
+	end
+	return itemModels:FindFirstChild("CommonItems")
+end
+
+local function isCommonItemVisualInstance(instance: Instance?): boolean
+	if not instance then
+		return false
+	end
+	return instance:IsA("Model") or instance:IsA("BasePart")
+end
+
+local function ensureReplicatedPath(replicatedPath: string): Instance?
+	local currentReplicated: Instance = ReplicatedStorage
+	for _, part in ipairs(string.split(replicatedPath, ".")) do
+		local child = currentReplicated:FindFirstChild(part)
+		if not child then
+			local folder = Instance.new("Folder")
+			folder.Name = part
+			folder.Parent = currentReplicated
+			currentReplicated = folder
+		else
+			currentReplicated = child
+		end
+	end
+	return currentReplicated
+end
+
+local function buildCommonItemDebugSummary(instance: Instance): string
+	if instance:IsA("MeshPart") then
+		return string.format(
+			"class=MeshPart name=%s texture=%s mesh=%s doubleSided=%s transparency=%.2f",
+			instance.Name,
+			tostring(instance.TextureID),
+			tostring(instance.MeshId),
+			tostring(instance.DoubleSided),
+			instance.Transparency
+		)
+	end
+
+	if instance:IsA("BasePart") then
+		local specialMesh = instance:FindFirstChildWhichIsA("SpecialMesh")
+		if specialMesh then
+			return string.format(
+				"class=%s name=%s specialMesh=%s mesh=%s texture=%s transparency=%.2f",
+				instance.ClassName,
+				instance.Name,
+				specialMesh.Name,
+				tostring(specialMesh.MeshId),
+				tostring(specialMesh.TextureId),
+				instance.Transparency
+			)
+		end
+		return string.format(
+			"class=%s name=%s transparency=%.2f",
+			instance.ClassName,
+			instance.Name,
+			instance.Transparency
+		)
+	end
+
+	if instance:IsA("Model") then
+		local summary = string.format("class=Model name=%s children=%d", instance.Name, #instance:GetChildren())
+		for _, descendant in ipairs(instance:GetDescendants()) do
+			if descendant:IsA("MeshPart") then
+				return summary .. " preferred{" .. buildCommonItemDebugSummary(descendant) .. "}"
+			end
+		end
+		for _, descendant in ipairs(instance:GetDescendants()) do
+			if descendant:IsA("BasePart") and descendant:FindFirstChildWhichIsA("SpecialMesh") then
+				return summary .. " preferred{" .. buildCommonItemDebugSummary(descendant) .. "}"
+			end
+		end
+		return summary
+	end
+
+	return string.format("class=%s name=%s", instance.ClassName, instance.Name)
+end
+
+local function resolveCommonItemVisualNameInFolder(commonItems: Instance?, itemModelName: string): string?
 	if not commonItems then
 		return nil
 	end
 
 	local exact = commonItems:FindFirstChild(itemModelName)
-	if exact and exact:IsA("Model") then
+	if isCommonItemVisualInstance(exact) then
 		return exact.Name
 	end
 
 	local wanted = normalizeLookupKey(itemModelName)
 	for _, child in ipairs(commonItems:GetChildren()) do
-		if child:IsA("Model") and normalizeLookupKey(child.Name) == wanted then
+		if isCommonItemVisualInstance(child) and normalizeLookupKey(child.Name) == wanted then
 			return child.Name
 		end
 	end
 
 	return nil
+end
+
+function ModelReplicationService.resolveCommonItemVisualName(itemModelName: string): string?
+	local serverResolved = resolveCommonItemVisualNameInFolder(getCommonItemsFolder(), itemModelName)
+	if serverResolved then
+		return serverResolved
+	end
+	return resolveCommonItemVisualNameInFolder(getReplicatedCommonItemsFolder(), itemModelName)
+end
+
+function ModelReplicationService.resolveCommonItemName(itemModelName: string): string?
+	return ModelReplicationService.resolveCommonItemVisualName(itemModelName)
 end
 
 local function findNamedPart(model: Model, name: string): BasePart?
@@ -184,6 +288,20 @@ local function syncReplicatedInstance(source: Instance, target: Instance): Insta
 				clonedChild.Parent = target
 			end
 		end
+		for _, targetChild in ipairs(target:GetChildren()) do
+			if not source:FindFirstChild(targetChild.Name) then
+				targetChild:Destroy()
+			end
+		end
+		return target
+	end
+
+	local parent = target.Parent
+	if parent then
+		target:Destroy()
+		local replacement = source:Clone()
+		replacement.Parent = parent
+		return replacement
 	end
 
 	return target
@@ -320,13 +438,145 @@ function ModelReplicationService.replicateItem(itemType: string): boolean
 end
 
 function ModelReplicationService.replicateCommonItem(itemModelName: string): boolean
-	local resolvedName = ModelReplicationService.resolveCommonItemName(itemModelName)
+	return ModelReplicationService.replicateCommonItemVisual(itemModelName)
+end
+
+function ModelReplicationService.replicateCommonItemWithExtracts(itemModelName: string, extractChildNames: {string}?): boolean
+	local resolvedName = ModelReplicationService.resolveCommonItemVisualName(itemModelName)
+	if not resolvedName then
+		warn(string.format(
+			"[ModelReplicationService] Could not resolve common item model '%s' for extraction replication",
+			tostring(itemModelName)
+		))
+		return false
+	end
+
+	local commonItems = getCommonItemsFolder()
+	if not commonItems then
+		warn("[ModelReplicationService] Missing ServerStorage.ContentDrawer.ItemModels.CommonItems")
+		return false
+	end
+
+	local source = commonItems:FindFirstChild(resolvedName)
+	if not source then
+		warn(string.format(
+			"[ModelReplicationService] Missing common item source 'ServerStorage.ContentDrawer.ItemModels.CommonItems.%s'",
+			resolvedName
+		))
+		return false
+	end
+	if not isCommonItemVisualInstance(source) then
+		warn(string.format(
+			"[ModelReplicationService] Unsupported common item source '%s' of type '%s'",
+			source:GetFullName(),
+			source.ClassName
+		))
+		return false
+	end
+
+	local destinationParent = ensureReplicatedPath("ContentDrawer.ItemModels.CommonItems")
+	if not destinationParent then
+		return false
+	end
+
+	local existingReplicated = destinationParent:FindFirstChild(resolvedName)
+	if isCommonItemVisualInstance(existingReplicated) then
+		local extractsReady = true
+		if extractChildNames and #extractChildNames > 0 then
+			if existingReplicated:IsA("Model") then
+				for _, childName in ipairs(extractChildNames) do
+					local topLevelExtract = destinationParent:FindFirstChild(childName)
+					local nestedExtract = existingReplicated:FindFirstChild(childName, true)
+					if not isCommonItemVisualInstance(topLevelExtract) and isCommonItemVisualInstance(nestedExtract) then
+						local extractedClone = nestedExtract:Clone()
+						extractedClone.Name = childName
+						extractedClone.Parent = destinationParent
+						topLevelExtract = extractedClone
+					end
+					if nestedExtract then
+						nestedExtract:Destroy()
+					end
+					if not isCommonItemVisualInstance(topLevelExtract) then
+						extractsReady = false
+					else
+						replicatedModels["commonItem:" .. childName] = true
+					end
+				end
+			else
+				extractsReady = false
+			end
+		end
+
+		if extractsReady then
+			replicatedModels["commonItem:" .. resolvedName] = true
+			return true
+		end
+	end
+
+	local parentClone = source:Clone()
+	local extractedClones = {}
+	if extractChildNames and #extractChildNames > 0 then
+		if parentClone:IsA("Model") then
+			for _, childName in ipairs(extractChildNames) do
+				local extracted = parentClone:FindFirstChild(childName, true)
+				if extracted and isCommonItemVisualInstance(extracted) then
+					local extractedClone = extracted:Clone()
+					extractedClone.Name = childName
+					table.insert(extractedClones, extractedClone)
+					extracted:Destroy()
+				else
+					warn(string.format(
+						"[ModelReplicationService] Missing extract child '%s' in common item '%s'",
+						tostring(childName),
+						resolvedName
+					))
+				end
+			end
+		else
+			warn(string.format(
+				"[ModelReplicationService] Cannot extract nested children from non-model common item '%s'",
+				resolvedName
+			))
+		end
+	end
+
+	local existing = destinationParent:FindFirstChild(resolvedName)
+	if existing then
+		existing:Destroy()
+	end
+	parentClone.Parent = destinationParent
+
+	for _, extractedClone in ipairs(extractedClones) do
+		local existingExtract = destinationParent:FindFirstChild(extractedClone.Name)
+		if existingExtract then
+			existingExtract:Destroy()
+		end
+		extractedClone.Parent = destinationParent
+		replicatedModels["commonItem:" .. extractedClone.Name] = true
+	end
+
+	if RunService:IsStudio() and COMMON_ITEM_DIAGNOSTICS and not loggedCommonItemReplicationDebug[resolvedName] then
+		loggedCommonItemReplicationDebug[resolvedName] = true
+		warn(string.format(
+			"[ModelReplicationService] Common item debug '%s': source{%s} replicated{%s}",
+			resolvedName,
+			buildCommonItemDebugSummary(source),
+			buildCommonItemDebugSummary(parentClone)
+		))
+	end
+
+	replicatedModels["commonItem:" .. resolvedName] = true
+	return true
+end
+
+function ModelReplicationService.replicateCommonItemVisual(itemModelName: string): boolean
+	local resolvedName = ModelReplicationService.resolveCommonItemVisualName(itemModelName)
 	if not resolvedName then
 		local commonItems = getCommonItemsFolder()
 		local available = {}
 		if commonItems then
 			for _, child in ipairs(commonItems:GetChildren()) do
-				if child:IsA("Model") then
+				if isCommonItemVisualInstance(child) then
 					table.insert(available, child.Name)
 				end
 			end
@@ -339,10 +589,63 @@ function ModelReplicationService.replicateCommonItem(itemModelName: string): boo
 		return false
 	end
 
-	local serverPath = "ContentDrawer.ItemModels.CommonItems." .. resolvedName
-	local replicatedPath = "ContentDrawer.ItemModels.CommonItems"
-	local success, _ = ModelReplicationService.replicateModel(serverPath, replicatedPath)
-	return success
+	local extracts = COMMON_ITEM_EXTRACTS[resolvedName]
+	if extracts then
+		return ModelReplicationService.replicateCommonItemWithExtracts(resolvedName, extracts)
+	end
+
+	local destinationParent = ensureReplicatedPath("ContentDrawer.ItemModels.CommonItems")
+	if not destinationParent then
+		return false
+	end
+
+	local existingReplicated = destinationParent:FindFirstChild(resolvedName)
+	if isCommonItemVisualInstance(existingReplicated) then
+		replicatedModels["commonItem:" .. resolvedName] = true
+		return true
+	end
+
+	local commonItems = getCommonItemsFolder()
+	if not commonItems then
+		warn("[ModelReplicationService] Missing ServerStorage.ContentDrawer.ItemModels.CommonItems")
+		return false
+	end
+
+	local source = commonItems:FindFirstChild(resolvedName)
+	if not source then
+		warn(string.format(
+			"[ModelReplicationService] Missing common item source 'ServerStorage.ContentDrawer.ItemModels.CommonItems.%s'",
+			resolvedName
+		))
+		return false
+	end
+	if not isCommonItemVisualInstance(source) then
+		warn(string.format(
+			"[ModelReplicationService] Unsupported common item source '%s' of type '%s'",
+			source:GetFullName(),
+			source.ClassName
+		))
+		return false
+	end
+
+	local existing = destinationParent:FindFirstChild(resolvedName)
+	if existing then
+		existing:Destroy()
+	end
+
+	local clone = source:Clone()
+	clone.Parent = destinationParent
+	if RunService:IsStudio() and COMMON_ITEM_DIAGNOSTICS and not loggedCommonItemReplicationDebug[resolvedName] then
+		loggedCommonItemReplicationDebug[resolvedName] = true
+		warn(string.format(
+			"[ModelReplicationService] Common item debug '%s': source{%s} replicated{%s}",
+			resolvedName,
+			buildCommonItemDebugSummary(source),
+			buildCommonItemDebugSummary(clone)
+		))
+	end
+	replicatedModels["commonItem:" .. resolvedName] = true
+	return true
 end
 
 function ModelReplicationService.replicateIceUtilityAssets(): boolean

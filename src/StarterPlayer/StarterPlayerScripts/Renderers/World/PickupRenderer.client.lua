@@ -31,6 +31,8 @@ local PickupsSpawnBatch = pickupRemotesFolder:WaitForChild("PickupsSpawnBatch") 
 local PickupsDespawnBatch = pickupRemotesFolder:WaitForChild("PickupsDespawnBatch") :: RemoteEvent
 local PickupsValueUpdate = pickupRemotesFolder:WaitForChild("PickupsValueUpdate") :: RemoteEvent
 local PickupRequest = pickupRemotesFolder:WaitForChild("PickupRequest") :: RemoteEvent
+local debugFlags = ReplicatedStorage:FindFirstChild("DebugFlags") or ReplicatedStorage:WaitForChild("DebugFlags", 10)
+local enableCommonItemDiagnostics = debugFlags and (debugFlags:FindFirstChild("CommonItemDiagnostics") or debugFlags:WaitForChild("CommonItemDiagnostics", 10))
 
 local pickupsFolder: Instance = workspace:FindFirstChild("Pickups") or Instance.new("Folder")
 pickupsFolder.Name = "Pickups"
@@ -50,6 +52,7 @@ local DEFAULT_INTERACT_RADIUS = 20
 local DEFAULT_AUTO_PICKUP_RADIUS = 5
 local DEFAULT_SPIN_PERIOD = 8
 local PICKUP_VISUAL_HEIGHT_OFFSET = 1.0
+local COMMON_ITEM_AURA_PATH = "ReplicatedStorage.ContentDrawer.ItemModels.VFX.CommonAura"
 
 local COLOR_BY_KIND = {
 	expBlue = Color3.fromRGB(100, 150, 255),
@@ -87,16 +90,54 @@ type PickupRecord = {
 	autoPickupRadius: number?,
 	spinPeriod: number?,
 	bobAmplitude: number?,
-	visualKind: "part" | "orbModel" | "customModel",
+	visualKind: "part" | "orbModel" | "customModel" | "missingCustom",
 	baseRotation: CFrame?,
 }
 
 local activePickups: {[number]: PickupRecord} = {}
 local partPool: {BasePart} = {}
 local modelPool: {Model} = {}
-local modelPoolByPath: {[string]: {Model}} = {}
 local MAX_POOL_SIZE = 300
 local orbTemplate: Model? = nil
+local commonItemAuraTemplate: Instance? = nil
+local warnedMissingCustomPaths: {[string]: boolean} = {}
+local loggedCustomVisualDebugByPath: {[string]: boolean} = {}
+local warnedMissingCommonItemAura = false
+-- Legacy common-item meshes are inconsistent: some SpecialMesh shells render inside-out, some lose
+-- texture unless we clone only the shell part and normalize its old asset URLs. Future fixes should
+-- be made here instead of changing the general pickup path:
+-- 1) If an item is inverted, add its itemId to MIRRORED_SPECIAL_MESH_ITEM_AXES and choose the axis
+--    that makes it face correctly ("x" is the common default; "z" fixed Teddy/Laser orientation).
+-- 2) If an item has texture issues only, prefer a shell-only normalized clone path first.
+-- 3) Compat paths clone only the corrected shell, so we copy the source Highlight back onto it.
+-- Keep all non-problem items on the normal full-root clone path.
+local MIRRORED_SPECIAL_MESH_ITEM_AXES: {[string]: "x" | "y" | "z"} = {
+	adurite_cape = "x",
+	apple = "x",
+	bloxy_cola = "x",
+	cake = "x",
+	cheezburger = "x",
+	energy_sword = "x",
+	fuse_bomb = "x",
+	magic_8_ball = "x",
+	silver_ninja_star_of_the_brilliant_light = "x",
+	speed_coil = "x",
+	teddy_bloxpin = "z",
+	regeneration_coil = "x",
+	builders_club_hard_hat = "x",
+	laser_electrocutor = "z",
+	historic_timmy_gun = "x",
+	healing_potion = "x",
+	pepperoni_pizza = "y",
+}
+local COMMON_ITEM_ROTATION_OFFSETS: {[string]: CFrame} = {
+	energy_sword = CFrame.Angles(math.pi, 0, 0),
+	healing_potion = CFrame.Angles(math.pi, 0, 0),
+	magic_8_ball = CFrame.Angles(math.pi, 0, 0),
+	pepperoni_pizza = CFrame.Angles(math.pi, 0, 0),
+}
+local NORMALIZE_ONLY_ITEM_IDS: {[string]: boolean} = {
+}
 
 local function setPickupPrompt(promptData: any)
 	if PickupPromptState and PickupPromptState.setPrompt then
@@ -151,9 +192,9 @@ local function findOrbTemplate(): Model?
 	return orbTemplate
 end
 
-local function findModelByPath(modelPath: string): Model?
+local function resolveInstanceByPath(path: string): Instance?
 	local current: Instance? = game
-	for _, partName in ipairs(string.split(modelPath, ".")) do
+	for _, partName in ipairs(string.split(path, ".")) do
 		if not current then
 			return nil
 		end
@@ -163,62 +204,432 @@ local function findModelByPath(modelPath: string): Model?
 			current = current:FindFirstChild(partName)
 		end
 	end
-	if current and current:IsA("Model") then
+	return current
+end
+
+local function findVisualInstanceByPath(modelPath: string): Instance?
+	local current = resolveInstanceByPath(modelPath)
+	if current and (current:IsA("Model") or current:IsA("BasePart")) then
 		return current
 	end
 	return nil
 end
 
-local function configureModel(model: Model): (BasePart, {BasePart})
-	local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-	if not primary then
-		primary = Instance.new("Part")
-		primary.Name = "PickupPivot"
-		primary.Size = Vector3.new(0.5, 0.5, 0.5)
-		primary.Transparency = 1
-		primary.Anchored = true
-		primary.CanCollide = false
-		primary.CanTouch = false
-		primary.CanQuery = false
-		primary.Parent = model
+local function findCommonItemAuraTemplate(): Instance?
+	if commonItemAuraTemplate and commonItemAuraTemplate.Parent then
+		return commonItemAuraTemplate
 	end
-	if not model.PrimaryPart then
-		model.PrimaryPart = primary
+	local current = resolveInstanceByPath(COMMON_ITEM_AURA_PATH)
+	if current then
+		commonItemAuraTemplate = current
+	end
+	return commonItemAuraTemplate
+end
+
+local function isStuffingModelPath(modelPath: string?): boolean
+	if typeof(modelPath) ~= "string" then
+		return false
+	end
+	if modelPath == "ReplicatedStorage.ContentDrawer.ItemModels.CommonItems.Stuffing" then
+		return true
+	end
+	return string.find(modelPath, ".TeddyBloxpin.Stuffing", 1, true) ~= nil
+end
+
+local function isCommonItemModelPath(modelPath: string?): boolean
+	if typeof(modelPath) ~= "string" then
+		return false
+	end
+	return string.find(modelPath, "ReplicatedStorage.ContentDrawer.ItemModels.CommonItems.", 1, true) == 1
+end
+
+local function buildVisualDebugSummary(instance: Instance): string
+	if instance:IsA("MeshPart") then
+		return string.format(
+			"class=MeshPart name=%s texture=%s mesh=%s doubleSided=%s transparency=%.2f",
+			instance.Name,
+			tostring(instance.TextureID),
+			tostring(instance.MeshId),
+			tostring(instance.DoubleSided),
+			instance.Transparency
+		)
 	end
 
-	local parts = {}
-	for _, desc in ipairs(model:GetDescendants()) do
-		if desc:IsA("BasePart") then
-			desc.Anchored = true
-			desc.CanCollide = false
-			desc.CanTouch = false
-			desc.CanQuery = false
-			table.insert(parts, desc)
+	if instance:IsA("BasePart") then
+		local specialMesh = instance:FindFirstChildWhichIsA("SpecialMesh")
+		if specialMesh then
+			return string.format(
+				"class=%s name=%s specialMesh=%s mesh=%s texture=%s transparency=%.2f",
+				instance.ClassName,
+				instance.Name,
+				specialMesh.Name,
+				tostring(specialMesh.MeshId),
+				tostring(specialMesh.TextureId),
+				instance.Transparency
+			)
+		end
+		return string.format(
+			"class=%s name=%s transparency=%.2f",
+			instance.ClassName,
+			instance.Name,
+			instance.Transparency
+		)
+	end
+
+	if instance:IsA("Model") then
+		return string.format("class=Model name=%s children=%d", instance.Name, #instance:GetChildren())
+	end
+
+	return string.format("class=%s name=%s", instance.ClassName, instance.Name)
+end
+
+local function normalizeLegacyAssetUrl(contentValue: string): string
+	local assetId = string.match(contentValue, "[?&]id=(%d+)")
+	if assetId then
+		return "rbxassetid://" .. assetId
+	end
+	return contentValue
+end
+
+local function normalizeVisualAssetIds(instance: Instance)
+	if instance:IsA("MeshPart") then
+		local meshPart = instance :: MeshPart
+		local meshId = tostring(meshPart.MeshId)
+		local textureId = tostring(meshPart.TextureID)
+		local normalizedMeshId = normalizeLegacyAssetUrl(meshId)
+		local normalizedTextureId = normalizeLegacyAssetUrl(textureId)
+		if normalizedMeshId ~= meshId then
+			meshPart.MeshId = normalizedMeshId
+		end
+		if normalizedTextureId ~= textureId then
+			meshPart.TextureID = normalizedTextureId
 		end
 	end
 
-	return model.PrimaryPart :: BasePart, parts
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("MeshPart") then
+			local meshPart = descendant :: MeshPart
+			local meshId = tostring(meshPart.MeshId)
+			local textureId = tostring(meshPart.TextureID)
+			local normalizedMeshId = normalizeLegacyAssetUrl(meshId)
+			local normalizedTextureId = normalizeLegacyAssetUrl(textureId)
+			if normalizedMeshId ~= meshId then
+				meshPart.MeshId = normalizedMeshId
+			end
+			if normalizedTextureId ~= textureId then
+				meshPart.TextureID = normalizedTextureId
+			end
+		elseif descendant:IsA("SpecialMesh") then
+			local meshId = tostring(descendant.MeshId)
+			local textureId = tostring(descendant.TextureId)
+			local normalizedMeshId = normalizeLegacyAssetUrl(meshId)
+			local normalizedTextureId = normalizeLegacyAssetUrl(textureId)
+			if normalizedMeshId ~= meshId then
+				descendant.MeshId = normalizedMeshId
+			end
+			if normalizedTextureId ~= textureId then
+				descendant.TextureId = normalizedTextureId
+			end
+		end
+	end
+end
+
+local function findLargestSpecialMeshPart(instance: Instance): BasePart?
+	if instance:IsA("BasePart") and instance:FindFirstChildWhichIsA("SpecialMesh") then
+		return instance
+	end
+	if not instance:IsA("Model") then
+		return nil
+	end
+
+	local bestPart: BasePart? = nil
+	local bestScore = -math.huge
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") and descendant:FindFirstChildWhichIsA("SpecialMesh") then
+			local size = descendant.Size
+			local score = size.X * size.Y * size.Z
+			if score > bestScore then
+				bestScore = score
+				bestPart = descendant
+			end
+		end
+	end
+	return bestPart
+end
+
+local function buildMirroredSpecialMeshVisual(template: Instance, mirrorAxis: "x" | "y" | "z"): BasePart?
+	local sourcePart = findLargestSpecialMeshPart(template)
+	if not sourcePart then
+		return nil
+	end
+
+	local clone = sourcePart:Clone()
+	normalizeVisualAssetIds(clone)
+
+	for _, descendant in ipairs(clone:GetDescendants()) do
+		if descendant:IsA("SpecialMesh") then
+			local scale = descendant.Scale
+			local mirroredX = scale.X
+			local mirroredY = scale.Y
+			local mirroredZ = scale.Z
+			if mirroredX == 0 then
+				mirroredX = 1
+			end
+			if mirroredY == 0 then
+				mirroredY = 1
+			end
+			if mirroredZ == 0 then
+				mirroredZ = 1
+			end
+			if mirrorAxis == "x" then
+				descendant.Scale = Vector3.new(-mirroredX, mirroredY, mirroredZ)
+			elseif mirrorAxis == "y" then
+				descendant.Scale = Vector3.new(mirroredX, -mirroredY, mirroredZ)
+			else
+				descendant.Scale = Vector3.new(mirroredX, mirroredY, -mirroredZ)
+			end
+		end
+	end
+
+	return clone
+end
+
+local function buildNormalizedSpecialMeshShellVisual(template: Instance): BasePart?
+	local sourcePart = findLargestSpecialMeshPart(template)
+	if not sourcePart then
+		return nil
+	end
+
+	local clone = sourcePart:Clone()
+	normalizeVisualAssetIds(clone)
+	return clone
+end
+
+local function applyTemplateHighlight(template: Instance, visual: Instance)
+	local sourceHighlight = template:FindFirstChildWhichIsA("Highlight", true)
+	if not sourceHighlight then
+		return
+	end
+	if visual:FindFirstChildWhichIsA("Highlight", true) then
+		return
+	end
+
+	local clonedHighlight = sourceHighlight:Clone()
+	if visual:IsA("Model") then
+		clonedHighlight.Adornee = visual
+		clonedHighlight.Parent = visual
+	else
+		clonedHighlight.Adornee = visual
+		clonedHighlight.Parent = visual
+	end
+end
+
+local function getMirroredSpecialMeshAxis(itemId: string?, modelPath: string?): ("x" | "y" | "z")?
+	if typeof(itemId) ~= "string" then
+		return nil
+	end
+	if not isCommonItemModelPath(modelPath) then
+		return nil
+	end
+	return MIRRORED_SPECIAL_MESH_ITEM_AXES[itemId]
+end
+
+local function shouldNormalizeOnly(itemId: string?, modelPath: string?): boolean
+	if typeof(itemId) ~= "string" then
+		return false
+	end
+	if not isCommonItemModelPath(modelPath) then
+		return false
+	end
+	return NORMALIZE_ONLY_ITEM_IDS[itemId] == true
+end
+
+local function getCommonItemRotationOffset(itemId: string?, modelPath: string?): CFrame?
+	if typeof(itemId) ~= "string" then
+		return nil
+	end
+	if not isCommonItemModelPath(modelPath) then
+		return nil
+	end
+	return COMMON_ITEM_ROTATION_OFFSETS[itemId]
+end
+
+local function createMissingCustomVisualPart(): BasePart
+	local part = Instance.new("Part")
+	part.Name = "MissingPickupVisual"
+	part.Size = Vector3.new(0.2, 0.2, 0.2)
+	part.Transparency = 1
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.CastShadow = false
+	return part
+end
+
+local function configureVisualInstance(instance: Instance, modelPath: string?): (BasePart, {BasePart})
+	local forceOpaque = isStuffingModelPath(modelPath)
+
+	if instance:IsA("Model") then
+		local primary = instance:FindFirstChildWhichIsA("BasePart", true)
+		if not primary then
+			primary = Instance.new("Part")
+			primary.Name = "PickupPivot"
+			primary.Size = Vector3.new(0.5, 0.5, 0.5)
+			primary.Transparency = 1
+			primary.Anchored = true
+			primary.CanCollide = false
+			primary.CanTouch = false
+			primary.CanQuery = false
+			primary.Parent = instance
+		end
+
+		local parts = {}
+		for _, desc in ipairs(instance:GetDescendants()) do
+			if desc:IsA("BasePart") then
+				desc.Anchored = true
+				desc.CanCollide = false
+				desc.CanTouch = false
+				desc.CanQuery = false
+				if forceOpaque then
+					desc.Transparency = 0
+					desc.LocalTransparencyModifier = 0
+				end
+				table.insert(parts, desc)
+			end
+		end
+
+		return primary :: BasePart, parts
+	end
+
+	local part = instance :: BasePart
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	if forceOpaque then
+		part.Transparency = 0
+		part.LocalTransparencyModifier = 0
+	end
+	return part, { part }
+end
+
+local function attachCommonItemAura(visual: Instance, primary: BasePart, modelPath: string?)
+	if not isCommonItemModelPath(modelPath) then
+		return
+	end
+
+	local auraTemplate = findCommonItemAuraTemplate()
+	if not auraTemplate then
+		if not warnedMissingCommonItemAura then
+			warnedMissingCommonItemAura = true
+			warn(string.format(
+				"[PickupRenderer] Missing common item aura at '%s'. Common item ground aura disabled until the asset is replicated.",
+				COMMON_ITEM_AURA_PATH
+			))
+		end
+		return
+	end
+
+	local attachmentOffset = Vector3.zero
+	if visual:IsA("Model") then
+		local boundsCFrame = select(1, visual:GetBoundingBox())
+		attachmentOffset = primary.CFrame:PointToObjectSpace(boundsCFrame.Position)
+	end
+
+	if auraTemplate:IsA("Attachment") then
+		local auraAttachment = auraTemplate:Clone()
+		auraAttachment.Name = "CommonAura"
+		auraAttachment.Position = attachmentOffset
+		auraAttachment.Orientation = Vector3.zero
+		auraAttachment.Parent = primary
+		return
+	end
+
+	local auraAttachment = Instance.new("Attachment")
+	auraAttachment.Name = "CommonAura"
+	auraAttachment.Position = attachmentOffset
+	auraAttachment.Orientation = Vector3.zero
+	auraAttachment.Parent = primary
+
+	local auraInstance = auraTemplate:Clone()
+	auraInstance.Name = "CommonAuraVFX"
+	auraInstance.Parent = auraAttachment
 end
 
 local function extractRotation(cf: CFrame): CFrame
 	return CFrame.fromMatrix(Vector3.zero, cf.RightVector, cf.UpVector, cf.LookVector)
 end
 
-local function acquireVisual(modelPath: string?): (Instance, BasePart, {BasePart}?, "part" | "orbModel" | "customModel", CFrame?)
+local function acquireVisual(modelPath: string?, itemId: string?): (Instance, BasePart, {BasePart}?, "part" | "orbModel" | "customModel" | "missingCustom", CFrame?)
 	if typeof(modelPath) == "string" and modelPath ~= "" then
-		local pool = modelPoolByPath[modelPath]
-		local model = pool and table.remove(pool) or nil
-		if not model then
-			local template = findModelByPath(modelPath)
-			if template then
-				model = template:Clone()
+		local template = findVisualInstanceByPath(modelPath)
+		if template then
+			local visual: Instance = template:Clone()
+			local mirroredAxis = getMirroredSpecialMeshAxis(itemId, modelPath)
+			if mirroredAxis then
+				local compatVisual = buildMirroredSpecialMeshVisual(template, mirroredAxis)
+				if compatVisual then
+					visual:Destroy()
+					visual = compatVisual
+				end
+			elseif shouldNormalizeOnly(itemId, modelPath) then
+				local compatVisual = buildNormalizedSpecialMeshShellVisual(template)
+				if compatVisual then
+					visual:Destroy()
+					visual = compatVisual
+				else
+					normalizeVisualAssetIds(visual)
+				end
+			end
+			applyTemplateHighlight(template, visual)
+			if not visual.Parent then
+				visual.Parent = pickupsFolder
+			end
+			visual.Parent = pickupsFolder
+			local primary, parts = configureVisualInstance(visual, modelPath)
+			attachCommonItemAura(visual, primary, modelPath)
+			if RunService:IsStudio() and enableCommonItemDiagnostics and enableCommonItemDiagnostics.Value and isCommonItemModelPath(modelPath) then
+				if not loggedCustomVisualDebugByPath[modelPath] then
+					loggedCustomVisualDebugByPath[modelPath] = true
+					warn(string.format(
+						"[PickupRenderer] Common item visual debug '%s': template{%s} cloneRoot{%s}",
+						modelPath,
+						buildVisualDebugSummary(template),
+						buildVisualDebugSummary(visual)
+					))
+				end
+			end
+			local baseRotation = if visual:IsA("Model")
+				then extractRotation(visual:GetPivot())
+				else extractRotation((visual :: BasePart).CFrame)
+			local rotationOffset = getCommonItemRotationOffset(itemId, modelPath)
+			if rotationOffset then
+				baseRotation = baseRotation * rotationOffset
+			end
+			return visual, primary, parts, "customModel", baseRotation
+		end
+
+		if not warnedMissingCustomPaths[modelPath] then
+			warnedMissingCustomPaths[modelPath] = true
+			local rawResolved = resolveInstanceByPath(modelPath)
+			if rawResolved then
+				warn(string.format(
+					"[PickupRenderer] Unsupported pickup visual at '%s' (class '%s'). Expected Model or BasePart.",
+					modelPath,
+					rawResolved.ClassName
+				))
+			else
+				warn(string.format(
+					"[PickupRenderer] Missing pickup visual at '%s'. Custom pickup will render invisible until the path exists.",
+					modelPath
+				))
 			end
 		end
-		if model then
-			model.Parent = pickupsFolder
-			local primary, parts = configureModel(model)
-			return model, primary, parts, "customModel", extractRotation(model:GetPivot())
-		end
+
+		local missingVisual = createMissingCustomVisualPart()
+		missingVisual.Parent = pickupsFolder
+		return missingVisual, missingVisual, { missingVisual }, "missingCustom", nil
 	end
 
 	local template = findOrbTemplate()
@@ -228,7 +639,7 @@ local function acquireVisual(modelPath: string?): (Instance, BasePart, {BasePart
 			model = template:Clone()
 		end
 		model.Parent = pickupsFolder
-		local primary, parts = configureModel(model)
+		local primary, parts = configureVisualInstance(model, nil)
 		return model, primary, parts, "orbModel", extractRotation(model:GetPivot())
 	end
 
@@ -243,18 +654,6 @@ end
 local function releaseVisual(record: PickupRecord)
 	local instance = record.instance
 	instance.Parent = nil
-
-	if record.visualKind == "customModel" and record.modelPath and instance:IsA("Model") then
-		local pool = modelPoolByPath[record.modelPath]
-		if not pool then
-			pool = {}
-			modelPoolByPath[record.modelPath] = pool
-		end
-		if #pool < MAX_POOL_SIZE then
-			table.insert(pool, instance)
-		end
-		return
-	end
 
 	if record.visualKind == "orbModel" and instance:IsA("Model") then
 		if #modelPool < MAX_POOL_SIZE then
@@ -303,7 +702,11 @@ local function setRecordCFrame(record: PickupRecord, cf: CFrame)
 		end
 		(record.instance :: Model):PivotTo(finalCf)
 	else
-		record.primary.CFrame = cf
+		local finalCf = cf
+		if record.baseRotation then
+			finalCf = cf * record.baseRotation
+		end
+		record.primary.CFrame = finalCf
 	end
 end
 
@@ -338,6 +741,7 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 		end
 
 		local modelPath = if typeof(data.modelPath) == "string" then data.modelPath else nil
+		local itemId = if typeof(data.itemId) == "string" then data.itemId else nil
 
 		local existing = activePickups[id]
 		if existing and existing.modelPath ~= modelPath then
@@ -354,7 +758,7 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			existing.collectible = data.collectible ~= false
 			existing.seekOnSpawn = data.seekOnSpawn == true
 			existing.visualOnly = data.visualOnly == true
-			existing.itemId = if typeof(data.itemId) == "string" then data.itemId else existing.itemId
+			existing.itemId = itemId or existing.itemId
 			existing.itemDisplayName = if typeof(data.itemDisplayName) == "string" then data.itemDisplayName else existing.itemDisplayName
 			existing.itemDescription = if typeof(data.itemDescription) == "string" then data.itemDescription else existing.itemDescription
 			existing.requiresInteract = data.requiresInteract == true
@@ -370,7 +774,7 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			continue
 		end
 
-		local instance, primary, parts, visualKind, baseRotation = acquireVisual(modelPath)
+		local instance, primary, parts, visualKind, baseRotation = acquireVisual(modelPath, itemId)
 		local record: PickupRecord = {
 			id = id,
 			kind = data.kind or "expBlue",
@@ -385,7 +789,7 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			seekOnSpawn = data.seekOnSpawn == true,
 			visualOnly = data.visualOnly == true,
 			modelPath = modelPath,
-			itemId = if typeof(data.itemId) == "string" then data.itemId else nil,
+			itemId = itemId,
 			itemDisplayName = if typeof(data.itemDisplayName) == "string" then data.itemDisplayName else nil,
 			itemDescription = if typeof(data.itemDescription) == "string" then data.itemDescription else nil,
 			requiresInteract = data.requiresInteract == true,
@@ -636,7 +1040,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 			bob = math.sin((now + record.seed) * BOB_FREQUENCY) * bobAmplitude
 		end
 
-		if isInteractItem then
+		if isInteractItem and not record.modelPath then
 			local spinPeriod = math.max(0.1, record.spinPeriod or DEFAULT_SPIN_PERIOD)
 			local angle = ((now + record.seed) / spinPeriod) * (math.pi * 2)
 			setRecordCFrame(record, CFrame.new(record.currentPos + Vector3.new(0, bob, 0)) * CFrame.Angles(0, angle, 0))
@@ -671,8 +1075,13 @@ RunService.Heartbeat:Connect(function(dt: number)
 		if doCheck then
 			local delta = record.currentPos - playerPos
 			local distSq = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
+			local allowedPickupRadiusSq = pickupRadiusSq
+			if record.kind == "teddyStuffing" then
+				local autoRadius = record.autoPickupRadius or DEFAULT_AUTO_PICKUP_RADIUS
+				allowedPickupRadiusSq = autoRadius * autoRadius
+			end
 
-			if record.collectible ~= false and distSq <= pickupRadiusSq then
+			if record.collectible ~= false and distSq <= allowedPickupRadiusSq then
 				if not record.lastRequestAt or (now - record.lastRequestAt) >= REQUEST_RETRY_DELAY then
 					record.lastRequestAt = now
 					record.seeking = true

@@ -23,7 +23,7 @@ return {
 	
 	-- Regeneration & Survival
 	HealthRegenRate = 1.0,  -- HP per second at 100% regen (0 = no regen by default)
-	HealthRegenDelay = 5.0,  -- Total delay before reaching 100% regen (first 1s = 0%, then scales up)
+	HealthRegenDelay = 2.0,  -- Total delay before reaching 100% regen (first 1s = 0%, then scales up)
 	BaseInvincibilityFrames = 0.5,  -- Seconds of invincibility after taking damage
 	
 	-- Experience & Progression

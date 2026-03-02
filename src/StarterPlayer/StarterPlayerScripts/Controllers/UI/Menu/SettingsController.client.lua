@@ -19,6 +19,7 @@ local ATTR_OTHER_PLAYER_VFX_OPACITY = "Setting_graphics_otherPlayerVfxOpacity"
 local ATTR_REDUCE_FLASH = "Setting_accessibility_reduceFlash"
 local ATTR_REDUCE_MOTION = "Setting_accessibility_reduceMotion"
 local ATTR_TOGGLE_SPRINT_MODE = "Setting_controls_toggleSprintMode"
+local ATTR_ACTIVATABLE_M2_FROM_CURSOR = "Setting_controls_activatableM2FromCursor"
 local ATTR_SETTINGS_OPEN = "UI_SettingsOpen"
 local ATTR_CAMERA_FOV = "Setting_graphics_cameraFov"
 
@@ -163,6 +164,7 @@ local function applyToAttributes(settings: SettingsV1)
 	player:SetAttribute(ATTR_REDUCE_FLASH, settings.accessibility.reduceFlash)
 	player:SetAttribute(ATTR_REDUCE_MOTION, false)
 	player:SetAttribute(ATTR_TOGGLE_SPRINT_MODE, settings.controls.toggleSprintMode)
+	player:SetAttribute(ATTR_ACTIVATABLE_M2_FROM_CURSOR, settings.controls.activatableM2FromCursor)
 	applyCameraFov(settings.graphics.cameraFov)
 end
 
@@ -249,6 +251,24 @@ local function cloneTemplateSettingRow(componentBaseName: string): Frame?
 	return nil
 end
 
+local function cloneTemplateToggleRow(componentBaseName: string): Frame?
+	if not content then
+		return nil
+	end
+
+	for _, child in ipairs(content:GetChildren()) do
+		if child:IsA("Frame") and child:FindFirstChild("DescriptionLabel") and child:FindFirstChild("ToggleButton") then
+			local cloned = child:Clone()
+			cloned.Name = componentBaseName .. "Frame"
+			cloned.LayoutOrder = getNextLayoutOrder()
+			cloned.Parent = content
+			return cloned
+		end
+	end
+
+	return nil
+end
+
 local function addSliderRow(
 	labelText: string,
 	minimum: number,
@@ -258,8 +278,12 @@ local function addSliderRow(
 	setter: (number) -> ()
 )
 	local componentBaseName = toComponentBaseName(labelText)
-	local row = findSettingRow(componentBaseName, labelText)
+	local row = findSettingRow(componentBaseName, labelText, true)
 	if not row then
+		row = cloneTemplateToggleRow(componentBaseName)
+	end
+	if not row then
+		warn(string.format("[SettingsController] Missing or failed to create row: %sFrame", componentBaseName))
 		return
 	end
 
@@ -423,8 +447,12 @@ local function addToggleRow(
 	displayLabelText: string?
 )
 	local componentBaseName = toComponentBaseName(labelText)
-	local row = findSettingRow(componentBaseName, labelText)
+	local row = findSettingRow(componentBaseName, labelText, true)
 	if not row then
+		row = cloneTemplateToggleRow(componentBaseName)
+	end
+	if not row then
+		warn(string.format("[SettingsController] Missing or failed to create row: %sFrame", componentBaseName))
 		return
 	end
 
@@ -512,6 +540,13 @@ end, function(value: boolean)
 	currentSettings.controls.toggleSprintMode = value
 	applyToAttributes(currentSettings)
 end, "Toggle to sprint")
+
+addToggleRow("Activatable M2 from cursor", function()
+	return currentSettings.controls.activatableM2FromCursor
+end, function(value: boolean)
+	currentSettings.controls.activatableM2FromCursor = value
+	applyToAttributes(currentSettings)
+end)
 
 if closeButton then
 	closeButton.Activated:Connect(function()

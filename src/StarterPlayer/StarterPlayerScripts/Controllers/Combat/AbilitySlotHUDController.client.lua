@@ -960,7 +960,76 @@ local function getPrimaryChargeCounts(): (number, number)
 	return 0, 1
 end
 
-local function renderChargeLabels()
+local function applySecondaryChargeLabel(currentCharges: number?, totalCharges: number?)
+	local secondaryLabel = chargeLabels.Secondary
+	if not secondaryLabel then
+		return
+	end
+	if typeof(currentCharges) == "number" and typeof(totalCharges) == "number" and totalCharges > 1 then
+		secondaryLabel.TextTransparency = 0
+		secondaryLabel.Text = string.format("%d/%d", math.max(0, math.floor(currentCharges + 0.5)), math.max(1, math.floor(totalCharges + 0.5)))
+	else
+		setLabelHidden(secondaryLabel)
+	end
+end
+
+local function applyAuthoritativeSlotCooldown(slotName: SlotName, remaining: number, duration: number)
+	local state = getSlotCooldownState(slotName)
+	if not state then
+		return
+	end
+	if duration <= 0 or remaining <= 0 then
+		clearSlotCooldown(slotName)
+		return
+	end
+	state.lastServerSample = {
+		remaining = remaining,
+		maximum = duration,
+		at = tick(),
+	}
+	state.state = "active"
+	state.duration = math.max(duration, COOLDOWN_EPSILON)
+	state.remaining = math.clamp(remaining, 0, state.duration)
+end
+
+local function syncWeaponSecondaryDisplay()
+	local character = localPlayer.Character
+	if not character then
+		applySecondaryChargeLabel(nil, nil)
+		clearSlotCooldown("Secondary")
+		return
+	end
+
+	local currentCharges = character:GetAttribute("StarterWeaponM2Charges")
+	local maxCharges = character:GetAttribute("StarterWeaponM2MaxCharges")
+	local rechargeEnd = character:GetAttribute("StarterWeaponM2RechargeEnd")
+	local rechargeDuration = character:GetAttribute("StarterWeaponM2RechargeDuration")
+
+	applySecondaryChargeLabel(
+		if typeof(currentCharges) == "number" then currentCharges else nil,
+		if typeof(maxCharges) == "number" then maxCharges else nil
+	)
+
+	if typeof(currentCharges) ~= "number"
+		or typeof(maxCharges) ~= "number"
+		or currentCharges >= maxCharges
+		or typeof(rechargeEnd) ~= "number"
+		or typeof(rechargeDuration) ~= "number"
+	then
+		clearSlotCooldown("Secondary")
+		return
+	end
+
+	local remaining = math.max(0, rechargeEnd - tick())
+	if remaining <= 0 then
+		clearSlotCooldown("Secondary")
+		return
+	end
+
+	applyAuthoritativeSlotCooldown("Secondary", remaining, rechargeDuration)
+end
+
+local function renderChargeLabels(weaponModeActive: boolean)
 	local currentCharges, totalCharges = getPrimaryChargeCounts()
 	local primaryLabel = chargeLabels.Primary
 	if primaryLabel then
@@ -974,7 +1043,29 @@ local function renderChargeLabels()
 	setLabelHidden(primaryLabel)
 
 	setLabelHidden(chargeLabels.Utility)
-	setLabelHidden(chargeLabels.Secondary)
+	if weaponModeActive then
+		syncWeaponSecondaryDisplay()
+	else
+		local secondaryLabel = chargeLabels.Secondary
+		local abilityCooldown = playerComponentState.AbilityCooldown
+		local cooldowns = if typeof(abilityCooldown) == "table" and typeof(abilityCooldown.cooldowns) == "table"
+			then abilityCooldown.cooldowns
+			else nil
+		local secondaryAbilityId = assignedAbilityBySlot.Secondary
+		local secondaryRecord = if cooldowns and secondaryAbilityId then cooldowns[secondaryAbilityId] else nil
+		if typeof(secondaryRecord) == "table"
+			and typeof(secondaryRecord.charges) == "number"
+			and typeof(secondaryRecord.maxCharges) == "number"
+		then
+			applySecondaryChargeLabel(secondaryRecord.charges, secondaryRecord.maxCharges)
+			if typeof(secondaryRecord.nextChargeAt) == "number" and typeof(secondaryRecord.rechargeMax) == "number" then
+				local remaining = math.max(0, secondaryRecord.nextChargeAt - tick())
+				applyAuthoritativeSlotCooldown("Secondary", remaining, secondaryRecord.rechargeMax)
+			end
+		else
+			setLabelHidden(secondaryLabel)
+		end
+	end
 	setLabelHidden(chargeLabels.Special)
 	setLabelHidden(chargeLabels.Equipment)
 end
@@ -996,7 +1087,7 @@ local function refreshUI()
 	rebuildAbilitySlotAssignments(weaponModeActive)
 	renderAbilitySlotIcons(weaponModeActive)
 	hydrateIdleCooldownsFromComponents(weaponModeActive)
-	renderChargeLabels()
+	renderChargeLabels(weaponModeActive)
 
 	local ratiosBySlot: {[string]: number} = {
 		Primary = 0,
@@ -1010,6 +1101,18 @@ local function refreshUI()
 		ratiosBySlot.Primary = if primaryState and primaryState.state == "active" and primaryState.remaining > COOLDOWN_EPSILON
 			then 1
 			else 0
+		local character = localPlayer.Character
+		if character then
+			local currentCharges = character:GetAttribute("StarterWeaponM2Charges")
+			local rechargeEnd = character:GetAttribute("StarterWeaponM2RechargeEnd")
+			if typeof(currentCharges) == "number"
+				and currentCharges <= 0
+				and typeof(rechargeEnd) == "number"
+				and rechargeEnd > tick()
+			then
+				ratiosBySlot.Primary = 1
+			end
+		end
 	end
 
 	-- Hide inactive placeholders when no assigned ability.
@@ -1253,28 +1356,9 @@ abilityCastRemote.OnClientEvent:Connect(function(abilityId: string, cooldownDura
 end)
 
 weaponSharedLockoutLocalEvent.Event:Connect(function(payload: any)
-	if typeof(payload) ~= "table" then
-		return
-	end
-	if payload.weaponId ~= WEAPON_ID then
-		return
-	end
-	if not isWeaponModeActive() then
-		return
-	end
-
-	local duration = if typeof(payload.duration) == "number" then payload.duration else nil
-	if (not duration or duration <= 0) and typeof(payload.endTime) == "number" then
-		duration = math.max(0, payload.endTime - tick())
-	end
-	if not duration or duration <= 0 then
-		clearSlotCooldown("Primary")
-		clearSlotCooldown("Secondary")
-		return
-	end
-
-	startSlotCooldown("Primary", duration, duration)
-	startSlotCooldown("Secondary", duration, duration)
+	-- Weapon secondary now uses authoritative charge/recharge attributes instead of shared lockout.
+	-- Keep the local event wired for compatibility, but ignore it for HUD cooldown rendering.
+	return
 end)
 
 pcall(function()

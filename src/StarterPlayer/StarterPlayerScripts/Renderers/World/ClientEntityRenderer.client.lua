@@ -143,6 +143,7 @@ type RenderRecord = {
 	enemyLesserFrostData: any?,
 	enemyGreaterFrostData: any?,
 	enemyFreezeData: any?,
+	enemyStunData: any?,
 	enemySlowData: any?,
 	enemySlowExpiresAt: number?,
 	enemyHealthBillboard: BillboardGui?,
@@ -156,6 +157,7 @@ type RenderRecord = {
 	enemyStatusLesserFrostStackLabel: TextLabel?,
 	enemyStatusGreaterFrostLabel: ImageLabel?,
 	enemyStatusGreaterFrostStackLabel: TextLabel?,
+	enemyStatusStunLabel: ImageLabel?,
 	enemyStatusSlowLabel: TextLabel?,
 	enemyStatusTimeStoppedLabel: TextLabel?,
 	enemyFreezeHighlight: Highlight?,
@@ -1138,6 +1140,7 @@ do
 		record.enemyStatusLesserFrostStackLabel = nil
 		record.enemyStatusGreaterFrostLabel = nil
 		record.enemyStatusGreaterFrostStackLabel = nil
+		record.enemyStatusStunLabel = nil
 		record.enemyStatusSlowLabel = nil
 		record.enemyStatusTimeStoppedLabel = nil
 	end
@@ -1246,9 +1249,11 @@ do
 		local frostbiteTemplate = getEnemyStatusTemplateInstance("FrostbiteStatusEffectImageLabel")
 		local lesserTemplate = getEnemyStatusTemplateInstance("LesserFrostStatusEffectImageLabel")
 		local greaterTemplate = getEnemyStatusTemplateInstance("GreaterFrostStatusEffectImageLabel")
+		local stunTemplate = getEnemyStatusTemplateInstance("StunStatusEffectImageLabel")
 		local frostbiteExisting = statusContainerGui:FindFirstChild("FrostbiteStatusEffectImageLabel")
 		local lesserExisting = statusContainerGui:FindFirstChild("LesserFrostStatusEffectImageLabel")
 		local greaterExisting = statusContainerGui:FindFirstChild("GreaterFrostStatusEffectImageLabel")
+		local stunExisting = statusContainerGui:FindFirstChild("StunStatusEffectImageLabel")
 		local genericStatusSlot = statusContainerGui:FindFirstChild("StatusEffectImageLabel")
 		local slowLabel = statusContainerGui:FindFirstChild("StatusSlowLabel")
 		local timeStoppedLabel = statusContainerGui:FindFirstChild("StatusTimeStoppedLabel")
@@ -1258,12 +1263,16 @@ do
 			statusLabelSize = lesserExisting.Size
 		elseif greaterExisting and greaterExisting:IsA("GuiObject") then
 			statusLabelSize = greaterExisting.Size
+		elseif stunExisting and stunExisting:IsA("GuiObject") then
+			statusLabelSize = stunExisting.Size
 		elseif frostbiteTemplate then
 			statusLabelSize = frostbiteTemplate.Size
 		elseif lesserTemplate then
 			statusLabelSize = lesserTemplate.Size
 		elseif greaterTemplate then
 			statusLabelSize = greaterTemplate.Size
+		elseif stunTemplate then
+			statusLabelSize = stunTemplate.Size
 		elseif genericStatusSlot and genericStatusSlot:IsA("GuiObject") then
 			statusLabelSize = genericStatusSlot.Size
 		end
@@ -1302,6 +1311,13 @@ do
 			statusLabelSize
 		)
 		local statusGreaterFrostStackLabel = if statusGreaterFrostLabel then ensureEnemyStatusStackLabel(statusGreaterFrostLabel) else nil
+		local statusStunLabel = ensureEnemyStatusTemplateImageLabel(
+			statusContainerGui,
+			"StunStatusEffectImageLabel",
+			"StunStatusEffectImageLabel",
+			4,
+			statusLabelSize
+		)
 		local freezeHighlight = ensureEnemyFreezeHighlight(record)
 
 		local healthRoot = findInstanceByPath(billboard, {"Highlight", "Border", "Health"})
@@ -1327,6 +1343,7 @@ do
 		record.enemyStatusLesserFrostStackLabel = statusLesserFrostStackLabel
 		record.enemyStatusGreaterFrostLabel = statusGreaterFrostLabel
 		record.enemyStatusGreaterFrostStackLabel = statusGreaterFrostStackLabel
+		record.enemyStatusStunLabel = statusStunLabel
 		record.enemyStatusSlowLabel = nil
 		record.enemyStatusTimeStoppedLabel = nil
 		record.enemyFreezeHighlight = freezeHighlight
@@ -1388,6 +1405,7 @@ do
 			greaterFrostStacks = math.max(1, math.floor(tonumber(record.enemyGreaterFrostData.stacks) or 1))
 		end
 		local greaterFrostActive = greaterFrostEndTime > now
+		local stunActive = typeof(record.enemyStunData) == "table" and (tonumber(record.enemyStunData.endTime) or 0) > now
 		local freezeActive = typeof(record.enemyFreezeData) == "table" and (tonumber(record.enemyFreezeData.endTime) or 0) > now
 		local executeThreshold = 0
 		if typeof(record.enemyFreezeData) == "table" then
@@ -1404,7 +1422,7 @@ do
 		end
 
 		if record.enemyStatusContainer then
-			record.enemyStatusContainer.Visible = frostbiteActive or lesserFrostActive or greaterFrostActive
+			record.enemyStatusContainer.Visible = frostbiteActive or lesserFrostActive or greaterFrostActive or stunActive
 		end
 		if record.enemyStatusFrostbiteLabel then
 			record.enemyStatusFrostbiteLabel.Visible = frostbiteActive
@@ -1449,6 +1467,12 @@ do
 			else
 				record.enemyStatusGreaterFrostStackLabel.Visible = false
 				record.enemyStatusGreaterFrostStackLabel.Text = ""
+			end
+		end
+		if record.enemyStatusStunLabel then
+			record.enemyStatusStunLabel.Visible = stunActive
+			if stunActive then
+				record.enemyStatusStunLabel.ImageTransparency = 0
 			end
 		end
 		if record.enemyFreezeHighlight then
@@ -3495,6 +3519,7 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	local spawnLesserFrostData: any = nil
 	local spawnGreaterFrostData: any = nil
 	local spawnFreezeData: any = nil
+	local spawnStunData: any = nil
 	local spawnSlowData: any = nil
 	local spawnSlowExpiresAt: number? = nil
 	local spawnTimeStopped = false
@@ -3517,6 +3542,9 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		end
 		if typeof(entityData.EnemyFreeze) == "table" then
 			spawnFreezeData = entityData.EnemyFreeze
+		end
+		if typeof(entityData.EnemyStun) == "table" then
+			spawnStunData = entityData.EnemyStun
 		end
 		if typeof(entityData.EnemySlow) == "table" then
 			spawnSlowData = entityData.EnemySlow
@@ -3704,6 +3732,7 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			enemyLesserFrostData = spawnLesserFrostData,
 			enemyGreaterFrostData = spawnGreaterFrostData,
 			enemyFreezeData = spawnFreezeData,
+			enemyStunData = spawnStunData,
 			enemySlowData = spawnSlowData,
 			enemySlowExpiresAt = spawnSlowExpiresAt,
 			enemyTimeStopped = false,
@@ -4030,6 +4059,11 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 			record.enemyFreezeData = entityData.EnemyFreeze
 		elseif entityData.EnemyFreeze ~= nil then
 			record.enemyFreezeData = nil
+		end
+		if typeof(entityData.EnemyStun) == "table" then
+			record.enemyStunData = entityData.EnemyStun
+		elseif entityData.EnemyStun ~= nil then
+			record.enemyStunData = nil
 		end
 	end
 	if record.entityType == "Enemy" and typeof(entityData.EnemySlow) == "table" then

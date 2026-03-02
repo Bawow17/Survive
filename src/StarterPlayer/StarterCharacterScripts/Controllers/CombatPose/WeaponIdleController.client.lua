@@ -18,7 +18,8 @@ local ATTR_ACTIVE_WALK_WINDOW = "StarterWeaponActiveWalkWindow"
 local ATTR_LOCAL_M1_ACTIVE = "WeaponM1ActiveLocal"
 local ATTR_LOCAL_M2_CAST_ACTIVE = "WeaponM2CastActiveLocal"
 local ATTR_LOCAL_M2_CAST_SERIAL = "WeaponM2CastSerialLocal"
-local ATTR_LOCAL_SHARED_LOCKOUT_END = "WeaponSharedLockoutEndLocal"
+local ATTR_WEAPON_M2_CHARGES = "StarterWeaponM2Charges"
+local ATTR_WEAPON_M2_RECHARGE_END = "StarterWeaponM2RechargeEnd"
 local ATTR_LOCAL_M2_AIM_DIRECTION = "WeaponM2AimDirectionLocal"
 local ATTR_LOCAL_ATTACK_LOCK = "WeaponAttackLockLocal"
 local ATTR_LOCAL_WEAPON_ACTIVE = "WeaponPrimaryActiveLocal"
@@ -413,9 +414,11 @@ local function updateWeaponAnimationState(dt: number?)
 	local m2Casting = characterModel:GetAttribute(ATTR_LOCAL_M2_CAST_ACTIVE) == true
 	local m2CastSerialValue = characterModel:GetAttribute(ATTR_LOCAL_M2_CAST_SERIAL)
 	local m2CastSerial = if typeof(m2CastSerialValue) == "number" then m2CastSerialValue else nil
-	local lockoutEndValue = characterModel:GetAttribute(ATTR_LOCAL_SHARED_LOCKOUT_END)
-	local lockoutEnd = if typeof(lockoutEndValue) == "number" then lockoutEndValue else nil
-	local lockoutActive = lockoutEnd ~= nil and lockoutEnd > tick()
+	local currentChargesValue = characterModel:GetAttribute(ATTR_WEAPON_M2_CHARGES)
+	local currentCharges = if typeof(currentChargesValue) == "number" then currentChargesValue else 1
+	local rechargeEndValue = characterModel:GetAttribute(ATTR_WEAPON_M2_RECHARGE_END)
+	local rechargeEnd = if typeof(rechargeEndValue) == "number" then rechargeEndValue else 0
+	local reloading = currentCharges <= 0 and rechargeEnd > tick()
 	local sprinting = isSprintTrackPlaying()
 	if sprinting and lastShotTime ~= nil then
 		-- Entering sprint cancels the weapon-active animation window.
@@ -486,7 +489,7 @@ local function updateWeaponAnimationState(dt: number?)
 		m2FacingLockActive = false
 	end
 
-	if lockoutActive then
+	if reloading then
 		stopTrack(idle)
 		stopTrack(walk)
 		stopTrack(m1)

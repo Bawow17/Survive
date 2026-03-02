@@ -19,6 +19,7 @@ export type SettingsV1 = {
 	controls: {
 		settingsHotkeyEnabled: boolean,
 		toggleSprintMode: boolean,
+		activatableM2FromCursor: boolean,
 	},
 }
 
@@ -41,6 +42,7 @@ local DEFAULTS: SettingsV1 = {
 	controls = {
 		settingsHotkeyEnabled = true,
 		toggleSprintMode = true,
+		activatableM2FromCursor = false,
 	},
 }
 
@@ -105,6 +107,7 @@ local function sanitizeInternal(raw: any): SettingsV1
 		controls = {
 			settingsHotkeyEnabled = asBoolean(controls.settingsHotkeyEnabled, DEFAULTS.controls.settingsHotkeyEnabled),
 			toggleSprintMode = asBoolean(controls.toggleSprintMode, DEFAULTS.controls.toggleSprintMode),
+			activatableM2FromCursor = asBoolean(controls.activatableM2FromCursor, DEFAULTS.controls.activatableM2FromCursor),
 		},
 	}
 end
@@ -157,6 +160,9 @@ local function mergeKnown(base: SettingsV1, patch: any): SettingsV1
 		end
 		if incoming.toggleSprintMode ~= nil then
 			merged.controls.toggleSprintMode = incoming.toggleSprintMode
+		end
+		if incoming.activatableM2FromCursor ~= nil then
+			merged.controls.activatableM2FromCursor = incoming.activatableM2FromCursor
 		end
 	end
 

@@ -3,7 +3,8 @@
 -- Regenerates health after a delay following damage
 
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
-local CombatScaling = require(game.ReplicatedStorage.Shared.CombatScaling)
+local RunItems = require(game.ServerScriptService.Balance.RunItems)
+local RegenMath = require(game.ReplicatedStorage.Shared.RegenMath)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 
 local HealthRegenSystem = {}
@@ -11,6 +12,7 @@ local HealthRegenSystem = {}
 local world: any
 local Components: any
 local DirtyService: any
+local ItemSystem: any
 
 local Health: any
 local HealthRegen: any
@@ -25,21 +27,25 @@ function HealthRegenSystem.init(worldRef: any, components: any, dirtyService: an
 	world = worldRef
 	Components = components
 	DirtyService = dirtyService
-	
+
 	Health = Components.Health
 	HealthRegen = Components.HealthRegen
 	PassiveEffects = Components.PassiveEffects
 	_PlayerStats = Components.PlayerStats
 	Level = Components.Level
-	
+
 	-- Create cached query
 	playerQuery = world:query(Components.Health, Components.HealthRegen, Components.PlayerStats, Components.PassiveEffects):cached()
+end
+
+function HealthRegenSystem.setItemSystem(itemSystemRef: any)
+	ItemSystem = itemSystemRef
 end
 
 -- Call this when player takes damage to reset regen delay
 function HealthRegenSystem.onPlayerDamaged(playerEntity: number)
 	local currentTime = GameTimeSystem.getGameTime()
-	
+
 	-- Get or create HealthRegen component
 	local healthRegen = world:get(playerEntity, HealthRegen)
 	if not healthRegen then
@@ -51,7 +57,7 @@ function HealthRegenSystem.onPlayerDamaged(playerEntity: number)
 		healthRegen.lastDamageTime = currentTime
 		healthRegen.isRegenerating = false
 	end
-	
+
 	DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
 end
 
@@ -59,27 +65,28 @@ function HealthRegenSystem.step(dt: number)
 	if not world then
 		return
 	end
-	
+
 	local currentTime = GameTimeSystem.getGameTime()
-	
+	local coilCfg = RunItems.Definitions[RunItems.Ids.RegenerationCoil].regenCoil
+
 	-- Process all players
 	for playerEntity, health, healthRegen, playerStats, passiveEffects in playerQuery do
 		-- Validate player
 		if not playerStats or not playerStats.player or not playerStats.player.Parent then
 			continue
 		end
-		
+
 		-- Skip health regen if player is dead
 		local pauseState = world:get(playerEntity, Components.PlayerPauseState)
 		if pauseState and pauseState.pauseReason == "death" then
-			continue  -- Dead players don't regenerate health
+			continue
 		end
-		
+
 		-- Don't regen if at max health
 		if health.current >= health.max then
 			continue
 		end
-		
+
 		-- Initialize healthRegen if needed
 		if not healthRegen or not healthRegen.lastDamageTime then
 			healthRegen = {
@@ -89,52 +96,19 @@ function HealthRegenSystem.step(dt: number)
 			DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
 			continue
 		end
-		
-		-- Calculate time since damage
+
 		local timeSinceDamage = currentTime - healthRegen.lastDamageTime
-		
-		-- SCALING REGEN SYSTEM:
-		-- First 1 second: No healing (0%)
-		-- After 1 second: Scale from 0% to 100% over remaining delay time
-		-- Example with 5s delay: 0-1s = 0%, 1-5s = scale 0→100%, 5s+ = 100%
-		
-		local INITIAL_NO_HEAL_DURATION = 1.0  -- No healing for first 1 second
-		local regenMultiplier = 0
-		
-		if timeSinceDamage < INITIAL_NO_HEAL_DURATION then
-			-- First 1 second: No healing
-			regenMultiplier = 0
-			if healthRegen.isRegenerating then
-				healthRegen.isRegenerating = false
-				DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
-			end
-			continue
-		else
-			local regenDelayMult = passiveEffects and passiveEffects.regenDelayMultiplier or 1.0
-			local regenDelay = PlayerBalance.HealthRegenDelay * regenDelayMult
-			if timeSinceDamage < regenDelay then
-				-- Scaling phase: scale from 0% to 100%
-				local scalingDuration = regenDelay - INITIAL_NO_HEAL_DURATION
-				local scalingElapsed = timeSinceDamage - INITIAL_NO_HEAL_DURATION
-				regenMultiplier = scalingDuration > 0 and (scalingElapsed / scalingDuration) or 1.0
-				regenMultiplier = math.clamp(regenMultiplier, 0, 1)
-				
-				if not healthRegen.isRegenerating then
-					healthRegen.isRegenerating = true
-					DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
-				end
-			else
-				-- Full delay passed: 100% regen rate
-				regenMultiplier = 1.0
-				
-				if not healthRegen.isRegenerating then
-					healthRegen.isRegenerating = true
-					DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
-				end
-			end
+		local regenDelay = RegenMath.getEffectiveRegenDelay(passiveEffects, PlayerBalance)
+		local regenRampMultiplier = RegenMath.getRegenRampMultiplier(timeSinceDamage, regenDelay)
+		local shouldBeRegenerating = regenRampMultiplier > 0
+		if healthRegen.isRegenerating ~= shouldBeRegenerating then
+			healthRegen.isRegenerating = shouldBeRegenerating
+			DirtyService.setIfChanged(world, playerEntity, HealthRegen, healthRegen, "HealthRegen")
 		end
-		
-		-- Apply regeneration with multiplier + flat bonus
+		if regenRampMultiplier <= 0 then
+			continue
+		end
+
 		local playerLevel = 1
 		if Level then
 			local levelComponent = world:get(playerEntity, Level)
@@ -143,29 +117,36 @@ function HealthRegenSystem.step(dt: number)
 			end
 		end
 
-		local passiveRegenMult = passiveEffects and passiveEffects.regenMultiplier or 1.0
-		local regenFlat = passiveEffects and passiveEffects.regenFlatBonus or 0
-		local baseRegen = CombatScaling.getBaseRegenAtLevel(playerLevel, PlayerBalance)
-		local regenRate = (baseRegen * passiveRegenMult) + regenFlat
-		if regenRate <= 0 then
+		local coilStacks = 0
+		if ItemSystem and ItemSystem.getItemCount then
+			coilStacks = ItemSystem.getItemCount(playerEntity, RunItems.Ids.RegenerationCoil)
+		end
+
+		local currentRegenPerSecond = RegenMath.getCurrentRegenPerSecond(playerLevel, passiveEffects, timeSinceDamage, {
+			playerBalance = PlayerBalance,
+			coilStacks = coilStacks,
+			coilBasePerStack = coilCfg.baseFlatRegenPerStack,
+			coilOutOfCombatPerStack = coilCfg.outOfCombatFlatRegenPerStack,
+			coilOutOfCombatDelay = coilCfg.outOfCombatDelay,
+		})
+		if currentRegenPerSecond <= 0 then
 			continue
 		end
-		local regenAmount = regenRate * dt * regenMultiplier
+
+		local regenAmount = currentRegenPerSecond * dt
 		local newHealth = math.min(health.current + regenAmount, health.max)
-		
-		-- Update ECS health
+
 		DirtyService.setIfChanged(world, playerEntity, Health, {
 			current = newHealth,
-			max = health.max
+			max = health.max,
 		}, "Health")
-		
-		-- Update Roblox Humanoid health
+
 		local player = playerStats.player
 		local character = player.Character
 		if character then
 			local humanoid = character:FindFirstChildOfClass("Humanoid")
 			if humanoid and humanoid.Health > 0 then
-				humanoid.Health = math.min(humanoid.Health + regenAmount, humanoid.MaxHealth)
+				humanoid.Health = math.min(newHealth, humanoid.MaxHealth)
 			end
 		end
 	end

@@ -13,13 +13,18 @@ local Overheal: any
 local PlayerStats: any
 local Health: any
 
-local DEFAULT_OVERHEAL_DECAY_RATE = 1.0
+local BASE_OVERHEAL_DECAY_RATE = 0.3
+local OVERHEAL_DECAY_FRACTION = 0.05
 
 -- Remote for notifying clients of overheal changes
 local OverhealUpdate: RemoteEvent
 
 -- Cached query for players with overheal
 local overhealQuery: any
+
+local function calculateOverhealDecayRate(totalOverhealAmount: number): number
+	return BASE_OVERHEAL_DECAY_RATE + (math.max(totalOverhealAmount, 0) * OVERHEAL_DECAY_FRACTION)
+end
 
 function OverhealSystem.init(worldRef: any, components: any, dirtyService: any)
 	world = worldRef
@@ -80,7 +85,7 @@ function OverhealSystem.grantOverheal(playerEntity: number, amount: number)
 	local overhealData = {
 		current = newAmount,
 		max = newAmount,
-		decayRate = DEFAULT_OVERHEAL_DECAY_RATE,
+		decayRate = calculateOverhealDecayRate(newAmount),
 	}
 	
 	-- Use world:set directly to ensure component is set immediately
@@ -157,7 +162,15 @@ function OverhealSystem.step(dt: number)
 		end
 		
 		-- Decay overheal
-		local decayAmount = (overheal.decayRate or DEFAULT_OVERHEAL_DECAY_RATE) * dt
+		local decayRate = overheal.decayRate
+		if typeof(decayRate) ~= "number" or decayRate < 0 then
+			local totalOverhealAmount = if typeof(overheal.max) == "number" and overheal.max > 0
+				then overheal.max
+				else overheal.current
+			decayRate = calculateOverhealDecayRate(totalOverhealAmount)
+			overheal.decayRate = decayRate
+		end
+		local decayAmount = decayRate * dt
 		overheal.current = math.max(0, overheal.current - decayAmount)
 		
 		if overheal.current <= 0.1 then

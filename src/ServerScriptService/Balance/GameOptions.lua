@@ -17,8 +17,10 @@ return {
 	Debug = {
 		Enabled = true,
 		InvincibleEnemyDiagnostics = false,
-		EnemyVisualHitboxDiagnostics = true,
+		EnemyVisualHitboxDiagnostics = false,
 		EnemyColliderOverlay = true,
+		PoolInitializationLogs = false,
+		CommonItemDiagnostics = false,
 		LastHitDamageDiagnostics = false,
 		ModMenu = {
 			AllowedUserIds = {},

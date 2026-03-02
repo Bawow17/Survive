@@ -25,6 +25,7 @@ local world: any = nil
 local Components: any = nil
 local DirtyService: any = nil
 local ECSWorldService: any = nil
+local ItemSystemRef: any = nil
 
 local playerEntityQuery: any
 local playerEntityCache: {[Player]: number} = setmetatable({}, { __mode = "k" })
@@ -103,6 +104,10 @@ function AbilitySystemBase.init(worldRef: any, components: any, dirtyService: an
 	ECSWorldService = ecsWorldService
 	ensureEnemyQuery()
 	playerEntityQuery = world:query(Components.PlayerStats):cached()
+end
+
+function AbilitySystemBase.setItemSystem(itemSystem: any)
+	ItemSystemRef = itemSystem
 end
 
 local function resolvePlayerEntity(player: Player): number?
@@ -697,6 +702,9 @@ function AbilitySystemBase.createProjectile(
 	local scaledCollisionRadius = baseCollisionRadius * (balance.scale or 1)
 
 	local ownerEntity = ownerEntityOverride or resolvePlayerEntity(owner)
+	if ownerEntity and ItemSystemRef and ItemSystemRef.onAbilityUsed then
+		ItemSystemRef.onAbilityUsed(ownerEntity, abilityId)
+	end
 	local homing = nil
 	if balance.targetingMode == 3 then
 		homing = {

@@ -31,6 +31,23 @@ local FALLBACK_NAME_COLOR_HEX = "#000000"
 local ITEM_SLOT_BY_ID = {
 	fuse_bomb = "FuseBombImageLabel",
 	silver_ninja_star_of_the_brilliant_light = "SilverNinjaStaroftheBrilliantLightImageLabel",
+	historic_timmy_gun = "HistoricTimmyGunImageLabel",
+	teddy_bloxpin = "TeddyBloxpinImageLabel",
+	regeneration_coil = "RegenerationCoilViewportFrame",
+	healing_potion = "HealingPotionViewportFrame",
+	laser_electrocutor = "LaserElectrocutorViewportFrame",
+	builders_club_hard_hat = "BuildersClubHardHatViewportFrame",
+	pepperoni_pizza = "PepperoniPizzaViewportFrame",
+	delete_tool = "DeleteToolViewportFrame",
+	adurite_cape = "AduriteCapeViewportFrame",
+	speed_coil = "SpeedCoilViewportFrame",
+	bloxy_cola = "BloxyColaViewportFrame",
+	cheezburger = "CheezburgerViewportFrame",
+	bloxiade = "BloxiadeViewportFrame",
+	cake = "CakeViewportFrame",
+	energy_sword = "EnergySwordViewportFrame",
+	magic_8_ball = "Magic8BallViewportFrame",
+	apple = "AppleViewportFrame",
 }
 
 type PromptBindings = {

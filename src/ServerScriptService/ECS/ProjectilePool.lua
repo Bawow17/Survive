@@ -17,13 +17,14 @@ local world: any
 local Components: any
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
 local DEBUG = GameOptions.Debug and GameOptions.Debug.Enabled
+local POOL_INIT_LOGS = GameOptions.Debug and GameOptions.Debug.PoolInitializationLogs or false
 
 function ProjectilePool.init(worldRef: any, components: any)
 	world = worldRef
 	Components = components
 	
 	-- Pre-allocate 10000 projectile entities on startup
-	if DEBUG then
+	if POOL_INIT_LOGS then
 		print("[ProjectilePool] Initializing pool with " .. MAX_POOL_SIZE .. " entities...")
 	end
 	for i = 1, MAX_POOL_SIZE do
@@ -31,7 +32,7 @@ function ProjectilePool.init(worldRef: any, components: any)
 		table.insert(pool, entity)
 	end
 	poolCount = MAX_POOL_SIZE
-	if DEBUG then
+	if POOL_INIT_LOGS then
 		print("[ProjectilePool] Pool initialized: " .. poolCount .. "/" .. MAX_POOL_SIZE .. " available")
 		print("[ProjectilePool] Will warn when usage exceeds " .. (POOL_WARNING_THRESHOLD * 100) .. "%")
 	end

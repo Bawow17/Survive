@@ -40,6 +40,7 @@ local _Target
 local _PlayerStats
 local _EnemyTimeStopped
 local _EnemyFreeze
+local _EnemyStun
 
 -- State constants
 local S_APPROACH = 1
@@ -255,6 +256,7 @@ function ChargerAISystem.init(worldRef: any, components: any, dirtyService: any)
 	_PlayerStats = Components.PlayerStats
 	_EnemyTimeStopped = Components.EnemyTimeStopped
 	_EnemyFreeze = Components.EnemyFreeze
+	_EnemyStun = Components.EnemyStun
 	
 	-- Create cached queries for performance (JECS best practice)
 	-- CRITICAL: Exclude dead enemies (with DeathAnimation) from AI processing
@@ -643,6 +645,11 @@ function ChargerAISystem.step(dt: number)
 		end
 		local freezeData = _EnemyFreeze and world:get(entity, _EnemyFreeze)
 		if freezeData and (freezeData.endTime or 0) > tick() then
+			setVelocity(entity, { x = 0, y = 0, z = 0 })
+			continue
+		end
+		local stunData = _EnemyStun and world:get(entity, _EnemyStun)
+		if stunData and (stunData.endTime or 0) > tick() then
 			setVelocity(entity, { x = 0, y = 0, z = 0 })
 			continue
 		end

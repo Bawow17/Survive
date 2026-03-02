@@ -9,6 +9,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local PlayerBalance = require(game.ServerScriptService.Balance.PlayerBalance)
 local GameOptions = require(game.ServerScriptService.Balance.GameOptions)
+local RunItems = require(game.ServerScriptService.Balance.RunItems)
 
 local world: any
 local Components: any
@@ -284,9 +285,117 @@ local function applyDirectPlayerHeal(playerEntity: number, healAmount: number)
 	if sourceStats and sourceStats.player and sourceStats.player.Character then
 		local humanoid = sourceStats.player.Character:FindFirstChildOfClass("Humanoid")
 		if humanoid then
-			humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + healAmount)
+			humanoid.Health = math.min(humanoid.MaxHealth, healed)
 		end
 	end
+end
+
+local function applyBuildersClubHardHatReduction(targetEntity: number, damageAmount: number): number
+	if damageAmount <= 0 or not ItemSystem or not ItemSystem.getItemCount then
+		return damageAmount
+	end
+
+	local stacks = ItemSystem.getItemCount(targetEntity, RunItems.Ids.BuildersClubHardHat)
+	if typeof(stacks) ~= "number" or stacks <= 0 then
+		return damageAmount
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.BuildersClubHardHat].buildersClubHardHat
+	local reduction = cfg.baseDamageReduction + (math.max(0, stacks - 1) * cfg.damageReductionPerAdditionalStack)
+	local reduced = damageAmount - reduction
+	if reduced <= 0 then
+		return cfg.minimumAppliedDamage
+	end
+	return reduced
+end
+
+local function tryBlockWithMagic8Ball(targetEntity: number, damageAmount: number, isPlayer: boolean): boolean
+	if damageAmount <= 0 or not isPlayer or not ItemSystem or not ItemSystem.getItemCount then
+		return false
+	end
+
+	local stacks = ItemSystem.getItemCount(targetEntity, RunItems.Ids.Magic8Ball)
+	if typeof(stacks) ~= "number" or stacks <= 0 then
+		return false
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.Magic8Ball].magic8Ball
+	local extraStacks = math.max(0, stacks - 1)
+	local chance = 1 - ((1 - cfg.baseBlockChance) * ((1 - cfg.blockChancePerAdditionalStack) ^ extraStacks))
+	chance = math.clamp(chance, 0, 1)
+	if chance <= 0 then
+		return false
+	end
+
+	return RNG:NextNumber() <= chance
+end
+
+local function applyDeleteToolBonus(sourceEntity: number?, targetEntity: number, damageAmount: number, health: {[string]: any}?): number
+	if damageAmount <= 0 or not sourceEntity or not isPlayerSourceEntity(sourceEntity) then
+		return damageAmount
+	end
+	if not ItemSystem or not ItemSystem.getItemCount then
+		return damageAmount
+	end
+	if not health or typeof(health.current) ~= "number" or typeof(health.max) ~= "number" or health.max <= 0 then
+		return damageAmount
+	end
+
+	local stacks = ItemSystem.getItemCount(sourceEntity, RunItems.Ids.DeleteTool)
+	if typeof(stacks) ~= "number" or stacks <= 0 then
+		return damageAmount
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.DeleteTool].deleteTool
+	if (health.current / health.max) < cfg.triggerHealthThreshold then
+		return damageAmount
+	end
+
+	local extraStacks = math.max(0, stacks - 1)
+	local bonusMultiplier = 1 + cfg.baseBonusDamageMultiplier + (cfg.bonusDamagePerAdditionalStack * extraStacks)
+	return damageAmount * bonusMultiplier
+end
+
+local function applyEnergySwordBonus(sourceEntity: number?, targetEntity: number, damageAmount: number, isEnemy: boolean): number
+	if damageAmount <= 0 or not sourceEntity or not isEnemy or not isPlayerSourceEntity(sourceEntity) then
+		return damageAmount
+	end
+
+	local sourceEffects = world:get(sourceEntity, PassiveEffects)
+	if not sourceEffects then
+		return damageAmount
+	end
+
+	local closeRangeDamageMultiplier = sourceEffects.closeRangeDamageMultiplier
+	if typeof(closeRangeDamageMultiplier) ~= "number" or closeRangeDamageMultiplier <= 1.0 then
+		return damageAmount
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.EnergySword].energySword
+	local sourcePos = world:get(sourceEntity, Position)
+	local targetPos = world:get(targetEntity, Position)
+	if not sourcePos or not targetPos then
+		return damageAmount
+	end
+	if typeof(sourcePos.x) ~= "number"
+		or typeof(sourcePos.y) ~= "number"
+		or typeof(sourcePos.z) ~= "number"
+		or typeof(targetPos.x) ~= "number"
+		or typeof(targetPos.y) ~= "number"
+		or typeof(targetPos.z) ~= "number"
+	then
+		return damageAmount
+	end
+
+	local dx = sourcePos.x - targetPos.x
+	local dy = sourcePos.y - targetPos.y
+	local dz = sourcePos.z - targetPos.z
+	local distance = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+	if distance > cfg.range then
+		return damageAmount
+	end
+
+	return damageAmount * closeRangeDamageMultiplier
 end
 
 local function updateEnemyAggro(enemyEntity: number, sourceEntity: number, appliedDamage: number, maxHealth: number)
@@ -475,6 +584,10 @@ function DamageSystem.applyDamage(
 		return false, false  -- Damage blocked by invincibility
 	end
 
+	if tryBlockWithMagic8Ball(targetEntity, damageAmount, isPlayer and not isEnemy) then
+		return false, false
+	end
+
 	-- Apply shared RoR2-style armor to the target.
 	if isPlayer then
 		local targetEffects = world:get(targetEntity, PassiveEffects)
@@ -483,6 +596,7 @@ function DamageSystem.applyDamage(
 			playerArmor += sanitizeArmorValue(targetEffects.armor)
 		end
 		damageAmount = damageAmount * getArmorDamageMultiplier(playerArmor)
+		damageAmount = applyBuildersClubHardHatReduction(targetEntity, damageAmount)
 	elseif isEnemy then
 		local enemyArmorData = EnemyArmor and world:get(targetEntity, EnemyArmor)
 		local enemyArmor = 0
@@ -495,6 +609,8 @@ function DamageSystem.applyDamage(
 	-- Apply player offensive modifiers (crit)
 	local wasCrit = false
 	if isEnemy and sourceEntity and isPlayerSourceEntity(sourceEntity) then
+		damageAmount = applyEnergySwordBonus(sourceEntity, targetEntity, damageAmount, isEnemy)
+
 		local sourceEffects = world:get(sourceEntity, PassiveEffects)
 		if sourceEffects then
 			local critChance = normalizeCritChance(sourceEffects.critChance)
@@ -561,27 +677,6 @@ function DamageSystem.applyDamage(
 		end
 	end
 	
-	-- Track ability damage for player sources (only count damage to enemies)
-	if sourceEntity and abilityId and isEnemy and isPlayerSourceEntity(sourceEntity) then
-		local currentStats = world:get(sourceEntity, Components.AbilityDamageStats)
-		local damageStats = {}
-		if currentStats and typeof(currentStats) == "table" then
-			for key, value in pairs(currentStats) do
-				damageStats[key] = value
-			end
-		end
-
-		-- Accumulate damage for this ability
-		damageStats[abilityId] = (damageStats[abilityId] or 0) + damageAmount
-		DirtyService.setIfChanged(world, sourceEntity, Components.AbilityDamageStats, damageStats, "AbilityDamageStats")
-	end
-	
-	-- Track session damage for player sources (damage to enemies)
-	if sourceEntity and isEnemy and isPlayerSourceEntity(sourceEntity) then
-		local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
-		SessionStatsTracker.trackDamage(sourceEntity, damageAmount, abilityId)
-	end
-	
 	-- Get health component
 	local health = world:get(targetEntity, Health)
 	if not health then
@@ -592,6 +687,30 @@ function DamageSystem.applyDamage(
 			end
 		end
 		return false, false
+	end
+
+	if isEnemy then
+		damageAmount = applyDeleteToolBonus(sourceEntity, targetEntity, damageAmount, health)
+	end
+
+	-- Track ability damage for player sources (only count damage to enemies)
+	if sourceEntity and abilityId and isEnemy and isPlayerSourceEntity(sourceEntity) then
+		local currentStats = world:get(sourceEntity, Components.AbilityDamageStats)
+		local damageStats = {}
+		if currentStats and typeof(currentStats) == "table" then
+			for key, value in pairs(currentStats) do
+				damageStats[key] = value
+			end
+		end
+
+		damageStats[abilityId] = (damageStats[abilityId] or 0) + damageAmount
+		DirtyService.setIfChanged(world, sourceEntity, Components.AbilityDamageStats, damageStats, "AbilityDamageStats")
+	end
+
+	-- Track session damage for player sources (damage to enemies)
+	if sourceEntity and isEnemy and isPlayerSourceEntity(sourceEntity) then
+		local SessionStatsTracker = require(game.ServerScriptService.ECS.Systems.SessionStatsTracker)
+		SessionStatsTracker.trackDamage(sourceEntity, damageAmount, abilityId)
 	end
 
 	-- Update per-enemy aggro tracking (player damage only)
@@ -846,10 +965,7 @@ function DamageSystem.applyDamage(
 				local humanoid = character:FindFirstChildOfClass("Humanoid")
 				-- Only apply damage if humanoid exists and is alive
 				if humanoid and humanoid.Health > 0.01 then
-					-- Use remaining damage after overheal absorption
-					-- Clamp humanoid health to minimum 0.01
-					local newHumanoidHealth = math.max(humanoid.Health - remainingDamage, 0.01)
-					humanoid.Health = newHumanoidHealth
+					humanoid.Health = math.max(newHealth, 0.01)
 					
 					-- Notify HealthRegenSystem that player took damage
 					local HealthRegenSystem = require(game.ServerScriptService.ECS.Systems.HealthRegenSystem)
