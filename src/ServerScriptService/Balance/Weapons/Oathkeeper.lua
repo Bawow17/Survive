@@ -15,8 +15,8 @@ return {
 	tracerLifetime = 0.6,
 	tracerFadeDuration = 0.5,
 	showPrimaryCooldown = false,
-	primaryIconKey = "weapon:Oathkeeper",
-	secondaryIconKey = "MagicBolt",
+	primaryIconKey = "weapon:HeavyTrigger",
+	secondaryIconKey = "weapon:PowerSurge",
 	usesCooldownMultiplier = true,
 	usesDamageMultiplier = true,
 	assetPaths = {

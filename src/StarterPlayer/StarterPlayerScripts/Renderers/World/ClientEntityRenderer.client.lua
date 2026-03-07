@@ -143,6 +143,12 @@ type RenderRecord = {
 	enemyLesserFrostData: any?,
 	enemyGreaterFrostData: any?,
 	enemyFreezeData: any?,
+	enemyLesserFlameData: any?,
+	enemyGreaterFlameData: any?,
+	enemyLesserPoisonData: any?,
+	enemyGreaterPoisonData: any?,
+	enemyBleedData: any?,
+	enemyExecuteThresholdData: any?,
 	enemyStunData: any?,
 	enemySlowData: any?,
 	enemySlowExpiresAt: number?,
@@ -157,6 +163,16 @@ type RenderRecord = {
 	enemyStatusLesserFrostStackLabel: TextLabel?,
 	enemyStatusGreaterFrostLabel: ImageLabel?,
 	enemyStatusGreaterFrostStackLabel: TextLabel?,
+	enemyStatusLesserFlameLabel: ImageLabel?,
+	enemyStatusLesserFlameStackLabel: TextLabel?,
+	enemyStatusGreaterFlameLabel: ImageLabel?,
+	enemyStatusGreaterFlameStackLabel: TextLabel?,
+	enemyStatusLesserPoisonLabel: ImageLabel?,
+	enemyStatusLesserPoisonStackLabel: TextLabel?,
+	enemyStatusGreaterPoisonLabel: ImageLabel?,
+	enemyStatusGreaterPoisonStackLabel: TextLabel?,
+	enemyStatusBleedLabel: ImageLabel?,
+	enemyStatusBleedStackLabel: TextLabel?,
 	enemyStatusStunLabel: ImageLabel?,
 	enemyStatusSlowLabel: TextLabel?,
 	enemyStatusTimeStoppedLabel: TextLabel?,
@@ -1140,6 +1156,16 @@ do
 		record.enemyStatusLesserFrostStackLabel = nil
 		record.enemyStatusGreaterFrostLabel = nil
 		record.enemyStatusGreaterFrostStackLabel = nil
+		record.enemyStatusLesserFlameLabel = nil
+		record.enemyStatusLesserFlameStackLabel = nil
+		record.enemyStatusGreaterFlameLabel = nil
+		record.enemyStatusGreaterFlameStackLabel = nil
+		record.enemyStatusLesserPoisonLabel = nil
+		record.enemyStatusLesserPoisonStackLabel = nil
+		record.enemyStatusGreaterPoisonLabel = nil
+		record.enemyStatusGreaterPoisonStackLabel = nil
+		record.enemyStatusBleedLabel = nil
+		record.enemyStatusBleedStackLabel = nil
 		record.enemyStatusStunLabel = nil
 		record.enemyStatusSlowLabel = nil
 		record.enemyStatusTimeStoppedLabel = nil
@@ -1249,10 +1275,20 @@ do
 		local frostbiteTemplate = getEnemyStatusTemplateInstance("FrostbiteStatusEffectImageLabel")
 		local lesserTemplate = getEnemyStatusTemplateInstance("LesserFrostStatusEffectImageLabel")
 		local greaterTemplate = getEnemyStatusTemplateInstance("GreaterFrostStatusEffectImageLabel")
+		local lesserFlameTemplate = getEnemyStatusTemplateInstance("LesserFlameStatusEffectImageLabel")
+		local greaterFlameTemplate = getEnemyStatusTemplateInstance("GreaterFlameStatusEffectImageLabel")
+		local lesserPoisonTemplate = getEnemyStatusTemplateInstance("LesserPoisonStatusEffectImageLabel")
+		local greaterPoisonTemplate = getEnemyStatusTemplateInstance("GreaterPoisonStatusEffectImageLabel")
+		local bleedTemplate = getEnemyStatusTemplateInstance("BleedStatusEffectImageLabel")
 		local stunTemplate = getEnemyStatusTemplateInstance("StunStatusEffectImageLabel")
 		local frostbiteExisting = statusContainerGui:FindFirstChild("FrostbiteStatusEffectImageLabel")
 		local lesserExisting = statusContainerGui:FindFirstChild("LesserFrostStatusEffectImageLabel")
 		local greaterExisting = statusContainerGui:FindFirstChild("GreaterFrostStatusEffectImageLabel")
+		local lesserFlameExisting = statusContainerGui:FindFirstChild("LesserFlameStatusEffectImageLabel")
+		local greaterFlameExisting = statusContainerGui:FindFirstChild("GreaterFlameStatusEffectImageLabel")
+		local lesserPoisonExisting = statusContainerGui:FindFirstChild("LesserPoisonStatusEffectImageLabel")
+		local greaterPoisonExisting = statusContainerGui:FindFirstChild("GreaterPoisonStatusEffectImageLabel")
+		local bleedExisting = statusContainerGui:FindFirstChild("BleedStatusEffectImageLabel")
 		local stunExisting = statusContainerGui:FindFirstChild("StunStatusEffectImageLabel")
 		local genericStatusSlot = statusContainerGui:FindFirstChild("StatusEffectImageLabel")
 		local slowLabel = statusContainerGui:FindFirstChild("StatusSlowLabel")
@@ -1263,6 +1299,16 @@ do
 			statusLabelSize = lesserExisting.Size
 		elseif greaterExisting and greaterExisting:IsA("GuiObject") then
 			statusLabelSize = greaterExisting.Size
+		elseif lesserFlameExisting and lesserFlameExisting:IsA("GuiObject") then
+			statusLabelSize = lesserFlameExisting.Size
+		elseif greaterFlameExisting and greaterFlameExisting:IsA("GuiObject") then
+			statusLabelSize = greaterFlameExisting.Size
+		elseif lesserPoisonExisting and lesserPoisonExisting:IsA("GuiObject") then
+			statusLabelSize = lesserPoisonExisting.Size
+		elseif greaterPoisonExisting and greaterPoisonExisting:IsA("GuiObject") then
+			statusLabelSize = greaterPoisonExisting.Size
+		elseif bleedExisting and bleedExisting:IsA("GuiObject") then
+			statusLabelSize = bleedExisting.Size
 		elseif stunExisting and stunExisting:IsA("GuiObject") then
 			statusLabelSize = stunExisting.Size
 		elseif frostbiteTemplate then
@@ -1271,6 +1317,16 @@ do
 			statusLabelSize = lesserTemplate.Size
 		elseif greaterTemplate then
 			statusLabelSize = greaterTemplate.Size
+		elseif lesserFlameTemplate then
+			statusLabelSize = lesserFlameTemplate.Size
+		elseif greaterFlameTemplate then
+			statusLabelSize = greaterFlameTemplate.Size
+		elseif lesserPoisonTemplate then
+			statusLabelSize = lesserPoisonTemplate.Size
+		elseif greaterPoisonTemplate then
+			statusLabelSize = greaterPoisonTemplate.Size
+		elseif bleedTemplate then
+			statusLabelSize = bleedTemplate.Size
 		elseif stunTemplate then
 			statusLabelSize = stunTemplate.Size
 		elseif genericStatusSlot and genericStatusSlot:IsA("GuiObject") then
@@ -1311,11 +1367,51 @@ do
 			statusLabelSize
 		)
 		local statusGreaterFrostStackLabel = if statusGreaterFrostLabel then ensureEnemyStatusStackLabel(statusGreaterFrostLabel) else nil
+		local statusLesserFlameLabel = ensureEnemyStatusTemplateImageLabel(
+			statusContainerGui,
+			"LesserFlameStatusEffectImageLabel",
+			"LesserFlameStatusEffectImageLabel",
+			4,
+			statusLabelSize
+		)
+		local statusLesserFlameStackLabel = if statusLesserFlameLabel then ensureEnemyStatusStackLabel(statusLesserFlameLabel) else nil
+		local statusGreaterFlameLabel = ensureEnemyStatusTemplateImageLabel(
+			statusContainerGui,
+			"GreaterFlameStatusEffectImageLabel",
+			"GreaterFlameStatusEffectImageLabel",
+			5,
+			statusLabelSize
+		)
+		local statusGreaterFlameStackLabel = if statusGreaterFlameLabel then ensureEnemyStatusStackLabel(statusGreaterFlameLabel) else nil
+		local statusLesserPoisonLabel = ensureEnemyStatusTemplateImageLabel(
+			statusContainerGui,
+			"LesserPoisonStatusEffectImageLabel",
+			"LesserPoisonStatusEffectImageLabel",
+			6,
+			statusLabelSize
+		)
+		local statusLesserPoisonStackLabel = if statusLesserPoisonLabel then ensureEnemyStatusStackLabel(statusLesserPoisonLabel) else nil
+		local statusGreaterPoisonLabel = ensureEnemyStatusTemplateImageLabel(
+			statusContainerGui,
+			"GreaterPoisonStatusEffectImageLabel",
+			"GreaterPoisonStatusEffectImageLabel",
+			7,
+			statusLabelSize
+		)
+		local statusGreaterPoisonStackLabel = if statusGreaterPoisonLabel then ensureEnemyStatusStackLabel(statusGreaterPoisonLabel) else nil
+		local statusBleedLabel = ensureEnemyStatusTemplateImageLabel(
+			statusContainerGui,
+			"BleedStatusEffectImageLabel",
+			"BleedStatusEffectImageLabel",
+			8,
+			statusLabelSize
+		)
+		local statusBleedStackLabel = if statusBleedLabel then ensureEnemyStatusStackLabel(statusBleedLabel) else nil
 		local statusStunLabel = ensureEnemyStatusTemplateImageLabel(
 			statusContainerGui,
 			"StunStatusEffectImageLabel",
 			"StunStatusEffectImageLabel",
-			4,
+			9,
 			statusLabelSize
 		)
 		local freezeHighlight = ensureEnemyFreezeHighlight(record)
@@ -1343,6 +1439,16 @@ do
 		record.enemyStatusLesserFrostStackLabel = statusLesserFrostStackLabel
 		record.enemyStatusGreaterFrostLabel = statusGreaterFrostLabel
 		record.enemyStatusGreaterFrostStackLabel = statusGreaterFrostStackLabel
+		record.enemyStatusLesserFlameLabel = statusLesserFlameLabel
+		record.enemyStatusLesserFlameStackLabel = statusLesserFlameStackLabel
+		record.enemyStatusGreaterFlameLabel = statusGreaterFlameLabel
+		record.enemyStatusGreaterFlameStackLabel = statusGreaterFlameStackLabel
+		record.enemyStatusLesserPoisonLabel = statusLesserPoisonLabel
+		record.enemyStatusLesserPoisonStackLabel = statusLesserPoisonStackLabel
+		record.enemyStatusGreaterPoisonLabel = statusGreaterPoisonLabel
+		record.enemyStatusGreaterPoisonStackLabel = statusGreaterPoisonStackLabel
+		record.enemyStatusBleedLabel = statusBleedLabel
+		record.enemyStatusBleedStackLabel = statusBleedStackLabel
 		record.enemyStatusStunLabel = statusStunLabel
 		record.enemyStatusSlowLabel = nil
 		record.enemyStatusTimeStoppedLabel = nil
@@ -1405,13 +1511,48 @@ do
 			greaterFrostStacks = math.max(1, math.floor(tonumber(record.enemyGreaterFrostData.stacks) or 1))
 		end
 		local greaterFrostActive = greaterFrostEndTime > now
+		local lesserFlameEndTime = 0
+		local lesserFlameStacks = 1
+		if typeof(record.enemyLesserFlameData) == "table" then
+			lesserFlameEndTime = tonumber(record.enemyLesserFlameData.endTime) or 0
+			lesserFlameStacks = math.max(1, math.floor(tonumber(record.enemyLesserFlameData.stacks) or 1))
+		end
+		local lesserFlameActive = lesserFlameEndTime > now
+		local greaterFlameEndTime = 0
+		local greaterFlameStacks = 1
+		if typeof(record.enemyGreaterFlameData) == "table" then
+			greaterFlameEndTime = tonumber(record.enemyGreaterFlameData.endTime) or 0
+			greaterFlameStacks = math.max(1, math.floor(tonumber(record.enemyGreaterFlameData.stacks) or 1))
+		end
+		local greaterFlameActive = greaterFlameEndTime > now
+		local lesserPoisonEndTime = 0
+		local lesserPoisonStacks = 1
+		if typeof(record.enemyLesserPoisonData) == "table" then
+			lesserPoisonEndTime = tonumber(record.enemyLesserPoisonData.endTime) or 0
+			lesserPoisonStacks = math.max(1, math.floor(tonumber(record.enemyLesserPoisonData.stacks) or 1))
+		end
+		local lesserPoisonActive = lesserPoisonEndTime > now
+		local greaterPoisonEndTime = 0
+		local greaterPoisonStacks = 1
+		if typeof(record.enemyGreaterPoisonData) == "table" then
+			greaterPoisonEndTime = tonumber(record.enemyGreaterPoisonData.endTime) or 0
+			greaterPoisonStacks = math.max(1, math.floor(tonumber(record.enemyGreaterPoisonData.stacks) or 1))
+		end
+		local greaterPoisonActive = greaterPoisonEndTime > now
+		local bleedEndTime = 0
+		local bleedStacks = 1
+		if typeof(record.enemyBleedData) == "table" then
+			bleedEndTime = tonumber(record.enemyBleedData.endTime) or 0
+			bleedStacks = math.max(1, math.floor(tonumber(record.enemyBleedData.stacks) or 1))
+		end
+		local bleedActive = bleedEndTime > now
 		local stunActive = typeof(record.enemyStunData) == "table" and (tonumber(record.enemyStunData.endTime) or 0) > now
 		local freezeActive = typeof(record.enemyFreezeData) == "table" and (tonumber(record.enemyFreezeData.endTime) or 0) > now
 		local executeThreshold = 0
-		if typeof(record.enemyFreezeData) == "table" then
-			executeThreshold = math.clamp(tonumber(record.enemyFreezeData.executeThreshold) or 0, 0, 1)
+		if typeof(record.enemyExecuteThresholdData) == "table" then
+			executeThreshold = math.clamp(tonumber(record.enemyExecuteThresholdData.threshold) or 0, 0, 1)
 		end
-		local executeActive = freezeActive and executeThreshold > 0
+		local executeActive = executeThreshold > 0
 
 		if record.enemyExecuteRangeBar then
 			record.enemyExecuteRangeBar.Visible = executeActive
@@ -1422,7 +1563,17 @@ do
 		end
 
 		if record.enemyStatusContainer then
-			record.enemyStatusContainer.Visible = frostbiteActive or lesserFrostActive or greaterFrostActive or stunActive
+			record.enemyStatusContainer.Visible = (
+				frostbiteActive
+				or lesserFrostActive
+				or greaterFrostActive
+				or lesserFlameActive
+				or greaterFlameActive
+				or lesserPoisonActive
+				or greaterPoisonActive
+				or bleedActive
+				or stunActive
+			)
 		end
 		if record.enemyStatusFrostbiteLabel then
 			record.enemyStatusFrostbiteLabel.Visible = frostbiteActive
@@ -1467,6 +1618,81 @@ do
 			else
 				record.enemyStatusGreaterFrostStackLabel.Visible = false
 				record.enemyStatusGreaterFrostStackLabel.Text = ""
+			end
+		end
+		if record.enemyStatusLesserFlameLabel then
+			record.enemyStatusLesserFlameLabel.Visible = lesserFlameActive
+			if lesserFlameActive then
+				record.enemyStatusLesserFlameLabel.ImageTransparency = 0
+			end
+		end
+		if record.enemyStatusLesserFlameStackLabel then
+			if lesserFlameActive and lesserFlameStacks >= 2 then
+				record.enemyStatusLesserFlameStackLabel.Visible = true
+				record.enemyStatusLesserFlameStackLabel.Text = tostring(lesserFlameStacks)
+			else
+				record.enemyStatusLesserFlameStackLabel.Visible = false
+				record.enemyStatusLesserFlameStackLabel.Text = ""
+			end
+		end
+		if record.enemyStatusGreaterFlameLabel then
+			record.enemyStatusGreaterFlameLabel.Visible = greaterFlameActive
+			if greaterFlameActive then
+				record.enemyStatusGreaterFlameLabel.ImageTransparency = 0
+			end
+		end
+		if record.enemyStatusGreaterFlameStackLabel then
+			if greaterFlameActive and greaterFlameStacks >= 2 then
+				record.enemyStatusGreaterFlameStackLabel.Visible = true
+				record.enemyStatusGreaterFlameStackLabel.Text = tostring(greaterFlameStacks)
+			else
+				record.enemyStatusGreaterFlameStackLabel.Visible = false
+				record.enemyStatusGreaterFlameStackLabel.Text = ""
+			end
+		end
+		if record.enemyStatusLesserPoisonLabel then
+			record.enemyStatusLesserPoisonLabel.Visible = lesserPoisonActive
+			if lesserPoisonActive then
+				record.enemyStatusLesserPoisonLabel.ImageTransparency = 0
+			end
+		end
+		if record.enemyStatusLesserPoisonStackLabel then
+			if lesserPoisonActive and lesserPoisonStacks >= 2 then
+				record.enemyStatusLesserPoisonStackLabel.Visible = true
+				record.enemyStatusLesserPoisonStackLabel.Text = tostring(lesserPoisonStacks)
+			else
+				record.enemyStatusLesserPoisonStackLabel.Visible = false
+				record.enemyStatusLesserPoisonStackLabel.Text = ""
+			end
+		end
+		if record.enemyStatusGreaterPoisonLabel then
+			record.enemyStatusGreaterPoisonLabel.Visible = greaterPoisonActive
+			if greaterPoisonActive then
+				record.enemyStatusGreaterPoisonLabel.ImageTransparency = 0
+			end
+		end
+		if record.enemyStatusGreaterPoisonStackLabel then
+			if greaterPoisonActive and greaterPoisonStacks >= 2 then
+				record.enemyStatusGreaterPoisonStackLabel.Visible = true
+				record.enemyStatusGreaterPoisonStackLabel.Text = tostring(greaterPoisonStacks)
+			else
+				record.enemyStatusGreaterPoisonStackLabel.Visible = false
+				record.enemyStatusGreaterPoisonStackLabel.Text = ""
+			end
+		end
+		if record.enemyStatusBleedLabel then
+			record.enemyStatusBleedLabel.Visible = bleedActive
+			if bleedActive then
+				record.enemyStatusBleedLabel.ImageTransparency = 0
+			end
+		end
+		if record.enemyStatusBleedStackLabel then
+			if bleedActive and bleedStacks >= 2 then
+				record.enemyStatusBleedStackLabel.Visible = true
+				record.enemyStatusBleedStackLabel.Text = tostring(bleedStacks)
+			else
+				record.enemyStatusBleedStackLabel.Visible = false
+				record.enemyStatusBleedStackLabel.Text = ""
 			end
 		end
 		if record.enemyStatusStunLabel then
@@ -3519,6 +3745,12 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 	local spawnLesserFrostData: any = nil
 	local spawnGreaterFrostData: any = nil
 	local spawnFreezeData: any = nil
+	local spawnLesserFlameData: any = nil
+	local spawnGreaterFlameData: any = nil
+	local spawnLesserPoisonData: any = nil
+	local spawnGreaterPoisonData: any = nil
+	local spawnBleedData: any = nil
+	local spawnExecuteThresholdData: any = nil
 	local spawnStunData: any = nil
 	local spawnSlowData: any = nil
 	local spawnSlowExpiresAt: number? = nil
@@ -3542,6 +3774,24 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 		end
 		if typeof(entityData.EnemyFreeze) == "table" then
 			spawnFreezeData = entityData.EnemyFreeze
+		end
+		if typeof(entityData.EnemyLesserFlame) == "table" then
+			spawnLesserFlameData = entityData.EnemyLesserFlame
+		end
+		if typeof(entityData.EnemyGreaterFlame) == "table" then
+			spawnGreaterFlameData = entityData.EnemyGreaterFlame
+		end
+		if typeof(entityData.EnemyLesserPoison) == "table" then
+			spawnLesserPoisonData = entityData.EnemyLesserPoison
+		end
+		if typeof(entityData.EnemyGreaterPoison) == "table" then
+			spawnGreaterPoisonData = entityData.EnemyGreaterPoison
+		end
+		if typeof(entityData.EnemyBleed) == "table" then
+			spawnBleedData = entityData.EnemyBleed
+		end
+		if typeof(entityData.EnemyExecuteThreshold) == "table" then
+			spawnExecuteThresholdData = entityData.EnemyExecuteThreshold
 		end
 		if typeof(entityData.EnemyStun) == "table" then
 			spawnStunData = entityData.EnemyStun
@@ -3732,6 +3982,12 @@ local function handleEntitySync(entityId: string | number, rawData: {[string]: a
 			enemyLesserFrostData = spawnLesserFrostData,
 			enemyGreaterFrostData = spawnGreaterFrostData,
 			enemyFreezeData = spawnFreezeData,
+			enemyLesserFlameData = spawnLesserFlameData,
+			enemyGreaterFlameData = spawnGreaterFlameData,
+			enemyLesserPoisonData = spawnLesserPoisonData,
+			enemyGreaterPoisonData = spawnGreaterPoisonData,
+			enemyBleedData = spawnBleedData,
+			enemyExecuteThresholdData = spawnExecuteThresholdData,
 			enemyStunData = spawnStunData,
 			enemySlowData = spawnSlowData,
 			enemySlowExpiresAt = spawnSlowExpiresAt,
@@ -4059,6 +4315,36 @@ local function handleEntityUpdate(entityId: string | number, rawData: {[string]:
 			record.enemyFreezeData = entityData.EnemyFreeze
 		elseif entityData.EnemyFreeze ~= nil then
 			record.enemyFreezeData = nil
+		end
+		if typeof(entityData.EnemyLesserFlame) == "table" then
+			record.enemyLesserFlameData = entityData.EnemyLesserFlame
+		elseif entityData.EnemyLesserFlame ~= nil then
+			record.enemyLesserFlameData = nil
+		end
+		if typeof(entityData.EnemyGreaterFlame) == "table" then
+			record.enemyGreaterFlameData = entityData.EnemyGreaterFlame
+		elseif entityData.EnemyGreaterFlame ~= nil then
+			record.enemyGreaterFlameData = nil
+		end
+		if typeof(entityData.EnemyLesserPoison) == "table" then
+			record.enemyLesserPoisonData = entityData.EnemyLesserPoison
+		elseif entityData.EnemyLesserPoison ~= nil then
+			record.enemyLesserPoisonData = nil
+		end
+		if typeof(entityData.EnemyGreaterPoison) == "table" then
+			record.enemyGreaterPoisonData = entityData.EnemyGreaterPoison
+		elseif entityData.EnemyGreaterPoison ~= nil then
+			record.enemyGreaterPoisonData = nil
+		end
+		if typeof(entityData.EnemyBleed) == "table" then
+			record.enemyBleedData = entityData.EnemyBleed
+		elseif entityData.EnemyBleed ~= nil then
+			record.enemyBleedData = nil
+		end
+		if typeof(entityData.EnemyExecuteThreshold) == "table" then
+			record.enemyExecuteThresholdData = entityData.EnemyExecuteThreshold
+		elseif entityData.EnemyExecuteThreshold ~= nil then
+			record.enemyExecuteThresholdData = nil
 		end
 		if typeof(entityData.EnemyStun) == "table" then
 			record.enemyStunData = entityData.EnemyStun

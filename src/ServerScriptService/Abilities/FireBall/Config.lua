@@ -65,7 +65,7 @@ return {
 	explosionDamage = 150, -- Explosion damage (separate from direct hit)
 	explosionDelay = 0.05, -- Delay before damage hitbox activates (seconds)
 	explosionDuration = 0.5, -- How long explosion VFX lasts (seconds)
-	explosionModelPath = "ServerStorage.ContentDrawer.Attacks.Abilties.FireBall.Explosion",
+	explosionModelPath = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.FireBall.Explosion",
 	explosionScale = 2.5, -- Explosion size multiplier (separate from projectile scale)
 	
 	-- Animation configuration (Server-Only - Asset IDs)

@@ -63,7 +63,7 @@ local MANA_GRAPPLE_CONFIG = {
 	grappleDampStrength = 2.0,
 }
 
-local ICE_TRACER_CONFIG = {
+local GLACIAL_PATH_CONFIG = {
 	distance = 103.125,
 	duration = 35 / 60,
 	cooldown = 3.0,
@@ -75,7 +75,15 @@ local ICE_TRACER_CONFIG = {
 	pathFadeDuration = 0.35,
 	feetOffset = 3.0,
 }
-local ICE_TRACER_RNG = Random.new()
+local GLACIAL_PATH_RNG = Random.new()
+local GLACIAL_PATH_PATH_PRIMARY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.IcePath"
+local GLACIAL_PATH_PATH_LEGACY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IcePath"
+local GLACIAL_PATH_BEAM1_PRIMARY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.IceLaser"
+local GLACIAL_PATH_BEAM1_LEGACY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser"
+local GLACIAL_PATH_BEAM2_PRIMARY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.IceLaser2"
+local GLACIAL_PATH_BEAM2_LEGACY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser2"
+local GLACIAL_PATH_ANIMATION_PRIMARY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.GlacialPathAnimation"
+local GLACIAL_PATH_ANIMATION_LEGACY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceTracerAnimation"
 
 -- Active trail (for cleanup)
 local activeTrail: Trail? = nil
@@ -88,7 +96,7 @@ local activeGravityConnection: RBXScriptConnection? = nil
 -- Remote events for server communication
 local MobilityActivateRemote: RemoteEvent
 local ShieldBashHitRemote: RemoteEvent
-local IceTracerPathReplicateRemote: RemoteEvent
+local GlacialPathReplicateRemote: RemoteEvent
 local EntityUpdate: RemoteEvent
 
 -- Player state
@@ -142,32 +150,32 @@ local serverGrappleManaPointPath: string? = nil
 local serverGrappleEndPath: string? = nil
 local serverGrappleBeamPath: string? = nil
 
--- Ice Tracer config values from server
-local serverIceTracerPathPath: string? = nil
-local serverIceTracerBeam1Path: string? = nil
-local serverIceTracerBeam2Path: string? = nil
-local serverIceTracerAnimationPath: string? = nil
-local serverIceTracerPathSpacing: number? = nil
-local serverIceTracerRampFrames: number? = nil
-local serverIceTracerTotalFrames: number? = nil
-local serverIceTracerLookAheadDistance: number? = nil
-local serverIceTracerPartLifetime: number? = nil
+-- Glacial Path config values from server
+local serverGlacialPathPathPath: string? = nil
+local serverGlacialPathBeam1Path: string? = nil
+local serverGlacialPathBeam2Path: string? = nil
+local serverGlacialPathAnimationPath: string? = nil
+local serverGlacialPathPathSpacing: number? = nil
+local serverGlacialPathRampFrames: number? = nil
+local serverGlacialPathTotalFrames: number? = nil
+local serverGlacialPathLookAheadDistance: number? = nil
+local serverGlacialPathPartLifetime: number? = nil
 
 -- Track if currently dashing (prevent spam)
 local isDashing = false
 local activeDashConnection: RBXScriptConnection? = nil
-local activeIceTracerConnection: RBXScriptConnection? = nil
-local activeIceTracerLinearVelocity: LinearVelocity? = nil
-local iceTracerCastCounter = 0
-local activeIceTracerBeams: {{beam: Beam, container: Instance}} = {}
-local activeIceTracerPathParts: {Instance} = {}
-local activeIceTracerTrack: AnimationTrack? = nil
-local activeIceTracerTrackStoppedConnection: RBXScriptConnection? = nil
-local iceTracerJumpWasEnabled: boolean? = nil
-local activeIceTracerFacingLockConnection: RBXScriptConnection? = nil
-local iceTracerFacingDirection: Vector3? = nil
-local iceTracerAutoRotateWasEnabled: boolean? = nil
-local clearIceTracerVisuals: (boolean?) -> ()
+local activeGlacialPathConnection: RBXScriptConnection? = nil
+local activeGlacialPathLinearVelocity: LinearVelocity? = nil
+local glacialPathCastCounter = 0
+local activeGlacialPathBeams: {{beam: Beam, container: Instance}} = {}
+local activeGlacialPathPathParts: {Instance} = {}
+local activeGlacialPathTrack: AnimationTrack? = nil
+local activeGlacialPathTrackStoppedConnection: RBXScriptConnection? = nil
+local glacialPathJumpWasEnabled: boolean? = nil
+local activeGlacialPathFacingLockConnection: RBXScriptConnection? = nil
+local glacialPathFacingDirection: Vector3? = nil
+local glacialPathAutoRotateWasEnabled: boolean? = nil
+local clearGlacialPathVisuals: (boolean?) -> ()
 local ATTR_LOCAL_UTILITY_FACING_LOCK = "UtilityFacingLockActiveLocal"
 local ATTR_LOCAL_UTILITY_CAST_ACTIVE = "UtilityCastActiveLocal"
 local ATTR_LOCAL_MOBILITY_VELOCITY_OVERRIDE = "MobilityVelocityOverrideLocal"
@@ -665,6 +673,26 @@ local function findInstanceByPath(path: string): Instance?
 		end
 	end
 	return if typeof(current) == "Instance" then current else nil
+end
+
+local function resolveExistingMobilityAssetPath(primaryPath: string?, fallbackPath: string?): string?
+	if typeof(primaryPath) == "string" and primaryPath ~= "" then
+		if findInstanceByPath(primaryPath) or findModelByPath(primaryPath) then
+			return primaryPath
+		end
+	end
+	if typeof(fallbackPath) == "string" and fallbackPath ~= "" then
+		if findInstanceByPath(fallbackPath) or findModelByPath(fallbackPath) then
+			return fallbackPath
+		end
+	end
+	if typeof(primaryPath) == "string" and primaryPath ~= "" then
+		return primaryPath
+	end
+	if typeof(fallbackPath) == "string" and fallbackPath ~= "" then
+		return fallbackPath
+	end
+	return nil
 end
 
 local function cloneBlinkObject(path: string, position: Vector3): Instance?
@@ -1314,7 +1342,7 @@ end
 local function initRemotes()
 	local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
 	MobilityActivateRemote = remotes:WaitForChild("MobilityActivate")
-	IceTracerPathReplicateRemote = remotes:WaitForChild("IceTracerPathReplicate")
+	GlacialPathReplicateRemote = remotes:WaitForChild("GlacialPathReplicate")
 	-- ShieldBashHit is created by server on first use, don't wait for it
 	ShieldBashHitRemote = remotes:FindFirstChild("ShieldBashHit")
 	
@@ -1356,14 +1384,14 @@ local function initRemotes()
 			if typeof(data) == "table" then
 				local previousMobility = equippedMobility
 				equippedMobility = data.equippedMobility
-				if previousMobility == "IceTracer" and equippedMobility ~= "IceTracer" then
-					if activeIceTracerConnection then
-						activeIceTracerConnection:Disconnect()
-						activeIceTracerConnection = nil
+				if previousMobility == "GlacialPath" and equippedMobility ~= "GlacialPath" then
+					if activeGlacialPathConnection then
+						activeGlacialPathConnection:Disconnect()
+						activeGlacialPathConnection = nil
 					end
 					isDashing = false
 					setMobilityVelocityOverrideLocal(false)
-					clearIceTracerVisuals()
+					clearGlacialPathVisuals()
 				end
 				
 				
@@ -1454,33 +1482,33 @@ local function initRemotes()
 					serverGrappleBeamPath = data.grappleBeamPath
 				end
 
-				-- Ice Tracer specific fields
-				if typeof(data.iceTracerPathPath) == "string" then
-					serverIceTracerPathPath = data.iceTracerPathPath
+				-- Glacial Path specific fields
+				if typeof(data.glacialPathPathPath) == "string" then
+					serverGlacialPathPathPath = data.glacialPathPathPath
 				end
-				if typeof(data.iceTracerBeam1Path) == "string" then
-					serverIceTracerBeam1Path = data.iceTracerBeam1Path
+				if typeof(data.glacialPathBeam1Path) == "string" then
+					serverGlacialPathBeam1Path = data.glacialPathBeam1Path
 				end
-				if typeof(data.iceTracerBeam2Path) == "string" then
-					serverIceTracerBeam2Path = data.iceTracerBeam2Path
+				if typeof(data.glacialPathBeam2Path) == "string" then
+					serverGlacialPathBeam2Path = data.glacialPathBeam2Path
 				end
-				if typeof(data.iceTracerAnimationPath) == "string" then
-					serverIceTracerAnimationPath = data.iceTracerAnimationPath
+				if typeof(data.glacialPathAnimationPath) == "string" then
+					serverGlacialPathAnimationPath = data.glacialPathAnimationPath
 				end
-				if typeof(data.iceTracerPathSpacing) == "number" then
-					serverIceTracerPathSpacing = data.iceTracerPathSpacing
+				if typeof(data.glacialPathPathSpacing) == "number" then
+					serverGlacialPathPathSpacing = data.glacialPathPathSpacing
 				end
-				if typeof(data.iceTracerRampFrames) == "number" then
-					serverIceTracerRampFrames = data.iceTracerRampFrames
+				if typeof(data.glacialPathRampFrames) == "number" then
+					serverGlacialPathRampFrames = data.glacialPathRampFrames
 				end
-				if typeof(data.iceTracerTotalFrames) == "number" then
-					serverIceTracerTotalFrames = data.iceTracerTotalFrames
+				if typeof(data.glacialPathTotalFrames) == "number" then
+					serverGlacialPathTotalFrames = data.glacialPathTotalFrames
 				end
-				if typeof(data.iceTracerLookAheadDistance) == "number" then
-					serverIceTracerLookAheadDistance = data.iceTracerLookAheadDistance
+				if typeof(data.glacialPathLookAheadDistance) == "number" then
+					serverGlacialPathLookAheadDistance = data.glacialPathLookAheadDistance
 				end
-				if typeof(data.iceTracerPartLifetime) == "number" then
-					serverIceTracerPartLifetime = data.iceTracerPartLifetime
+				if typeof(data.glacialPathPartLifetime) == "number" then
+					serverGlacialPathPartLifetime = data.glacialPathPartLifetime
 				end
 				
 				-- Shield Bash specific fields
@@ -1597,34 +1625,34 @@ local function isOnCooldownValue(cooldown: number): boolean
 	return isOnCooldown({ cooldown = cooldown })
 end
 
-local function getIceTracerConfig()
+local function getGlacialPathConfig()
 	return {
-		distance = (serverDistance or ICE_TRACER_CONFIG.distance) * mobilityDistanceMultiplier,
-		duration = serverDuration or ICE_TRACER_CONFIG.duration,
-		cooldown = serverCooldown or ICE_TRACER_CONFIG.cooldown,
-		pathSpacing = serverIceTracerPathSpacing or ICE_TRACER_CONFIG.pathSpacing,
-		rampFrames = math.max(1, math.floor((serverIceTracerRampFrames or ICE_TRACER_CONFIG.rampFrames) + 0.5)),
-		totalFrames = math.max(1, math.floor((serverIceTracerTotalFrames or ICE_TRACER_CONFIG.totalFrames) + 0.5)),
-		lookAheadDistance = serverIceTracerLookAheadDistance or ICE_TRACER_CONFIG.lookAheadDistance,
-		pathPartLifetime = serverIceTracerPartLifetime or ICE_TRACER_CONFIG.pathPartLifetime,
-		pathFadeDuration = ICE_TRACER_CONFIG.pathFadeDuration,
+		distance = (serverDistance or GLACIAL_PATH_CONFIG.distance) * mobilityDistanceMultiplier,
+		duration = serverDuration or GLACIAL_PATH_CONFIG.duration,
+		cooldown = serverCooldown or GLACIAL_PATH_CONFIG.cooldown,
+		pathSpacing = serverGlacialPathPathSpacing or GLACIAL_PATH_CONFIG.pathSpacing,
+		rampFrames = math.max(1, math.floor((serverGlacialPathRampFrames or GLACIAL_PATH_CONFIG.rampFrames) + 0.5)),
+		totalFrames = math.max(1, math.floor((serverGlacialPathTotalFrames or GLACIAL_PATH_CONFIG.totalFrames) + 0.5)),
+		lookAheadDistance = serverGlacialPathLookAheadDistance or GLACIAL_PATH_CONFIG.lookAheadDistance,
+		pathPartLifetime = serverGlacialPathPartLifetime or GLACIAL_PATH_CONFIG.pathPartLifetime,
+		pathFadeDuration = GLACIAL_PATH_CONFIG.pathFadeDuration,
 	}
 end
 
-local function setIceTracerJumpLocked(locked: boolean)
+local function setGlacialPathJumpLocked(locked: boolean)
 	if not humanoid then
 		if not locked then
-			iceTracerJumpWasEnabled = nil
+			glacialPathJumpWasEnabled = nil
 		end
 		return
 	end
 
 	if locked then
-		if iceTracerJumpWasEnabled == nil then
+		if glacialPathJumpWasEnabled == nil then
 			local ok, wasEnabled = pcall(function()
 				return humanoid:GetStateEnabled(Enum.HumanoidStateType.Jumping)
 			end)
-			iceTracerJumpWasEnabled = if ok and typeof(wasEnabled) == "boolean" then wasEnabled else true
+			glacialPathJumpWasEnabled = if ok and typeof(wasEnabled) == "boolean" then wasEnabled else true
 		end
 		humanoid.Jump = false
 		pcall(function()
@@ -1633,16 +1661,16 @@ local function setIceTracerJumpLocked(locked: boolean)
 		return
 	end
 
-	if iceTracerJumpWasEnabled ~= nil then
-		local restoreEnabled = iceTracerJumpWasEnabled
-		iceTracerJumpWasEnabled = nil
+	if glacialPathJumpWasEnabled ~= nil then
+		local restoreEnabled = glacialPathJumpWasEnabled
+		glacialPathJumpWasEnabled = nil
 		pcall(function()
 			humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, restoreEnabled)
 		end)
 	end
 end
 
-local function setIceTracerFacingLocked(locked: boolean, direction: Vector3?)
+local function setGlacialPathFacingLocked(locked: boolean, direction: Vector3?)
 	local characterModel = character
 	if characterModel then
 		characterModel:SetAttribute(ATTR_LOCAL_UTILITY_FACING_LOCK, locked)
@@ -1657,32 +1685,32 @@ local function setIceTracerFacingLocked(locked: boolean, direction: Vector3?)
 		if lockDirection and lockDirection.Magnitude > 1e-4 then
 			lockDirection = Vector3.new(lockDirection.X, 0, lockDirection.Z)
 			if lockDirection.Magnitude > 1e-4 then
-				iceTracerFacingDirection = lockDirection.Unit
+				glacialPathFacingDirection = lockDirection.Unit
 			end
 		end
 
-		if not iceTracerFacingDirection then
+		if not glacialPathFacingDirection then
 			local forward = rootPart.CFrame.LookVector
 			local horizontalForward = Vector3.new(forward.X, 0, forward.Z)
 			if horizontalForward.Magnitude > 1e-4 then
-				iceTracerFacingDirection = horizontalForward.Unit
+				glacialPathFacingDirection = horizontalForward.Unit
 			else
-				iceTracerFacingDirection = Vector3.new(0, 0, 1)
+				glacialPathFacingDirection = Vector3.new(0, 0, 1)
 			end
 		end
 
-		if iceTracerAutoRotateWasEnabled == nil then
-			iceTracerAutoRotateWasEnabled = humanoid.AutoRotate
+		if glacialPathAutoRotateWasEnabled == nil then
+			glacialPathAutoRotateWasEnabled = humanoid.AutoRotate
 		end
 		humanoid.AutoRotate = false
 
-		if activeIceTracerFacingLockConnection == nil then
-			activeIceTracerFacingLockConnection = RunService.Heartbeat:Connect(function()
+		if activeGlacialPathFacingLockConnection == nil then
+			activeGlacialPathFacingLockConnection = RunService.Heartbeat:Connect(function()
 				if not humanoid or humanoid.Health <= 0 or not rootPart or not rootPart.Parent then
 					return
 				end
 				humanoid.AutoRotate = false
-				local facing = iceTracerFacingDirection
+				local facing = glacialPathFacingDirection
 				if facing and facing.Magnitude > 1e-4 then
 					rootPart.CFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + facing)
 					rootPart.AssemblyAngularVelocity = Vector3.zero
@@ -1692,52 +1720,52 @@ local function setIceTracerFacingLocked(locked: boolean, direction: Vector3?)
 		return
 	end
 
-	if activeIceTracerFacingLockConnection then
-		activeIceTracerFacingLockConnection:Disconnect()
-		activeIceTracerFacingLockConnection = nil
+	if activeGlacialPathFacingLockConnection then
+		activeGlacialPathFacingLockConnection:Disconnect()
+		activeGlacialPathFacingLockConnection = nil
 	end
-	iceTracerFacingDirection = nil
+	glacialPathFacingDirection = nil
 
-	if humanoid and iceTracerAutoRotateWasEnabled ~= nil then
-		humanoid.AutoRotate = iceTracerAutoRotateWasEnabled
+	if humanoid and glacialPathAutoRotateWasEnabled ~= nil then
+		humanoid.AutoRotate = glacialPathAutoRotateWasEnabled
 	end
-	iceTracerAutoRotateWasEnabled = nil
+	glacialPathAutoRotateWasEnabled = nil
 end
 
-clearIceTracerVisuals = function(stopAnimation: boolean?)
-	local hadVelocityOverride = activeIceTracerLinearVelocity and activeIceTracerLinearVelocity.Parent ~= nil
-	if activeIceTracerLinearVelocity and activeIceTracerLinearVelocity.Parent then
-		activeIceTracerLinearVelocity:Destroy()
+clearGlacialPathVisuals = function(stopAnimation: boolean?)
+	local hadVelocityOverride = activeGlacialPathLinearVelocity and activeGlacialPathLinearVelocity.Parent ~= nil
+	if activeGlacialPathLinearVelocity and activeGlacialPathLinearVelocity.Parent then
+		activeGlacialPathLinearVelocity:Destroy()
 	end
-	activeIceTracerLinearVelocity = nil
+	activeGlacialPathLinearVelocity = nil
 	if hadVelocityOverride then
 		setMobilityVelocityOverrideLocal(false)
 	end
-	setIceTracerJumpLocked(false)
+	setGlacialPathJumpLocked(false)
 
 	if stopAnimation == nil then
 		stopAnimation = true
 	end
 
-	if stopAnimation and activeIceTracerTrack then
+	if stopAnimation and activeGlacialPathTrack then
 		setUtilityCastActive(false)
-		setIceTracerFacingLocked(false)
-		if activeIceTracerTrackStoppedConnection then
-			activeIceTracerTrackStoppedConnection:Disconnect()
-			activeIceTracerTrackStoppedConnection = nil
+		setGlacialPathFacingLocked(false)
+		if activeGlacialPathTrackStoppedConnection then
+			activeGlacialPathTrackStoppedConnection:Disconnect()
+			activeGlacialPathTrackStoppedConnection = nil
 		end
 		pcall(function()
-			activeIceTracerTrack:Stop(0.05)
-			activeIceTracerTrack:Destroy()
+			activeGlacialPathTrack:Stop(0.05)
+			activeGlacialPathTrack:Destroy()
 		end)
-		activeIceTracerTrack = nil
-	elseif not stopAnimation and not activeIceTracerTrack then
+		activeGlacialPathTrack = nil
+	elseif not stopAnimation and not activeGlacialPathTrack then
 		setUtilityCastActive(false)
 		-- Fallback when animation asset fails to play: don't keep facing lock indefinitely.
-		setIceTracerFacingLocked(false)
+		setGlacialPathFacingLocked(false)
 	end
 
-	for _, beamState in ipairs(activeIceTracerBeams) do
+	for _, beamState in ipairs(activeGlacialPathBeams) do
 		if beamState.beam and beamState.beam.Parent then
 			beamState.beam.Enabled = false
 		end
@@ -1745,17 +1773,20 @@ clearIceTracerVisuals = function(stopAnimation: boolean?)
 			beamState.container:Destroy()
 		end
 	end
-	table.clear(activeIceTracerBeams)
-	table.clear(activeIceTracerPathParts)
+	table.clear(activeGlacialPathBeams)
+	table.clear(activeGlacialPathPathParts)
 end
 
-local function startIceTracerAnimation()
+local function startGlacialPathAnimation()
 	if not humanoid or humanoid.Health <= 0 then
 		setUtilityCastActive(false)
 		return false
 	end
 
-	local animationPath = serverIceTracerAnimationPath
+	local animationPath = resolveExistingMobilityAssetPath(
+		serverGlacialPathAnimationPath or GLACIAL_PATH_ANIMATION_PRIMARY,
+		GLACIAL_PATH_ANIMATION_LEGACY
+	)
 	if typeof(animationPath) ~= "string" or animationPath == "" then
 		setUtilityCastActive(false)
 		return false
@@ -1797,26 +1828,26 @@ local function startIceTracerAnimation()
 	if ok and track then
 		track.Priority = Enum.AnimationPriority.Action4
 		track.Looped = false
-		if activeIceTracerTrackStoppedConnection then
-			activeIceTracerTrackStoppedConnection:Disconnect()
-			activeIceTracerTrackStoppedConnection = nil
+		if activeGlacialPathTrackStoppedConnection then
+			activeGlacialPathTrackStoppedConnection:Disconnect()
+			activeGlacialPathTrackStoppedConnection = nil
 		end
-		activeIceTracerTrackStoppedConnection = track.Stopped:Connect(function()
+		activeGlacialPathTrackStoppedConnection = track.Stopped:Connect(function()
 			setUtilityCastActive(false)
-			setIceTracerFacingLocked(false)
-			if activeIceTracerTrack == track then
-				activeIceTracerTrack = nil
+			setGlacialPathFacingLocked(false)
+			if activeGlacialPathTrack == track then
+				activeGlacialPathTrack = nil
 			end
-			if activeIceTracerTrackStoppedConnection then
-				activeIceTracerTrackStoppedConnection:Disconnect()
-				activeIceTracerTrackStoppedConnection = nil
+			if activeGlacialPathTrackStoppedConnection then
+				activeGlacialPathTrackStoppedConnection:Disconnect()
+				activeGlacialPathTrackStoppedConnection = nil
 			end
 			pcall(function()
 				track:Destroy()
 			end)
 		end)
 		track:Play(0.05, 1, 1)
-		activeIceTracerTrack = track
+		activeGlacialPathTrack = track
 		setUtilityCastActive(true)
 		return true
 	end
@@ -1824,7 +1855,7 @@ local function startIceTracerAnimation()
 	return false
 end
 
-local function spawnIceTracerSegment(pathPath: string, position: Vector3, forward: Vector3, yawDeg: number, lifetime: number, fadeDuration: number): (Attachment?, any?)
+local function spawnGlacialPathSegment(pathPath: string, position: Vector3, forward: Vector3, yawDeg: number, lifetime: number, fadeDuration: number): (Attachment?, any?)
 	local segment = cloneBlinkObject(pathPath, position)
 	if not segment then
 		return nil, nil
@@ -1862,7 +1893,7 @@ local function spawnIceTracerSegment(pathPath: string, position: Vector3, forwar
 	end
 
 	scheduleInstanceFadeAndDestroy(segment, lifetime, fadeDuration)
-	table.insert(activeIceTracerPathParts, segment)
+	table.insert(activeGlacialPathPathParts, segment)
 
 	return segmentAttachment, {
 		position = position,
@@ -1871,7 +1902,7 @@ local function spawnIceTracerSegment(pathPath: string, position: Vector3, forwar
 	}
 end
 
-local function createIceTracerBeam(path: string?, name: string, startAttachment: Attachment, endAttachment: Attachment?): (Beam?, Instance?)
+local function createGlacialPathBeam(path: string?, name: string, startAttachment: Attachment, endAttachment: Attachment?): (Beam?, Instance?)
 	local beamContainer: Instance? = nil
 	local beam: Beam? = nil
 	if typeof(path) == "string" and path ~= "" then
@@ -1901,7 +1932,7 @@ local function createIceTracerBeam(path: string?, name: string, startAttachment:
 	return beam, beamContainer
 end
 
-local function executeIceTracer()
+local function executeGlacialPath()
 	if isDashing or isBlinking or isGrappling then
 		return false
 	end
@@ -1909,7 +1940,7 @@ local function executeIceTracer()
 		return false
 	end
 
-	local config = getIceTracerConfig()
+	local config = getGlacialPathConfig()
 	if isOnCooldown({ cooldown = config.cooldown }) then
 		return false
 	end
@@ -1943,15 +1974,24 @@ local function executeIceTracer()
 		return slideDirection
 	end
 
-	clearIceTracerVisuals()
-	if activeIceTracerConnection then
-		activeIceTracerConnection:Disconnect()
-		activeIceTracerConnection = nil
+	clearGlacialPathVisuals()
+	if activeGlacialPathConnection then
+		activeGlacialPathConnection:Disconnect()
+		activeGlacialPathConnection = nil
 	end
 
-	local pathPath = serverIceTracerPathPath or "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IcePath"
-	local beam1Path = serverIceTracerBeam1Path or "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser"
-	local beam2Path = serverIceTracerBeam2Path or "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser2"
+	local pathPath = resolveExistingMobilityAssetPath(
+		serverGlacialPathPathPath or GLACIAL_PATH_PATH_PRIMARY,
+		GLACIAL_PATH_PATH_LEGACY
+	)
+	local beam1Path = resolveExistingMobilityAssetPath(
+		serverGlacialPathBeam1Path or GLACIAL_PATH_BEAM1_PRIMARY,
+		GLACIAL_PATH_BEAM1_LEGACY
+	)
+	local beam2Path = resolveExistingMobilityAssetPath(
+		serverGlacialPathBeam2Path or GLACIAL_PATH_BEAM2_PRIMARY,
+		GLACIAL_PATH_BEAM2_LEGACY
+	)
 	local pathSpacing = math.max(0.1, config.pathSpacing)
 	local frameDuration = 1 / 60
 	local postEffectDurationSeconds = 3 / 60
@@ -1968,7 +2008,7 @@ local function executeIceTracer()
 	end
 
 	local linearVelocity = Instance.new("LinearVelocity")
-	linearVelocity.Name = "IceTracerLinearVelocity"
+	linearVelocity.Name = "GlacialPathLinearVelocity"
 	linearVelocity.Attachment0 = rootAttachment
 	linearVelocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
 	linearVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
@@ -1977,13 +2017,13 @@ local function executeIceTracer()
 	local slideSpeed = (config.distance / math.max(0.05, config.duration)) * 0.5525
 	linearVelocity.VectorVelocity = Vector3.new(slideDirection.X * slideSpeed, 0, slideDirection.Z * slideSpeed)
 	linearVelocity.Parent = rootPart
-	activeIceTracerLinearVelocity = linearVelocity
+	activeGlacialPathLinearVelocity = linearVelocity
 	setMobilityVelocityOverrideLocal(true)
 
 	isDashing = true
-	setIceTracerFacingLocked(true, slideDirection)
-	setIceTracerJumpLocked(true)
-	startIceTracerAnimation()
+	setGlacialPathFacingLocked(true, slideDirection)
+	setGlacialPathJumpLocked(true)
+	startGlacialPathAnimation()
 
 	if usingServerTime and serverGameTime then
 		local estimate = serverGameTime + math.max(0, tick() - lastGameTimeUpdate)
@@ -1992,10 +2032,10 @@ local function executeIceTracer()
 		lastUsedTime = tick()
 	end
 
-	MobilityActivateRemote:FireServer("IceTracer")
+	MobilityActivateRemote:FireServer("GlacialPath")
 
-	iceTracerCastCounter += 1
-	local castId = iceTracerCastCounter
+	glacialPathCastCounter += 1
+	local castId = glacialPathCastCounter
 	local startAttachment = findLeftArmGripAttachment(character) or rootAttachment
 	local latestAttachment: Attachment? = nil
 	local frameAccumulator = 0
@@ -2006,20 +2046,20 @@ local function executeIceTracer()
 	local effectsActive = true
 	local postEffectsElapsed = 0
 
-	local function endIceTracerEffects()
+	local function endGlacialPathEffects()
 		if not effectsActive then
 			return
 		end
 		effectsActive = false
 
-		for _, beamState in ipairs(activeIceTracerBeams) do
+		for _, beamState in ipairs(activeGlacialPathBeams) do
 			if beamState.beam and beamState.beam.Parent then
 				beamState.beam.Enabled = false
 			end
 		end
 
-		if IceTracerPathReplicateRemote then
-			IceTracerPathReplicateRemote:FireServer({
+		if GlacialPathReplicateRemote then
+			GlacialPathReplicateRemote:FireServer({
 				castId = castId,
 				segments = {},
 				isFinal = true,
@@ -2031,17 +2071,17 @@ local function executeIceTracer()
 		if not rootPart or not rootPart.Parent then
 			return
 		end
-		local startPos = rootPart.Position - Vector3.new(0, ICE_TRACER_CONFIG.feetOffset, 0)
-		local yaw = ICE_TRACER_RNG:NextNumber(0, 360)
-		local segmentAttachment, segmentData = spawnIceTracerSegment(pathPath, startPos, slideDirection, yaw, config.pathPartLifetime, config.pathFadeDuration)
+		local startPos = rootPart.Position - Vector3.new(0, GLACIAL_PATH_CONFIG.feetOffset, 0)
+		local yaw = GLACIAL_PATH_RNG:NextNumber(0, 360)
+		local segmentAttachment, segmentData = spawnGlacialPathSegment(pathPath, startPos, slideDirection, yaw, config.pathPartLifetime, config.pathFadeDuration)
 		if segmentAttachment then
 			latestAttachment = segmentAttachment
 		end
 		pathCursor = startPos
-		if segmentData and IceTracerPathReplicateRemote then
+		if segmentData and GlacialPathReplicateRemote then
 			task.defer(function()
-				if IceTracerPathReplicateRemote then
-					IceTracerPathReplicateRemote:FireServer({
+				if GlacialPathReplicateRemote then
+					GlacialPathReplicateRemote:FireServer({
 						castId = castId,
 						segments = { segmentData },
 						isFinal = false,
@@ -2053,13 +2093,13 @@ local function executeIceTracer()
 
 	emitInitialSegment()
 	if startAttachment and latestAttachment then
-		local beam1, container1 = createIceTracerBeam(beam1Path, "IceTracerBeam1", startAttachment, latestAttachment)
-		local beam2, container2 = createIceTracerBeam(beam2Path, "IceTracerBeam2", startAttachment, latestAttachment)
+		local beam1, container1 = createGlacialPathBeam(beam1Path, "GlacialPathBeam1", startAttachment, latestAttachment)
+		local beam2, container2 = createGlacialPathBeam(beam2Path, "GlacialPathBeam2", startAttachment, latestAttachment)
 		if beam1 and container1 then
-			table.insert(activeIceTracerBeams, { beam = beam1, container = container1 })
+			table.insert(activeGlacialPathBeams, { beam = beam1, container = container1 })
 		end
 		if beam2 and container2 then
-			table.insert(activeIceTracerBeams, { beam = beam2, container = container2 })
+			table.insert(activeGlacialPathBeams, { beam = beam2, container = container2 })
 		end
 	end
 
@@ -2073,8 +2113,8 @@ local function executeIceTracer()
 		local toTarget = targetPos - pathCursor
 		while toTarget.Magnitude >= pathSpacing do
 			local nextPos = pathCursor + toTarget.Unit * pathSpacing
-			local yaw = ICE_TRACER_RNG:NextNumber(0, 360)
-			local segmentAttachment, segmentData = spawnIceTracerSegment(pathPath, nextPos, slideDirection, yaw, config.pathPartLifetime, config.pathFadeDuration)
+			local yaw = GLACIAL_PATH_RNG:NextNumber(0, 360)
+			local segmentAttachment, segmentData = spawnGlacialPathSegment(pathPath, nextPos, slideDirection, yaw, config.pathPartLifetime, config.pathFadeDuration)
 			if segmentAttachment then
 				latestAttachment = segmentAttachment
 			end
@@ -2088,20 +2128,20 @@ local function executeIceTracer()
 		return created
 	end
 
-	activeIceTracerConnection = RunService.Heartbeat:Connect(function(dt)
+	activeGlacialPathConnection = RunService.Heartbeat:Connect(function(dt)
 		if not rootPart or not rootPart.Parent or not linearVelocity or not linearVelocity.Parent then
-			endIceTracerEffects()
+			endGlacialPathEffects()
 			if linearVelocity and linearVelocity.Parent then
 				linearVelocity:Destroy()
 			end
-			if activeIceTracerConnection then
-				activeIceTracerConnection:Disconnect()
-				activeIceTracerConnection = nil
+			if activeGlacialPathConnection then
+				activeGlacialPathConnection:Disconnect()
+				activeGlacialPathConnection = nil
 			end
-			activeIceTracerLinearVelocity = nil
+			activeGlacialPathLinearVelocity = nil
 			isDashing = false
 			setMobilityVelocityOverrideLocal(false)
-			clearIceTracerVisuals()
+			clearGlacialPathVisuals()
 			return
 		end
 
@@ -2120,7 +2160,7 @@ local function executeIceTracer()
 		if steerDirection.Magnitude > 1e-4 then
 			slideDirection = steerDirection
 			linearVelocity.VectorVelocity = Vector3.new(slideDirection.X * slideSpeed, 0, slideDirection.Z * slideSpeed)
-			setIceTracerFacingLocked(true, slideDirection)
+			setGlacialPathFacingLocked(true, slideDirection)
 		end
 
 		elapsedActive += dt
@@ -2133,15 +2173,15 @@ local function executeIceTracer()
 
 			local lookAheadAlpha = if frameIndex <= config.rampFrames then (frameIndex / config.rampFrames) else 1
 			local lookAhead = config.lookAheadDistance * lookAheadAlpha
-			local targetPos = rootPart.Position + (slideDirection * lookAhead) - Vector3.new(0, ICE_TRACER_CONFIG.feetOffset, 0)
+			local targetPos = rootPart.Position + (slideDirection * lookAhead) - Vector3.new(0, GLACIAL_PATH_CONFIG.feetOffset, 0)
 			local created = spawnSegmentsTowardTarget(targetPos)
 			for _, segment in ipairs(created) do
 				table.insert(frameSegments, segment)
 			end
 		end
 
-		if #frameSegments > 0 and IceTracerPathReplicateRemote then
-			IceTracerPathReplicateRemote:FireServer({
+		if #frameSegments > 0 and GlacialPathReplicateRemote then
+			GlacialPathReplicateRemote:FireServer({
 				castId = castId,
 				segments = frameSegments,
 				isFinal = false,
@@ -2150,7 +2190,7 @@ local function executeIceTracer()
 
 		if effectsActive and latestAttachment then
 			local currentStartAttachment = findLeftArmGripAttachment(character) or rootAttachment
-			for _, beamState in ipairs(activeIceTracerBeams) do
+			for _, beamState in ipairs(activeGlacialPathBeams) do
 				if beamState.beam and beamState.beam.Parent then
 					if currentStartAttachment then
 						beamState.beam.Attachment0 = currentStartAttachment
@@ -2162,7 +2202,7 @@ local function executeIceTracer()
 		end
 
 		if effectsActive and (elapsedActive >= config.duration or frameIndex >= config.totalFrames) then
-			endIceTracerEffects()
+			endGlacialPathEffects()
 		end
 
 		if not effectsActive then
@@ -2173,14 +2213,14 @@ local function executeIceTracer()
 			if linearVelocity and linearVelocity.Parent then
 				linearVelocity:Destroy()
 			end
-			activeIceTracerLinearVelocity = nil
-			if activeIceTracerConnection then
-				activeIceTracerConnection:Disconnect()
-				activeIceTracerConnection = nil
+			activeGlacialPathLinearVelocity = nil
+			if activeGlacialPathConnection then
+				activeGlacialPathConnection:Disconnect()
+				activeGlacialPathConnection = nil
 			end
 			isDashing = false
 			setMobilityVelocityOverrideLocal(false)
-			clearIceTracerVisuals(false)
+			clearGlacialPathVisuals(false)
 		end
 	end)
 
@@ -3121,8 +3161,8 @@ local function onMobilityKeyPressed()
 	
 	if equippedMobility == "Dash" then
 		return executeDash()
-	elseif equippedMobility == "IceTracer" then
-		return executeIceTracer()
+	elseif equippedMobility == "GlacialPath" then
+		return executeGlacialPath()
 	elseif equippedMobility == "ShieldBash" then
 		return executeDash()  -- Shield Bash uses the same dash function with combat logic
 	elseif equippedMobility == "DoubleJump" then
@@ -3183,11 +3223,11 @@ function isMobilityReadyNow(): boolean
 		end
 		local effectiveCooldown = serverCooldown or DASH_CONFIG.cooldown
 		return not isOnCooldown({ cooldown = effectiveCooldown })
-	elseif equippedMobility == "IceTracer" then
+	elseif equippedMobility == "GlacialPath" then
 		if isDashing or isBlinking or isGrappling then
 			return false
 		end
-		local config = getIceTracerConfig()
+		local config = getGlacialPathConfig()
 		return not isOnCooldown({ cooldown = config.cooldown })
 	elseif equippedMobility == "DoubleJump" then
 		if humanoid.FloorMaterial ~= Enum.Material.Air then
@@ -3309,11 +3349,11 @@ player.CharacterAdded:Connect(function(newCharacter)
 		activeDashConnection:Disconnect()
 		activeDashConnection = nil
 	end
-	if activeIceTracerConnection then
-		activeIceTracerConnection:Disconnect()
-		activeIceTracerConnection = nil
+	if activeGlacialPathConnection then
+		activeGlacialPathConnection:Disconnect()
+		activeGlacialPathConnection = nil
 	end
-	clearIceTracerVisuals()
+	clearGlacialPathVisuals()
 	
 	if activeBlinkConnection then
 		activeBlinkConnection:Disconnect()
@@ -3358,11 +3398,11 @@ local function setupPauseListeners()
 			pausedServerGameTime = serverGameTime
 		end
 
-		if activeIceTracerConnection then
-			activeIceTracerConnection:Disconnect()
-			activeIceTracerConnection = nil
+		if activeGlacialPathConnection then
+			activeGlacialPathConnection:Disconnect()
+			activeGlacialPathConnection = nil
 			isDashing = false
-			clearIceTracerVisuals()
+			clearGlacialPathVisuals()
 			setMobilityVelocityOverrideLocal(false)
 		end
 		setUtilityCastActive(false)

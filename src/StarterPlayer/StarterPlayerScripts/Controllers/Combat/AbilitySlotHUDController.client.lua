@@ -10,6 +10,7 @@ local playerGui = localPlayer:WaitForChild("PlayerGui")
 
 local sharedFolder = ReplicatedStorage:WaitForChild("Shared")
 local UpgradeIcons = require(sharedFolder:WaitForChild("UpgradeIcons"))
+local IconAssetResolver = require(sharedFolder:WaitForChild("IconAssetResolver"))
 
 local remotesFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
 local ecsRemotes = remotesFolder:WaitForChild("ECS")
@@ -41,8 +42,8 @@ local gameUnpaused = remotesFolder:WaitForChild("GameUnpaused")
 
 local PRIMARY_ABILITY_ID = "MagicBolt"
 local WEAPON_ID = "Oathkeeper"
-local PRIMARY_WEAPON_ICON_KEY = "weapon:Oathkeeper"
-local SECONDARY_WEAPON_ICON_KEY = "MagicBolt"
+local PRIMARY_WEAPON_ICON_KEY = "weapon:HeavyTrigger"
+local SECONDARY_WEAPON_ICON_KEY = "weapon:PowerSurge"
 local COOLDOWN_EPSILON = 1e-4
 local DEBUG_COOLDOWN_HUD = false
 
@@ -509,18 +510,7 @@ local function resolveUIReferences()
 end
 
 local function normalizeIconId(rawId: any): string?
-	if rawId == nil then
-		return nil
-	end
-
-	local iconString = tostring(rawId)
-	if iconString == "" then
-		return nil
-	end
-	if iconString:match("^%d+$") then
-		return "rbxassetid://" .. iconString
-	end
-	return iconString
+	return IconAssetResolver.resolve(rawId)
 end
 
 local function setSlotIcon(slotName: SlotName, iconKey: string?)

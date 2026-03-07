@@ -2,6 +2,7 @@
 -- TemporalStasisSystem - Server-authoritative localized time stop.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CombatScaling = require(game.ReplicatedStorage.Shared.CombatScaling)
 
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 local EnemyColliderService = require(game.ServerScriptService.Services.EnemyColliderService)
@@ -13,11 +14,14 @@ local Components: any
 local DirtyService: any
 local DamageSystemRef: any
 local EnemyFrostSystemRef: any
+local EnemyAilmentSystemRef: any
 
 local Position: any
 local EntityType: any
 local Health: any
+local Level: any
 local PlayerStats: any
+local PassiveEffects: any
 local Knockback: any
 local DeathAnimation: any
 local EnemySlow: any
@@ -26,6 +30,11 @@ local EnemyLesserFrost: any
 local EnemyGreaterFrost: any
 local EnemyFreeze: any
 local EnemyTimeStopped: any
+local EnemyLesserFlame: any
+local EnemyGreaterFlame: any
+local EnemyLesserPoison: any
+local EnemyGreaterPoison: any
+local EnemyBleed: any
 
 local enemyQuery: any
 
@@ -78,6 +87,9 @@ local sessionIdCounter = 0
 
 local frozenEnemyStateByEntity: {[number]: {enteredAt: number, sessionId: number}} = {}
 local DEFERRED_HITSCAN_BOX_INFLATE = 0.75
+local TIME_STOP_ENTRY_DAMAGE_MULT = 3.0
+local TIME_STOP_ENTRY_PROC_COEFF = 0.8
+local TIME_STOP_ENTRY_ABILITY_ID = "TempusGelidum"
 
 local function ensureRemoteEvent(parent: Instance, name: string): RemoteEvent
 	local existing = parent:FindFirstChild(name)
@@ -226,6 +238,58 @@ local function sendTimeStopState()
 	})
 end
 
+local function getSourceBaseDamage(sourceEntity: number?): number
+	if not world or typeof(sourceEntity) ~= "number" or not Level then
+		return 0
+	end
+	if not world:contains(sourceEntity) then
+		return 0
+	end
+	local sourceType = EntityType and world:get(sourceEntity, EntityType)
+	if not (sourceType and sourceType.type == "Player") then
+		return 0
+	end
+
+	local levelValue = 1
+	local levelComponent = world:get(sourceEntity, Level)
+	if levelComponent and typeof(levelComponent.current) == "number" then
+		levelValue = math.max(1, math.floor(levelComponent.current))
+	end
+
+	local damage = CombatScaling.getBaseDamageAtLevel(levelValue)
+	if PassiveEffects then
+		local effects = world:get(sourceEntity, PassiveEffects)
+		if effects and typeof(effects.damageMultiplier) == "number" then
+			damage *= math.max(effects.damageMultiplier, 0)
+		end
+	end
+
+	return math.max(0, damage)
+end
+
+local function applyTimeStopEntryDamage(enemyEntity: number, sourceEntity: number?)
+	if not DamageSystemRef then
+		return
+	end
+
+	local damageAmount = getSourceBaseDamage(sourceEntity) * TIME_STOP_ENTRY_DAMAGE_MULT
+	if damageAmount <= 0 then
+		return
+	end
+
+	DamageSystemRef.applyDamage(
+		enemyEntity,
+		damageAmount,
+		"magic",
+		sourceEntity,
+		TIME_STOP_ENTRY_ABILITY_ID,
+		{
+			skipTemporalStasis = true,
+			procCoefficient = TIME_STOP_ENTRY_PROC_COEFF,
+		}
+	)
+end
+
 local function shiftEnemyTimedState(enemyEntity: number, frozenDuration: number)
 	if frozenDuration <= 0 then
 		return
@@ -287,6 +351,91 @@ local function shiftEnemyTimedState(enemyEntity: number, frozenDuration: number)
 		end
 	end
 
+	if EnemyLesserFlame then
+		local lesserFlame = world:get(enemyEntity, EnemyLesserFlame)
+		if lesserFlame and typeof(lesserFlame) == "table" then
+			local updated = table.clone(lesserFlame)
+			if typeof(updated.startTime) == "number" then
+				updated.startTime += frozenDuration
+			end
+			if typeof(updated.endTime) == "number" then
+				updated.endTime += frozenDuration
+			end
+			if typeof(updated.nextTickTime) == "number" then
+				updated.nextTickTime += frozenDuration
+			end
+			DirtyService.setIfChanged(world, enemyEntity, EnemyLesserFlame, updated, "EnemyLesserFlame")
+		end
+	end
+
+	if EnemyGreaterFlame then
+		local greaterFlame = world:get(enemyEntity, EnemyGreaterFlame)
+		if greaterFlame and typeof(greaterFlame) == "table" then
+			local updated = table.clone(greaterFlame)
+			if typeof(updated.startTime) == "number" then
+				updated.startTime += frozenDuration
+			end
+			if typeof(updated.endTime) == "number" then
+				updated.endTime += frozenDuration
+			end
+			if typeof(updated.nextTickTime) == "number" then
+				updated.nextTickTime += frozenDuration
+			end
+			DirtyService.setIfChanged(world, enemyEntity, EnemyGreaterFlame, updated, "EnemyGreaterFlame")
+		end
+	end
+
+	if EnemyLesserPoison then
+		local lesserPoison = world:get(enemyEntity, EnemyLesserPoison)
+		if lesserPoison and typeof(lesserPoison) == "table" then
+			local updated = table.clone(lesserPoison)
+			if typeof(updated.startTime) == "number" then
+				updated.startTime += frozenDuration
+			end
+			if typeof(updated.endTime) == "number" then
+				updated.endTime += frozenDuration
+			end
+			if typeof(updated.nextTickTime) == "number" then
+				updated.nextTickTime += frozenDuration
+			end
+			DirtyService.setIfChanged(world, enemyEntity, EnemyLesserPoison, updated, "EnemyLesserPoison")
+		end
+	end
+
+	if EnemyGreaterPoison then
+		local greaterPoison = world:get(enemyEntity, EnemyGreaterPoison)
+		if greaterPoison and typeof(greaterPoison) == "table" then
+			local updated = table.clone(greaterPoison)
+			if typeof(updated.startTime) == "number" then
+				updated.startTime += frozenDuration
+			end
+			if typeof(updated.endTime) == "number" then
+				updated.endTime += frozenDuration
+			end
+			if typeof(updated.nextTickTime) == "number" then
+				updated.nextTickTime += frozenDuration
+			end
+			DirtyService.setIfChanged(world, enemyEntity, EnemyGreaterPoison, updated, "EnemyGreaterPoison")
+		end
+	end
+
+	if EnemyBleed then
+		local bleed = world:get(enemyEntity, EnemyBleed)
+		if bleed and typeof(bleed) == "table" then
+			local updated = table.clone(bleed)
+			if typeof(updated.startTime) == "number" then
+				updated.startTime += frozenDuration
+			end
+			if typeof(updated.endTime) == "number" then
+				updated.endTime += frozenDuration
+			end
+			if typeof(updated.nextTickTime) == "number" then
+				updated.nextTickTime += frozenDuration
+			end
+			DirtyService.setIfChanged(world, enemyEntity, EnemyBleed, updated, "EnemyBleed")
+		end
+	end
+
 	if Knockback then
 		local knockback = world:get(enemyEntity, Knockback)
 		if knockback and typeof(knockback) == "table" and typeof(knockback.endTime) == "number" then
@@ -312,9 +461,10 @@ local function freezeEnemy(enemyEntity: number, now: number, sessionId: number)
 			active = true,
 		}, "EnemyTimeStopped")
 	end
+	local session = activeSession
+	local casterEntity = session and session.casterEntity or nil
+	applyTimeStopEntryDamage(enemyEntity, casterEntity)
 	if EnemyFrostSystemRef and EnemyFrostSystemRef.applyGreaterFrost then
-		local session = activeSession
-		local casterEntity = session and session.casterEntity or nil
 		EnemyFrostSystemRef.applyGreaterFrost(enemyEntity, casterEntity, 1, 10.0)
 	end
 end
@@ -377,7 +527,58 @@ local function applyQueuedSideEffect(targetEntity: number, effect: any)
 				effect.direction,
 				math.max(effect.distance or 0, 0),
 				math.max(effect.duration or 0.2, 0.05),
-				effect.stunned
+			effect.stunned
+			)
+		end
+	elseif kind == "lesserFlame" then
+		if EnemyAilmentSystemRef and EnemyAilmentSystemRef.applyLesserFlame then
+			EnemyAilmentSystemRef.applyLesserFlame(
+				targetEntity,
+				effect.sourceEntity,
+				math.max(math.floor((effect.stacks or 0) + 0.0001), 0),
+				effect.procCoefficient,
+				effect.duration
+			)
+		end
+	elseif kind == "greaterFlame" then
+		if EnemyAilmentSystemRef and EnemyAilmentSystemRef.applyGreaterFlame then
+			EnemyAilmentSystemRef.applyGreaterFlame(
+				targetEntity,
+				effect.sourceEntity,
+				math.max(math.floor((effect.stacks or 0) + 0.0001), 0),
+				math.max(effect.appliedHitDamage or 0, 0),
+				effect.procCoefficient,
+				effect.duration
+			)
+		end
+	elseif kind == "lesserPoison" then
+		if EnemyAilmentSystemRef and EnemyAilmentSystemRef.applyLesserPoison then
+			EnemyAilmentSystemRef.applyLesserPoison(
+				targetEntity,
+				effect.sourceEntity,
+				math.max(math.floor((effect.stacks or 0) + 0.0001), 0),
+				effect.procCoefficient,
+				effect.duration
+			)
+		end
+	elseif kind == "greaterPoison" then
+		if EnemyAilmentSystemRef and EnemyAilmentSystemRef.applyGreaterPoison then
+			EnemyAilmentSystemRef.applyGreaterPoison(
+				targetEntity,
+				effect.sourceEntity,
+				math.max(math.floor((effect.stacks or 0) + 0.0001), 0),
+				effect.procCoefficient,
+				effect.duration
+			)
+		end
+	elseif kind == "bleed" then
+		if EnemyAilmentSystemRef and EnemyAilmentSystemRef.applyBleed then
+			EnemyAilmentSystemRef.applyBleed(
+				targetEntity,
+				effect.sourceEntity,
+				math.max(math.floor((effect.stacks or 0) + 0.0001), 0),
+				effect.procCoefficient,
+				effect.duration
 			)
 		end
 	end
@@ -623,7 +824,9 @@ function TemporalStasisSystem.init(worldRef: any, components: any, dirtyService:
 	EntityType = Components.EntityType
 	Position = Components.Position
 	Health = Components.Health
+	Level = Components.Level
 	PlayerStats = Components.PlayerStats
+	PassiveEffects = Components.PassiveEffects
 	Knockback = Components.Knockback
 	DeathAnimation = Components.DeathAnimation
 	EnemySlow = Components.EnemySlow
@@ -632,9 +835,15 @@ function TemporalStasisSystem.init(worldRef: any, components: any, dirtyService:
 	EnemyGreaterFrost = Components.EnemyGreaterFrost
 	EnemyFreeze = Components.EnemyFreeze
 	EnemyTimeStopped = Components.EnemyTimeStopped
+	EnemyLesserFlame = Components.EnemyLesserFlame
+	EnemyGreaterFlame = Components.EnemyGreaterFlame
+	EnemyLesserPoison = Components.EnemyLesserPoison
+	EnemyGreaterPoison = Components.EnemyGreaterPoison
+	EnemyBleed = Components.EnemyBleed
 
 	DamageSystemRef = services and services.DamageSystem or DamageSystemRef
 	EnemyFrostSystemRef = services and services.EnemyFrostSystem or EnemyFrostSystemRef
+	EnemyAilmentSystemRef = services and services.EnemyAilmentSystem or EnemyAilmentSystemRef
 
 	enemyQuery = world:query(EntityType, Position):cached()
 
@@ -649,6 +858,10 @@ end
 
 function TemporalStasisSystem.setEnemyFrostSystem(enemyFrostSystem: any)
 	EnemyFrostSystemRef = enemyFrostSystem
+end
+
+function TemporalStasisSystem.setEnemyAilmentSystem(enemyAilmentSystem: any)
+	EnemyAilmentSystemRef = enemyAilmentSystem
 end
 
 function TemporalStasisSystem.isActive(): boolean

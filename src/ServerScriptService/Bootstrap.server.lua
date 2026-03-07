@@ -4,7 +4,6 @@
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
 
 local ProfilingConfig = require(ReplicatedStorage.Shared.ProfilingConfig)
@@ -24,52 +23,6 @@ local function profGauge(name: string, value: number)
 end
 
 local ModelReplicationService: any
-
-local function replicateAbilityModelForPlayer(ability: any)
-	if not ability then
-		return
-	end
-
-	local modelPath = ability.balance and ability.balance.modelPath or nil
-	if typeof(modelPath) == "string" and modelPath ~= "" then
-		if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
-			local current: Instance? = game
-			for _, partName in ipairs(string.split(modelPath, ".")) do
-				if not current then
-					break
-				end
-				current = current:FindFirstChild(partName)
-			end
-			if current and current:IsA("Model") then
-				return
-			end
-		end
-
-		local sourcePath = ability.balance and ability.balance.replicationSourcePath or nil
-		if typeof(sourcePath) ~= "string" or sourcePath == "" then
-			sourcePath = modelPath
-		end
-		local serverPath: string? = nil
-		if sourcePath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
-			serverPath = sourcePath:sub(#"ReplicatedStorage." + 1)
-		elseif sourcePath:sub(1, #"ServerStorage.") == "ServerStorage." then
-			serverPath = sourcePath:sub(#"ServerStorage." + 1)
-		end
-
-		if serverPath then
-			local parts = string.split(serverPath, ".")
-			if #parts > 1 then
-				local replicatedPath = table.concat(parts, ".", 1, #parts - 1)
-				local success = ModelReplicationService.replicateModel(serverPath, replicatedPath)
-				if success then
-					return
-				end
-			end
-		end
-	end
-
-	ModelReplicationService.replicateAbility(ability.id)
-end
 
 local ECS = require(game.ServerScriptService.ECS.ECSFacade)
 local DirtyService = require(game.ServerScriptService.ECS.DirtyService)
@@ -98,6 +51,7 @@ local DeathBodyFadeSystem = require(game.ServerScriptService.ECS.Systems.DeathBo
 local KnockbackSystem = require(game.ServerScriptService.ECS.Systems.KnockbackSystem)
 local EnemySlowSystem = require(game.ServerScriptService.ECS.Systems.EnemySlowSystem)
 local EnemyFrostSystem = require(game.ServerScriptService.ECS.Systems.EnemyFrostSystem)
+local EnemyAilmentSystem = require(game.ServerScriptService.ECS.Systems.EnemyAilmentSystem)
 local EnemyStunSystem = require(game.ServerScriptService.ECS.Systems.EnemyStunSystem)
 local EnemyBalance = require(game.ServerScriptService.Balance.EnemyBalance)
 local GlobalBalance = require(game.ServerScriptService.Balance.GlobalBalance)
@@ -127,6 +81,7 @@ local EnemyExpDropSystem = require(game.ServerScriptService.ECS.Systems.EnemyExp
 local PauseSystem = require(game.ServerScriptService.ECS.Systems.PauseSystem)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local PickupService = require(game.ServerScriptService.Services.PickupService)
+local ItemSpawnService = require(game.ServerScriptService.Services.ItemSpawnService)
 local MobilityLoadoutService = require(game.ServerScriptService.Services.MobilityLoadoutService)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
 local WeaponService = require(game.ServerScriptService.Services.WeaponService)
@@ -404,9 +359,9 @@ local function attachStarterWeapon(character: Model)
 	end
 	local rightArm = rightArmInstance
 
-	local weaponFolder = findByPath(ServerStorage, STARTER_WEAPON_PATH)
+	local weaponFolder = findByPath(ReplicatedStorage, STARTER_WEAPON_PATH)
 	if not weaponFolder then
-		warn(string.format("[Bootstrap] Starter weapon folder missing at ServerStorage.%s", STARTER_WEAPON_PATH))
+		warn(string.format("[Bootstrap] Starter weapon folder missing at ReplicatedStorage.%s", STARTER_WEAPON_PATH))
 		clearStarterWeaponAttributes(character)
 		return
 	end
@@ -625,18 +580,13 @@ function ECSWorldService.Initialize()
 	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesImpactBatch")
 	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesFreezeBatch")
 	ensureRemoteEvent(projectileRemotesFolder, "ProjectilesResumeBatch")
+
+	local itemSpawnRemotesFolder = ensureFolder(remotesFolder, "ItemSpawns")
+	ensureRemoteEvent(itemSpawnRemotesFolder, "ItemSpawnsSpawnBatch")
+	ensureRemoteEvent(itemSpawnRemotesFolder, "ItemSpawnsDespawnBatch")
 	
-	-- Initialize model replication first (clones models from ServerStorage to ReplicatedStorage)
+	-- Pre-compute hitbox data for common enemies (ContentDrawer is now in ReplicatedStorage natively)
 	ModelReplicationService.init()
-	ModelReplicationService.replicateExpOrb()
-	ModelReplicationService.replicateModel(
-		Oathkeeper.assetPaths.weaponFolder .. ".VFX",
-		"ContentDrawer.WeaponModels.HandCannons.Oathkeeper"
-	)
-	ModelReplicationService.replicateModel(
-		"ContentDrawer.ItemModels.VFX.CommonAura",
-		"ContentDrawer.ItemModels.VFX"
-	)
 	EnemyColliderService.init(world, Components)
 	EnemyColliderOverlayService.init(world, Components)
 	
@@ -740,6 +690,7 @@ function ECSWorldService.Initialize()
 	PickupService.init(world, Components, ExpSystem, function(player)
 		return playerEntities[player]
 	end)
+	ItemSpawnService.init(world, Components)
 	ExpSinkSystem.init(world, Components, PickupService)
 	PickupService.setExpSinkSystem(ExpSinkSystem)
 	EnemyExpDropSystem.init(world, Components, ECSWorldService, ExpSinkSystem, PickupService)
@@ -761,17 +712,24 @@ function ECSWorldService.Initialize()
 	EnemyFrostSystem.init(world, Components, DirtyService, {
 		DamageSystem = DamageSystem,
 	})
+	EnemyAilmentSystem.init(world, Components, DirtyService, {
+		DamageSystem = DamageSystem,
+	})
 	EnemyStunSystem.init(world, Components, DirtyService)
 	TemporalStasisSystem.init(world, Components, DirtyService, {
 		DamageSystem = DamageSystem,
 		EnemyFrostSystem = EnemyFrostSystem,
+		EnemyAilmentSystem = EnemyAilmentSystem,
 	})
 	TemporalStasisSystem.setDamageSystem(DamageSystem)
 	TemporalStasisSystem.setEnemyFrostSystem(EnemyFrostSystem)
+	TemporalStasisSystem.setEnemyAilmentSystem(EnemyAilmentSystem)
 	EnemyFrostSystem.setDamageSystem(DamageSystem)
+	EnemyAilmentSystem.setDamageSystem(DamageSystem)
 	DamageSystem.setUltimateSystem(UltimateSystem)
 	DamageSystem.setTemporalStasisSystem(TemporalStasisSystem)
 	DamageSystem.setEnemyFrostSystem(EnemyFrostSystem)
+	DamageSystem.setEnemyAilmentSystem(EnemyAilmentSystem)
 	UltimateSystem.setTemporalStasisSystem(TemporalStasisSystem)
 	DamageSystem.setEnemyExpDropSystem(EnemyExpDropSystem)  -- Set reference for enemy death drops
 	DamageSystem.setStatusEffectSystem(StatusEffectSystem)  -- Set reference for invincibility checks
@@ -786,6 +744,8 @@ function ECSWorldService.Initialize()
 		ExpSystem = ExpSystem,
 	})
 	ItemSystem.setEnemyStunSystem(EnemyStunSystem)
+	ItemSystem.setEnemyAilmentSystem(EnemyAilmentSystem)
+	ItemSystem.setItemSpawnService(ItemSpawnService)
 	HealthRegenSystem.setItemSystem(ItemSystem)
 	AbilitySystemBase.setItemSystem(ItemSystem)
 	ProjectileService.setTemporalStasisSystem(TemporalStasisSystem)
@@ -968,7 +928,7 @@ function ECSWorldService.CreateEnemy(enemyType: string, position: Vector3, owner
 	local collisionRadius = 2.5
 	local enemyHitbox = ModelReplicationService.getEnemyHitbox(enemyType or "Zombie")
 	if not enemyHitbox then
-		ModelReplicationService.replicateEnemy(enemyType or "Zombie")
+		ModelReplicationService.ensureEnemyHitbox(enemyType or "Zombie")
 		enemyHitbox = ModelReplicationService.getEnemyHitbox(enemyType or "Zombie")
 	end
 	if enemyHitbox and enemyHitbox.size then
@@ -1234,7 +1194,6 @@ local function buildStarterAbilityState(): ({[string]: any}, {[string]: any})
 
 	for _, ability in pairs(AbilityRegistry.getAll()) do
 		if ability.balance.StartWith then
-			replicateAbilityModelForPlayer(ability)
 			abilities[ability.id] = {
 				enabled = true,
 				level = 1,
@@ -1369,7 +1328,7 @@ function ECSWorldService.CreatePlayer(player: Player, position: Vector3): any
 		grappleDistanceMultiplier = 1.0,
 		regenMultiplier = 1.0,
 		regenDelayMultiplier = 1.0,
-		critChance = 0,
+		critChance = 0.01,
 		critDamage = 0,
 		armor = 0,
 		primaryAttackSpeedBonus = 0,
@@ -1648,6 +1607,9 @@ local function stepWorld(dt: number)
 		debug.profilebegin("ProjectileService")
 		ProjectileService.step(dt)
 		debug.profileend()
+		debug.profilebegin("ItemSpawnService")
+		ItemSpawnService.step(dt)
+		debug.profileend()
 		emitInvincibleEnemyDiagnostics(now)
 		emitEnemyVisualHitboxDiagnostics(now)
 		EnemyColliderOverlayService.step(dt, isEnemyColliderOverlayEnabled())
@@ -1692,6 +1654,10 @@ local function stepWorld(dt: number)
 	EnemyFrostSystem.step(dt)
 	debug.profileend()
 
+	debug.profilebegin("EnemyAilments")
+	EnemyAilmentSystem.step(dt)
+	debug.profileend()
+
 	debug.profilebegin("EnemyStun")
 	EnemyStunSystem.step(dt)
 	debug.profileend()
@@ -1727,6 +1693,10 @@ local function stepWorld(dt: number)
 	else
 		warn("[Bootstrap] ExpSinkSystem.step not available!")
 	end
+	debug.profileend()
+
+	debug.profilebegin("ItemSpawnService")
+	ItemSpawnService.step(dt)
 	debug.profileend()
 
 	debug.profilebegin("PickupService")

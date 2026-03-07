@@ -18,7 +18,7 @@ local ATTR_TOGGLE_SPRINT_MODE = "Setting_controls_toggleSprintMode"
 local SHIFTLOCK_ROOT_NAME = "ShiftLock"
 local DEFAULT_CROSSHAIR_FRAME_NAME = "ShiftLockFrame"
 local SPRINT_FRAME_NAME = "SprintFrame"
-local SPRINT_RUN_ANIMATION_ID = "rbxassetid://113934996865672"
+local DEFAULT_SPRINT_RUN_ANIMATION_ID = "rbxassetid://180426354"
 local LOCAL_WEAPON_ATTACK_LOCK_ATTRIBUTE = "WeaponAttackLockLocal"
 local RUN_ANIMATION_BASE_WALKSPEED = 24
 local SPRINT_MULTIPLIER = 1.45
@@ -45,6 +45,30 @@ local weaponEndlagConnection: RBXScriptConnection? = nil
 local pushSprintIntent: () -> () = function() end
 local getSprintIntent: () -> boolean = function(): boolean
 	return false
+end
+
+local function resolveBasicSprintAnimationId(): string
+	local contentDrawer = ReplicatedStorage:FindFirstChild("ContentDrawer")
+	if not contentDrawer then
+		return DEFAULT_SPRINT_RUN_ANIMATION_ID
+	end
+	local playerAbilities = contentDrawer:FindFirstChild("PlayerAbilities")
+	if not playerAbilities then
+		return DEFAULT_SPRINT_RUN_ANIMATION_ID
+	end
+	local basicAnimations = playerAbilities:FindFirstChild("BasicAnimations")
+	if not basicAnimations then
+		return DEFAULT_SPRINT_RUN_ANIMATION_ID
+	end
+	local sprintAnimation = basicAnimations:FindFirstChild("Sprint")
+	if not sprintAnimation or not sprintAnimation:IsA("Animation") then
+		return DEFAULT_SPRINT_RUN_ANIMATION_ID
+	end
+	local animationId = sprintAnimation.AnimationId
+	if animationId == "" then
+		return DEFAULT_SPRINT_RUN_ANIMATION_ID
+	end
+	return animationId
 end
 
 local function isSprintInputLocked(): boolean
@@ -87,7 +111,7 @@ local function ensureRunTrack()
 	if not runAnimation then
 		local animation = Instance.new("Animation")
 		animation.Name = "SprintOverride"
-		animation.AnimationId = SPRINT_RUN_ANIMATION_ID
+		animation.AnimationId = resolveBasicSprintAnimationId()
 		runAnimation = animation
 	end
 	local track = animator:LoadAnimation(runAnimation)

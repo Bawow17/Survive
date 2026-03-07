@@ -23,7 +23,7 @@ return {
 	grappleDampStartFrac = 0.6,
 	grappleDampStrength = 2.0,
 
-	-- VFX models (ServerStorage paths; replicated to ReplicatedStorage)
+	-- VFX models (ReplicatedStorage paths)
 	grappleStartModelPath = "ContentDrawer.PlayerAbilities.MobilityAbilities.Grapple.Grapple.Start",
 	grappleManaPointModelPath = "ContentDrawer.PlayerAbilities.MobilityAbilities.Grapple.Grapple.ManaPoint",
 	grappleEndModelPath = "ContentDrawer.PlayerAbilities.MobilityAbilities.Grapple.Grapple.End",

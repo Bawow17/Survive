@@ -6,7 +6,7 @@ local ChargerBalance = {}
 
 -- Basic identification
 ChargerBalance.Name = "Charger"
-ChargerBalance.modelPath = "game.ServerStorage.ContentDrawer.Enemies.Mobs.Charger"
+ChargerBalance.modelPath = "game.ReplicatedStorage.ContentDrawer.Enemies.Mobs.Charger"
 
 -- Base stats (affected by global scaling)
 -- Tuned toward a tougher RoR2-style uncommon threat.

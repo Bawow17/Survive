@@ -1,10 +1,10 @@
 --!strict
--- Ice Tracer Mobility Ability Configuration
+-- Glacial Path Mobility Ability Configuration
 -- Starter ice utility slide that generates a local/replicated ice path.
 
 return {
-	id = "IceTracer",
-	displayName = "Ice Tracer",
+	id = "GlacialPath",
+	displayName = "Glacial Path",
 	description = "Slide on a generated ice path. Instant boost, fast stop, short cooldown.",
 
 	-- UI color (shown in upgrade selection)
@@ -24,11 +24,11 @@ return {
 	lookAheadDistance = 15.0,
 	pathPartLifetime = 2.0,
 
-	-- VFX models (ServerStorage paths; replicated to ReplicatedStorage)
-	iceTracerAnimationModelPath = "ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceTracerAnimation",
-	iceTracerPathModelPath = "ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IcePath",
-	iceTracerBeam1ModelPath = "ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser",
-	iceTracerBeam2ModelPath = "ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser2",
+	-- VFX models (ReplicatedStorage paths)
+	glacialPathAnimationModelPath = "ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.GlacialPathAnimation",
+	glacialPathPathModelPath = "ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.IcePath",
+	glacialPathBeam1ModelPath = "ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.IceLaser",
+	glacialPathBeam2ModelPath = "ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.IceLaser2",
 
 	-- Unlock
 	category = "mobility",

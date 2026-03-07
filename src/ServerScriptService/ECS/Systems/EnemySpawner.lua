@@ -1242,10 +1242,10 @@ function EnemySpawner.step(dt: number)
 			end
 			acc -= spendCost
 
-			-- Ensure enemy model is replicated before spawning to prevent invisible enemies
-			local replicationSuccess = ModelReplicationService.replicateEnemy(enemyType)
+			-- Ensure hitbox data is cached for this enemy type
+			local replicationSuccess = ModelReplicationService.ensureEnemyHitbox(enemyType)
 			if not replicationSuccess then
-				warn(string.format("[EnemySpawner] Failed to replicate %s model, skipping spawn this frame", enemyType))
+				warn(string.format("[EnemySpawner] Could not find %s model in ReplicatedStorage, skipping spawn this frame", enemyType))
 				break
 			end
 

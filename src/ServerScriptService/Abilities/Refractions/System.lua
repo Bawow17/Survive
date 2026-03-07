@@ -9,7 +9,6 @@ local TargetingService = require(script.Parent.Parent.TargetingService)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
 local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
-local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local Config = require(script.Parent.Config)
 local Balance = Config
 
@@ -117,12 +116,6 @@ local function getBeamSize(stats: any, fallbackLength: number): (Vector3, Vector
 		forcedAxis = configuredAxis
 	end
 	local hitboxSize, hitboxOffset, hitboxRotation = ModelHitboxHelper.getModelHitboxTransform(Balance.modelPath)
-	if not hitboxSize and typeof(Balance.modelPath) == "string" then
-		local serverPath = Balance.modelPath:gsub("^ReplicatedStorage%.", "ServerStorage.")
-		if serverPath ~= Balance.modelPath then
-			hitboxSize, hitboxOffset, hitboxRotation = ModelHitboxHelper.getModelHitboxTransform(serverPath)
-		end
-	end
 
 	if hitboxSize then
 		local size = Vector3.new(hitboxSize.X * scale, hitboxSize.Y * scale, hitboxSize.Z * scale)
@@ -149,7 +142,6 @@ local function castRefractions(playerEntity: number, player: Player): boolean
 	end
 
 	local stats = AbilitySystemBase.getAbilityStats(playerEntity, REFRACTIONS_ID, Balance)
-	ModelReplicationService.replicateAbility(REFRACTIONS_ID)
 	stats.targetingMode = 0
 	local shotAmount = math.max(stats.shotAmount or 1, 1)
 	local projectileCount = math.max(stats.projectileCount or 1, 1)

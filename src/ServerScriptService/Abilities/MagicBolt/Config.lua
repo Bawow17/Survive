@@ -60,6 +60,8 @@ return {
 	spreadAngleOdd = math.rad(30), -- spread angle when shotAmount is odd
 	
 	-- Animation configuration (Server-Only - Asset IDs)
+	-- TODO: MagicBolt is slated for removal. These hardcoded IDs have not been migrated
+	-- to Animation instances in ReplicatedStorage. Ignore until the ability is deleted.
 	animations = {
 		animationIds = {
 			first = "rbxassetid://77657526317110",   -- Initial cast animation

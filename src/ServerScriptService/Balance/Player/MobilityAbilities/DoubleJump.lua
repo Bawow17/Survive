@@ -31,7 +31,7 @@ return {
 	-- Physics
 	gravityReduction = 0.6,  -- Reduce gravity by 60% while airborne (0.4x normal gravity)
 	
-	-- Model path (source in ServerStorage, replicated to ReplicatedStorage)
+	-- Model path (ReplicatedStorage)
 	platformModelPath = "ReplicatedStorage.ContentDrawer.PlayerAbilities.MobilityAbilities.DoubleJumpPlatform.DoubleJumpPlatform",
 	
 	-- Unlock

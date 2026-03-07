@@ -3,7 +3,9 @@
 -- Handles looping animations per projectile with frame-based loop points
 
 local Players = game:GetService("Players")
+local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local localPlayer = Players.LocalPlayer
 local ATTR_LOCAL_RANGED_AIM_ACTIVE = "AbilityRangedAimActiveLocal"
@@ -11,6 +13,12 @@ local ATTR_LOCAL_ABILITY_CAST_ACTIVE = "AbilityCastActiveLocal"
 local RANGED_VERTICAL_AIM_PROFILE = "ranged_left_head"
 local ICE_SHARD_LOCKED_ABILITIES: {[string]: boolean} = {
 	IceShard = true,
+}
+local ICE_SHARD_VFX_FRAME = 5
+local ICE_SHARD_VFX_TOTAL_FRAMES = 50
+local ICE_SHARD_VFX_TEMPLATE_PATHS = {
+	"ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.Circle",
+	"ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.Circle2",
 }
 
 -- Animation state
@@ -282,6 +290,149 @@ local function startAbilityCastForCast(castId: number)
 	setAbilityCastActive(true)
 end
 
+local function findLocalLeftArmGripAttachment(): Attachment?
+	local character = localPlayer.Character
+	if not character then
+		return nil
+	end
+
+	local exact = character:FindFirstChild("LeftArmGripAttachment", true)
+	if exact and exact:IsA("Attachment") then
+		return exact
+	end
+
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("Attachment") then
+			local lowered = string.lower(descendant.Name)
+			if string.find(lowered, "left", 1, true) and string.find(lowered, "grip", 1, true) then
+				return descendant
+			end
+		end
+	end
+
+	return nil
+end
+
+local function getMaxParticleLifetime(root: Instance): number
+	local maxLifetime = 0
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("ParticleEmitter") then
+			maxLifetime = math.max(maxLifetime, descendant.Lifetime.Max, descendant.Lifetime.Min)
+		end
+	end
+	if root:IsA("ParticleEmitter") then
+		maxLifetime = math.max(maxLifetime, root.Lifetime.Max, root.Lifetime.Min)
+	end
+	return maxLifetime
+end
+
+local function warmAndPlayParticleEmitters(root: Instance, emitNow: boolean)
+	local emitters = {}
+	if root:IsA("ParticleEmitter") then
+		table.insert(emitters, root)
+	end
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("ParticleEmitter") then
+			table.insert(emitters, descendant)
+		end
+	end
+
+	for _, emitter in ipairs(emitters) do
+		emitter.Enabled = true
+		if emitNow then
+			local maxLifetime = math.max(emitter.Lifetime.Min, emitter.Lifetime.Max, 0.05)
+			local burstCount = math.max(1, math.ceil(emitter.Rate * maxLifetime))
+			emitter:Emit(burstCount)
+		end
+	end
+end
+
+local function playIceShardCastVfxAtGrip()
+	local sourceAttachment = findLocalLeftArmGripAttachment()
+	if not sourceAttachment then
+		return
+	end
+
+	local cleanupAfter = 0.25
+	local originCFrame = sourceAttachment.WorldCFrame
+	for _, path in ipairs(ICE_SHARD_VFX_TEMPLATE_PATHS) do
+		local template = findInstanceByDotPath(path)
+		if not template then
+			continue
+		end
+
+		local instance = template:Clone()
+		local anchor = Instance.new("Part")
+		anchor.Name = "IceShardCastVfxAnchor"
+		anchor.Anchored = true
+		anchor.CanCollide = false
+		anchor.CanTouch = false
+		anchor.CanQuery = false
+		anchor.Transparency = 1
+		anchor.Size = Vector3.new(0.2, 0.2, 0.2)
+		anchor.CFrame = originCFrame
+		anchor.Parent = Workspace
+
+		local destroyTarget: Instance = anchor
+
+		if instance:IsA("ParticleEmitter") then
+			local carrier = Instance.new("Attachment")
+			carrier.Name = "IceShardCastVfxAttachment"
+			carrier.Position = Vector3.zero
+			carrier.Parent = anchor
+			instance.Parent = carrier
+			warmAndPlayParticleEmitters(instance, true)
+		elseif instance:IsA("Attachment") then
+			local attachmentClone = instance
+			attachmentClone.Parent = anchor
+			warmAndPlayParticleEmitters(attachmentClone, true)
+		elseif instance:IsA("Model") then
+			instance:PivotTo(originCFrame)
+			instance.Parent = anchor
+			warmAndPlayParticleEmitters(instance, true)
+		elseif instance:IsA("BasePart") then
+			instance.Anchored = true
+			instance.CFrame = originCFrame
+			instance.Parent = anchor
+			warmAndPlayParticleEmitters(instance, true)
+		else
+			local carrier = Instance.new("Attachment")
+			carrier.Name = "IceShardCastVfxAttachment"
+			carrier.Position = Vector3.zero
+			carrier.Parent = anchor
+			instance.Parent = carrier
+			warmAndPlayParticleEmitters(instance, true)
+		end
+
+		local maxLifetime = getMaxParticleLifetime(instance)
+		cleanupAfter = math.max(cleanupAfter, maxLifetime + 0.1)
+		Debris:AddItem(destroyTarget, cleanupAfter)
+	end
+end
+
+local function scheduleIceShardCastVfx(abilityId: string, animationData: any, speedScale: number, castId: number)
+	if abilityId ~= "IceShard" then
+		return
+	end
+	local totalFrames = animationData and animationData.totalFrames
+	local duration = animationData and animationData.duration
+	if typeof(totalFrames) ~= "number" or totalFrames <= 0 then
+		totalFrames = ICE_SHARD_VFX_TOTAL_FRAMES
+	end
+	if typeof(duration) ~= "number" or duration <= 0 then
+		return
+	end
+
+	local safeSpeedScale = math.max(speedScale, 0.001)
+	local triggerDelay = (duration * (ICE_SHARD_VFX_FRAME / totalFrames)) / safeSpeedScale
+	task.delay(triggerDelay, function()
+		if currentCastId ~= castId then
+			return
+		end
+		playIceShardCastVfxAtGrip()
+	end)
+end
+
 -- Get humanoid and animator
 local function getAnimator(): Animator?
 	local character = localPlayer.Character
@@ -364,7 +515,8 @@ local function playAnimationSegment(
 	isFinal: boolean,
 	animationData: any,
 	isSingleProjectileFastCooldown: boolean?,
-	targetDuration: number?
+	targetDuration: number?,
+	castId: number
 ): boolean
 	if not animationData then
 		return false
@@ -433,6 +585,7 @@ local function playAnimationSegment(
 		track:Play()
 	end
 	track:AdjustSpeed(speedScale)
+	scheduleIceShardCastVfx(abilityId, animationData, speedScale, castId)
 	
 	isPlayingSegment = true
 	
@@ -695,7 +848,16 @@ local function playAbilityCast(
 			if segmentInterval > 0 then
 				targetDuration = segmentInterval
 			end
-			local success = playAnimationSegment(abilityId, animType, segmentInterval, isFinalAnimation, animationData, isSingleProjectileFastCooldown, targetDuration)
+			local success = playAnimationSegment(
+				abilityId,
+				animType,
+				segmentInterval,
+				isFinalAnimation,
+				animationData,
+				isSingleProjectileFastCooldown,
+				targetDuration,
+				thisCastId
+			)
 			if not success then
 				break
 			end

@@ -30,6 +30,7 @@ local timeCooldowns: {[number]: number} = {}
 local APPLY_COOLDOWN = 0.1
 local TIME_COOLDOWN = 0.25
 local ULTIMATE_MAX_CHARGE_ENTRY_ID = "ultimate:max_charge"
+local CLEAR_ITEMS_ENTRY_ID = "items:clear_all"
 
 local function ensureRemoteEvent(parent: Instance, name: string): RemoteEvent
 	local existing = parent:FindFirstChild(name)
@@ -135,6 +136,16 @@ local function sendOpenState(player: Player)
 			iconId = nil,
 		})
 	end
+	table.insert(catalog, {
+		entryId = CLEAR_ITEMS_ENTRY_ID,
+		category = "items",
+		categoryLabel = DebugModMenuCatalog.CategoryLabels.items or "Items",
+		categoryOrder = DebugModMenuCatalog.CategoryOrder.items or 2,
+		sortRank = 999999,
+		name = "Clear Items",
+		subtitle = "Remove all current run items",
+		iconId = nil,
+	})
 	openStateRemote:FireClient(player, {
 		allowed = allowed,
 		catalog = if allowed then catalog else {},
@@ -167,6 +178,18 @@ local function onApplyEntry(player: Player, _data: any)
 	end
 
 	if _data.entryId ~= ULTIMATE_MAX_CHARGE_ENTRY_ID then
+		if _data.entryId == CLEAR_ITEMS_ENTRY_ID then
+			if not ItemSystem or not ItemSystem.clearDebugItemsForPlayer then
+				fireAck(player, false, "ItemSystem unavailable")
+				sendOpenState(player)
+				return
+			end
+			local ok, message = ItemSystem.clearDebugItemsForPlayer(player)
+			fireAck(player, ok, message)
+			sendOpenState(player)
+			return
+		end
+
 		local isItemEntry = string.sub(_data.entryId, 1, 5) == "item:"
 		if isItemEntry then
 			if not ItemSystem or not ItemSystem.spawnDebugDropForPlayer then

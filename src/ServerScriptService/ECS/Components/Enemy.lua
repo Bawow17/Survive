@@ -63,6 +63,24 @@ EnemyComponents.EnemyGreaterFrost = world:component()
 -- EnemyFreeze component - Shared true-freeze state used by Lesser/Greater Frost
 EnemyComponents.EnemyFreeze = world:component()
 
+-- EnemyLesserFlame component - Tracks Lesser Flame stacks, DPS, and expiry
+EnemyComponents.EnemyLesserFlame = world:component()
+
+-- EnemyGreaterFlame component - Tracks Greater Flame stacks, DPS, and expiry
+EnemyComponents.EnemyGreaterFlame = world:component()
+
+-- EnemyLesserPoison component - Tracks Lesser Poison stacks, DPS, and expiry
+EnemyComponents.EnemyLesserPoison = world:component()
+
+-- EnemyGreaterPoison component - Tracks Greater Poison stacks, DPS, and expiry
+EnemyComponents.EnemyGreaterPoison = world:component()
+
+-- EnemyBleed component - Tracks Bleed stacks, DPS, and expiry
+EnemyComponents.EnemyBleed = world:component()
+
+-- EnemyExecuteThreshold component - Tracks the aggregated execute threshold
+EnemyComponents.EnemyExecuteThreshold = world:component()
+
 -- EnemyTimeStopped component - Tracks active Tempus Gelidum freeze state
 EnemyComponents.EnemyTimeStopped = world:component()
 

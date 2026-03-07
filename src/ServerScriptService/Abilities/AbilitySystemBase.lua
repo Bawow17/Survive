@@ -2,8 +2,6 @@
 -- AbilitySystemBase.lua - Shared utilities for all ability systems
 -- Contains common targeting, spawning, and helper functions
 
-local _ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local SpatialGridSystem = require(game.ServerScriptService.ECS.Systems.SpatialGridSystem)
 local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitboxHelper)
 local ProjectileService = require(game.ServerScriptService.Services.ProjectileService)
@@ -443,40 +441,6 @@ local function findModelByPath(modelPath: string): Model?
 	return nil
 end
 
-local function replicateAbilityModelFromPath(abilityId: string, modelPath: any, replicationSourcePath: any): boolean
-	if typeof(modelPath) ~= "string" or modelPath == "" then
-		return ModelReplicationService.replicateAbility(abilityId)
-	end
-
-	if modelPath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." and findModelByPath(modelPath) then
-		return true
-	end
-
-	local sourcePath = modelPath
-	if typeof(replicationSourcePath) == "string" and replicationSourcePath ~= "" then
-		sourcePath = replicationSourcePath
-	end
-	local serverPath = nil
-	if sourcePath:sub(1, #"ReplicatedStorage.") == "ReplicatedStorage." then
-		serverPath = sourcePath:sub(#"ReplicatedStorage." + 1)
-	elseif sourcePath:sub(1, #"ServerStorage.") == "ServerStorage." then
-		serverPath = sourcePath:sub(#"ServerStorage." + 1)
-	end
-
-	if serverPath then
-		local serverParts = string.split(serverPath, ".")
-		if #serverParts > 1 then
-			local replicatedPath = table.concat(serverParts, ".", 1, #serverParts - 1)
-			local success = ModelReplicationService.replicateModel(serverPath, replicatedPath)
-			if success then
-				return true
-			end
-		end
-	end
-
-	return ModelReplicationService.replicateAbility(abilityId)
-end
-
 -- Get the center position of an enemy for targeting
 function AbilitySystemBase.getEnemyCenterPosition(enemyEntity: number): Vector3?
 	if not world or not Components then
@@ -672,11 +636,6 @@ function AbilitySystemBase.createProjectile(
 		return nil
 	end
 	
-	-- Ensure model is replicated before creating projectile
-	if balance.modelPath then
-		replicateAbilityModelFromPath(abilityId, balance.modelPath, balance.replicationSourcePath)
-	end
-
 	-- Update collision radius based on actual hitbox size from model
 	local baseCollisionRadius = 1.0  -- Fallback if no model/hitbox found
 	if balance.modelPath then
@@ -725,16 +684,6 @@ function AbilitySystemBase.createProjectile(
 
 		local explosionModelPath = balance.explosionModelPath
 		local explosionClientPath = explosionModelPath
-		if typeof(explosionModelPath) == "string" and explosionModelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
-			local serverPath = explosionModelPath:sub(#"ServerStorage." + 1)
-			local parts = string.split(serverPath, ".")
-			if #parts > 1 then
-				table.remove(parts, #parts)
-				local replicatedPath = table.concat(parts, ".")
-				ModelReplicationService.replicateModel(serverPath, replicatedPath)
-			end
-			explosionClientPath = "ReplicatedStorage." .. serverPath
-		end
 		local explosionRadius = 10
 		if explosionModelPath then
 			local hitboxSize = ModelHitboxHelper.getModelHitboxData(explosionModelPath)
@@ -758,9 +707,6 @@ function AbilitySystemBase.createProjectile(
 	end
 
 	local projectileModelPath = balance.modelPath
-	if typeof(projectileModelPath) == "string" and projectileModelPath:sub(1, #"ServerStorage.") == "ServerStorage." then
-		projectileModelPath = "ReplicatedStorage." .. projectileModelPath:sub(#"ServerStorage." + 1)
-	end
 
 	local payload = {
 		kind = abilityId,
@@ -773,6 +719,7 @@ function AbilitySystemBase.createProjectile(
 		ownerEntity = ownerEntity,
 		pierce = balance.penetration,
 		modelPath = projectileModelPath,
+		modelRotationOffset = balance.modelRotationOffset,
 		visualScale = balance.scale or 1,
 		visualColor = balance.attributeColor,
 		homing = homing,

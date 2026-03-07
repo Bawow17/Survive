@@ -184,6 +184,11 @@ local function rebuildList()
 		if ao ~= bo then
 			return ao < bo
 		end
+		local as = tonumber(a.sortRank) or 0
+		local bs = tonumber(b.sortRank) or 0
+		if as ~= bs then
+			return as < bs
+		end
 		if tostring(a.name) ~= tostring(b.name) then
 			return tostring(a.name) < tostring(b.name)
 		end
@@ -199,6 +204,11 @@ local function rebuildList()
 		local bo = DebugModMenuCatalog.CategoryOrder[b.category] or b.categoryOrder or 99
 		if ao ~= bo then
 			return ao < bo
+		end
+		local as = tonumber(a.sortRank) or 0
+		local bs = tonumber(b.sortRank) or 0
+		if as ~= bs then
+			return as < bs
 		end
 		if tostring(a.name) ~= tostring(b.name) then
 			return tostring(a.name) < tostring(b.name)

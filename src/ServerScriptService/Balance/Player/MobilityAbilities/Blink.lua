@@ -15,7 +15,7 @@ return {
 	groundDistance = 25,  -- studs
 	groundCooldown = 2.0,  -- seconds
 
-	-- VFX models (ServerStorage paths; replicated to ReplicatedStorage)
+	-- VFX models (ReplicatedStorage paths)
 	blinkJumpStartModelPath = "ContentDrawer.PlayerAbilities.MobilityAbilities.Blink.BlinkJump.Start",
 	blinkJumpEndModelPath = "ContentDrawer.PlayerAbilities.MobilityAbilities.Blink.BlinkJump.End",
 	blinkGroundStartModelPath = "ContentDrawer.PlayerAbilities.MobilityAbilities.Blink.BlinkGround.Start",

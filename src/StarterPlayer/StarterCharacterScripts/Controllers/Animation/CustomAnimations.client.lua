@@ -4,29 +4,30 @@
 -- Replace the animation IDs below with your own custom animations
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local localPlayer = Players.LocalPlayer
 
 -- ========================================
--- ANIMATION IDs - Replace with your own!
+-- ANIMATION IDs - defaults are used when custom entries are missing.
 -- ========================================
--- These are Roblox's default R6 animation IDs (as reference)
--- Upload your own animations and replace these IDs
+-- Custom animations are pulled from:
+-- ReplicatedStorage.ContentDrawer.PlayerAbilities.BasicAnimations
 
-local ANIMATION_IDS = {
+local DEFAULT_ANIMATION_IDS = {
 	-- IDLE ANIMATIONS (plays when standing still)
 	idle = {
 		"rbxassetid://180435571",  -- Default R6 idle animation
 		"rbxassetid://180435792",  -- Default R6 idle animation 2 (variation)
 	},
 	
-	-- WALK ANIMATION (plays when walking) - CUSTOM
+	-- WALK ANIMATION (plays when walking)
 	walk = {
-		"rbxassetid://95806595891252",  -- Your custom walk animation
+		"rbxassetid://180426354",  -- Default R6 walk animation
 	},
 	
-	-- RUN ANIMATION (plays when running) - CUSTOM
+	-- RUN ANIMATION (plays when running)
 	run = {
-		"rbxassetid://95806595891252",  -- Your custom run animation
+		"rbxassetid://180426354",  -- Default R6 run animation
 	},
 	
 	-- JUMP ANIMATION (plays when jumping)
@@ -64,6 +65,86 @@ local ANIMATION_IDS = {
 	},
 }
 
+local function cloneAnimationIds(): {[string]: {string}}
+	local clone: {[string]: {string}} = {}
+	for animType, animList in pairs(DEFAULT_ANIMATION_IDS) do
+		local listCopy = table.create(#animList)
+		for index, animId in ipairs(animList) do
+			listCopy[index] = animId
+		end
+		clone[animType] = listCopy
+	end
+	return clone
+end
+
+local function resolveBasicAnimationsFolder(): Folder?
+	local contentDrawer = ReplicatedStorage:FindFirstChild("ContentDrawer")
+	if not contentDrawer then
+		return nil
+	end
+	local playerAbilities = contentDrawer:FindFirstChild("PlayerAbilities")
+	if not playerAbilities then
+		return nil
+	end
+	local basicAnimations = playerAbilities:FindFirstChild("BasicAnimations")
+	if basicAnimations and basicAnimations:IsA("Folder") then
+		return basicAnimations
+	end
+	return nil
+end
+
+local function resolveAnimationIdFromFolder(folder: Folder, childName: string): string?
+	local animation = folder:FindFirstChild(childName)
+	if not animation or not animation:IsA("Animation") then
+		return nil
+	end
+	local animationId = animation.AnimationId
+	if animationId == "" then
+		return nil
+	end
+	return animationId
+end
+
+local function buildAnimationIds(): {[string]: {string}}
+	local animationIds = cloneAnimationIds()
+	local basicAnimations = resolveBasicAnimationsFolder()
+	if not basicAnimations then
+		return animationIds
+	end
+
+	local idle1 = resolveAnimationIdFromFolder(basicAnimations, "Idle1")
+	if idle1 then
+		animationIds.idle[1] = idle1
+	end
+
+	local idle2 = resolveAnimationIdFromFolder(basicAnimations, "Idle2")
+	if idle2 then
+		animationIds.idle[2] = idle2
+	end
+
+	local walk = resolveAnimationIdFromFolder(basicAnimations, "Walk")
+	if walk then
+		animationIds.walk[1] = walk
+	end
+
+	local run = resolveAnimationIdFromFolder(basicAnimations, "Run")
+	if run then
+		animationIds.run[1] = run
+	end
+
+	local jump = resolveAnimationIdFromFolder(basicAnimations, "Jump")
+	if jump then
+		animationIds.jump[1] = jump
+	end
+
+	local fall = resolveAnimationIdFromFolder(basicAnimations, "Fall")
+	if fall then
+		animationIds.fall[1] = fall
+	end
+
+	return animationIds
+end
+
 -- ========================================
 -- ANIMATION OVERRIDE SYSTEM
 -- ========================================
@@ -79,8 +160,10 @@ local function overrideAnimations(character)
 	
 	local overrideCount = 0
 	
+	local animationIds = buildAnimationIds()
+
 	-- Override each animation type
-	for animType, animIdList in pairs(ANIMATION_IDS) do
+	for animType, animIdList in pairs(animationIds) do
 		local folder = animateScript:FindFirstChild(animType)
 		if folder then
 			-- Clear existing animations in folder

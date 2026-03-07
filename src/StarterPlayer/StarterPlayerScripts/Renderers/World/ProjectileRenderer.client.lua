@@ -42,9 +42,6 @@ local ICESHARD_MODEL_PATH_PRIMARY = "ReplicatedStorage.ContentDrawer.PlayerAbili
 local ICESHARD_MODEL_PATH_FALLBACK = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard.IceShard"
 local ICESHARD_ROOT_PRIMARY = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard"
 local ICESHARD_ROOT_FALLBACK = "ReplicatedStorage.ContentDrawer.Attacks.Abilties.IceShard"
--- IceShardModel is authored with its local top (+Y) as the forward-facing axis.
--- Rotate it so its UpVector points along the projectile travel direction.
-local ICESHARD_ROTATION_OFFSET = CFrame.Angles(math.rad(-90), 0, 0)
 local HOMING_DIR_BLEND = 0.5
 local AUTHORITATIVE_TIMEOUT = 0.35
 local EXPLOSION_STEPS = 10
@@ -108,6 +105,7 @@ type ProjectileRecord = {
 	lifetime: number?,
 	expiresAt: number?,
 	modelPath: string?,
+	rotationOffset: CFrame?,
 	visualScale: number?,
 	visualColor: Color3?,
 	ownerUserId: number?,
@@ -696,10 +694,6 @@ local function applyVisual(record: ProjectileRecord)
 	applyProjectileOpacity(record)
 end
 
-local function usesIceShardRotationOffset(record: ProjectileRecord): boolean
-	return record.kind == "IceShard"
-end
-
 local function updateModelTransform(record: ProjectileRecord, position: Vector3, direction: Vector3)
 	if record.beam and record.beamVisual then
 		return
@@ -713,8 +707,8 @@ local function updateModelTransform(record: ProjectileRecord, position: Vector3,
 		return
 	end
 	local cf = CFrame.lookAt(position, position + direction)
-	if usesIceShardRotationOffset(record) then
-		cf = cf * ICESHARD_ROTATION_OFFSET
+	if record.rotationOffset then
+		cf = cf * record.rotationOffset
 	end
 	model:PivotTo(cf)
 end
@@ -1446,6 +1440,7 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 				lifetime = lifetime,
 				expiresAt = lifetime and (spawnTime + lifetime) or nil,
 				modelPath = resolveModelPath(kind, data.modelPath),
+				rotationOffset = typeof(data.rotationOffset) == "CFrame" and data.rotationOffset or nil,
 				visualScale = typeof(data.scale) == "number" and data.scale or nil,
 				visualColor = typeof(data.color) == "Color3" and data.color or nil,
 				ownerUserId = ownerUserId,
@@ -1478,6 +1473,7 @@ ProjectilesSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 			record.lifetime = lifetime
 			record.expiresAt = lifetime and (spawnTime + lifetime) or nil
 			record.modelPath = resolveModelPath(record.kind, data.modelPath) or record.modelPath
+			record.rotationOffset = typeof(data.rotationOffset) == "CFrame" and data.rotationOffset or record.rotationOffset
 			record.visualScale = typeof(data.scale) == "number" and data.scale or record.visualScale
 			record.visualColor = typeof(data.color) == "Color3" and data.color or record.visualColor
 			record.ownerUserId = ownerUserId or record.ownerUserId

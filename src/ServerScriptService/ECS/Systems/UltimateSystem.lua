@@ -4,12 +4,10 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
 
 local GameStateManager = require(script.Parent.GameStateManager)
 local PassiveEffectSystem = require(script.Parent.PassiveEffectSystem)
-local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 
 local UltimateSystem = {}
 local TemporalStasisSystem: any
@@ -48,9 +46,9 @@ local TIME_STOP_RADIUS = 70
 local STATE_SEND_INTERVAL = 0.1
 local STATE_CHARGE_EPSILON = 0.5
 
-local ANIMATION_SOURCE_PATH = "ServerStorage.ContentDrawer.PlayerAbilities.Ice.Ultimate.TempusGelidum.TempusGelidum"
-local BUBBLE_SOURCE_PATH = "ServerStorage.ContentDrawer.PlayerAbilities.Ice.Ultimate.TempusGelidum.Bubble"
-local BUBBLE2_SOURCE_PATH = "ServerStorage.ContentDrawer.PlayerAbilities.Ice.Ultimate.TempusGelidum.Bubble2"
+local ANIMATION_SOURCE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Ultimate.TempusGelidum.TempusGelidum"
+local BUBBLE_SOURCE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Ultimate.TempusGelidum.Bubble"
+local BUBBLE2_SOURCE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Ultimate.TempusGelidum.Bubble2"
 
 local abilityCastRemote: RemoteEvent? = nil
 local sprintForceOffRemote: RemoteEvent? = nil
@@ -78,15 +76,7 @@ local resolvedAnimationSourceCache: Instance? = nil
 local resolvedBubbleSourceCache: Instance? = nil
 local resolvedBubble2SourceCache: Instance? = nil
 
-local ULTIMATE_ROOT_PATH = "ServerStorage.ContentDrawer.PlayerAbilities.Ice.Ultimate.TempusGelidum"
-local ULTIMATE_REPLICATED_ROOT_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Ultimate.TempusGelidum"
-
-local replicatedAnimationSourcePath: string? = nil
-local replicatedBubbleSourcePath: string? = nil
-local replicatedBubble2SourcePath: string? = nil
-local warnedAnimationReplicationFailure = false
-local warnedBubbleReplicationFailure = false
-local warnedBubble2ReplicationFailure = false
+local ULTIMATE_ROOT_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Ultimate.TempusGelidum"
 local lastRejectLogAtByUserId: {[number]: number} = {}
 
 local function logReject(player: Player, reason: string)
@@ -162,10 +152,7 @@ local function findInstanceByDotPath(path: string): Instance?
 	local parts = string.split(path, ".")
 	local current: Instance? = game
 	local startIndex = 1
-	if parts[1] == "ServerStorage" then
-		current = ServerStorage
-		startIndex = 2
-	elseif parts[1] == "ReplicatedStorage" then
+	if parts[1] == "ReplicatedStorage" then
 		current = ReplicatedStorage
 		startIndex = 2
 	elseif parts[1] == "Workspace" then
@@ -210,82 +197,9 @@ local function extractLeafName(path: string): string
 	return parts[#parts] or ""
 end
 
-local function getServerRelativePath(dotPath: string): string?
-	if typeof(dotPath) ~= "string" or dotPath == "" then
-		return nil
-	end
-
-	local normalized = dotPath
-	if string.find(normalized, "game.", 1, true) == 1 then
-		normalized = string.sub(normalized, #"game." + 1)
-	end
-	if string.find(normalized, "ServerStorage.", 1, true) == 1 then
-		return string.sub(normalized, #"ServerStorage." + 1)
-	end
-	return nil
-end
-
-local function getReplicatedDotPathFromServerDotPath(serverDotPath: string): string?
-	local serverRelative = getServerRelativePath(serverDotPath)
-	if not serverRelative then
-		return nil
-	end
-	return "ReplicatedStorage." .. serverRelative
-end
-
-local function replicateSourceToReplicatedStorage(serverDotPath: string, warnOnFailure: boolean): string?
-	local relativePath = getServerRelativePath(serverDotPath)
-	if not relativePath then
-		return nil
-	end
-
-	local parts = string.split(relativePath, ".")
-	if #parts == 0 then
-		return nil
-	end
-
-	local replicatedParentPath = if #parts > 1 then table.concat(parts, ".", 1, #parts - 1) else ""
-	local success, _ = ModelReplicationService.replicateModel(relativePath, replicatedParentPath)
-	if not success then
-		if warnOnFailure then
-			warn(string.format("[UltimateSystem] Failed to replicate source: %s", serverDotPath))
-		end
-		return nil
-	end
-
-	return "ReplicatedStorage." .. relativePath
-end
-
+-- ContentDrawer is now in ReplicatedStorage natively; assets are always available.
 local function ensureUltimateAssetsReplicated()
-	if not replicatedAnimationSourcePath then
-		replicatedAnimationSourcePath = replicateSourceToReplicatedStorage(
-			ANIMATION_SOURCE_PATH,
-			not warnedAnimationReplicationFailure
-		)
-		if not replicatedAnimationSourcePath then
-			warnedAnimationReplicationFailure = true
-		end
-	end
-
-	if not replicatedBubbleSourcePath then
-		replicatedBubbleSourcePath = replicateSourceToReplicatedStorage(
-			BUBBLE_SOURCE_PATH,
-			not warnedBubbleReplicationFailure
-		)
-		if not replicatedBubbleSourcePath then
-			warnedBubbleReplicationFailure = true
-		end
-	end
-
-	if not replicatedBubble2SourcePath then
-		replicatedBubble2SourcePath = replicateSourceToReplicatedStorage(
-			BUBBLE2_SOURCE_PATH,
-			not warnedBubble2ReplicationFailure
-		)
-		if not replicatedBubble2SourcePath then
-			warnedBubble2ReplicationFailure = true
-		end
-	end
+	-- No-op: assets live in ReplicatedStorage directly.
 end
 
 local function resolveSourceWithFallback(path: string, fallbackRootPath: string): Instance?
@@ -303,10 +217,6 @@ local function resolveSourceWithFallback(path: string, fallbackRootPath: string)
 		end
 	end
 
-	local serverFallback = findFirstDescendantByName(ServerStorage, extractLeafName(path))
-	if serverFallback then
-		return serverFallback
-	end
 
 	local replicatedFallback = findFirstDescendantByName(ReplicatedStorage, extractLeafName(path))
 	if replicatedFallback then
@@ -344,15 +254,6 @@ local function getAnimationIdsFromSourcePath(sourcePath: string): {[string]: str
 	end
 	if not source then
 		source = resolveSourceWithFallback(sourcePath, ULTIMATE_ROOT_PATH)
-	end
-	if not source and replicatedAnimationSourcePath then
-		source = resolveSourceWithFallback(replicatedAnimationSourcePath, ULTIMATE_REPLICATED_ROOT_PATH)
-	end
-	if not source then
-		local replicatedMirrorPath = getReplicatedDotPathFromServerDotPath(sourcePath)
-		if replicatedMirrorPath then
-			source = resolveSourceWithFallback(replicatedMirrorPath, ULTIMATE_REPLICATED_ROOT_PATH)
-		end
 	end
 	if source then
 		resolvedAnimationSourceCache = source
@@ -582,7 +483,6 @@ end
 
 local function resolveBubbleSource(
 	sourcePath: string,
-	replicatedPath: string?,
 	cachedSource: Instance?
 ): Instance?
 	local source = cachedSource
@@ -591,15 +491,6 @@ local function resolveBubbleSource(
 	end
 	if not source then
 		source = resolveSourceWithFallback(sourcePath, ULTIMATE_ROOT_PATH)
-	end
-	if not source and replicatedPath then
-		source = resolveSourceWithFallback(replicatedPath, ULTIMATE_REPLICATED_ROOT_PATH)
-	end
-	if not source then
-		local replicatedMirrorPath = getReplicatedDotPathFromServerDotPath(sourcePath)
-		if replicatedMirrorPath then
-			source = resolveSourceWithFallback(replicatedMirrorPath, ULTIMATE_REPLICATED_ROOT_PATH)
-		end
 	end
 	return source
 end
@@ -765,7 +656,7 @@ end
 local function spawnBubbleAt(position: Vector3)
 	ensureUltimateAssetsReplicated()
 
-	local bubble1Source = resolveBubbleSource(BUBBLE_SOURCE_PATH, replicatedBubbleSourcePath, resolvedBubbleSourceCache)
+	local bubble1Source = resolveBubbleSource(BUBBLE_SOURCE_PATH, resolvedBubbleSourceCache)
 	resolvedBubbleSourceCache = bubble1Source
 	if bubble1Source then
 		animateBubbleFromSource(bubble1Source, position, 0.5, "TempusGelidumBubble")
@@ -774,7 +665,7 @@ local function spawnBubbleAt(position: Vector3)
 		warnedMissingBubbleSource = true
 	end
 
-	local bubble2Source = resolveBubbleSource(BUBBLE2_SOURCE_PATH, replicatedBubble2SourcePath, resolvedBubble2SourceCache)
+	local bubble2Source = resolveBubbleSource(BUBBLE2_SOURCE_PATH, resolvedBubble2SourceCache)
 	resolvedBubble2SourceCache = bubble2Source
 	if bubble2Source then
 		animateBubbleFromSource(bubble2Source, position, 0.0, "TempusGelidumBubble2")

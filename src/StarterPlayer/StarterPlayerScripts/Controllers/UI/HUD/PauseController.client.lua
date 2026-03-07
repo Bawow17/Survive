@@ -187,6 +187,7 @@ local DebugGrantLevels = remotes:FindFirstChild("DebugGrantLevels") :: RemoteEve
 local debugEnabled = DebugPauseFlag and DebugPauseFlag.Value or false
 
 local UpgradeIcons = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UpgradeIcons"))
+local IconAssetResolver = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("IconAssetResolver"))
 
 local currentPauseToken: number? = nil
 local debugReproActive = false
@@ -786,11 +787,8 @@ local function populateChoice(choiceFrame: Frame, upgradeData: any, index: numbe
 				end
 			end
 		end
-			if iconId and iconId ~= "" then
-				local iconStr = tostring(iconId)
-				if iconStr:match("^%d+$") then
-					iconStr = "rbxassetid://" .. iconStr
-				end
+			local iconStr = IconAssetResolver.resolve(iconId)
+			if iconStr and iconStr ~= "" then
 				iconImage.Image = iconStr
 				iconImage.ImageTransparency = 0
 				iconImage.Visible = true

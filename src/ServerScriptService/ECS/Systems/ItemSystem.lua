@@ -3,7 +3,6 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ServerStorage = game:GetService("ServerStorage")
 local TweenService = game:GetService("TweenService")
 local Debris = game:GetService("Debris")
 local Workspace = game:GetService("Workspace")
@@ -58,10 +57,11 @@ local world: any
 local Components: any
 local PickupService: any
 local ProjectileService: any
-local ModelReplicationService: any
 local PassiveEffectSystemRef: any
 local ExpSystemRef: any
 local EnemyStunSystem: any
+local EnemyAilmentSystemRef: any
+local ItemSpawnServiceRef: any
 
 local Position: any
 local PlayerStats: any
@@ -77,6 +77,8 @@ local pendingFuseBombs: {PendingFuseBomb} = {}
 local activeItemDropIds: {[number]: boolean} = {}
 local itemStateRemote: RemoteEvent
 local reapplyPassiveEffects: (playerEntity: number) -> ()
+local getScaledBaseDamage: (playerEntity: number) -> number
+local isEnemyAlive: (enemyEntity: number?) -> boolean
 
 local RNG = Random.new()
 
@@ -110,18 +112,6 @@ local function isCommonItemVisualInstance(instance: Instance?): boolean
 end
 
 local function getCommonItemsFolder(): Instance?
-	local contentDrawer = ServerStorage:FindFirstChild("ContentDrawer")
-	if not contentDrawer then
-		return nil
-	end
-	local itemModels = contentDrawer:FindFirstChild("ItemModels")
-	if not itemModels then
-		return nil
-	end
-	return itemModels:FindFirstChild("CommonItems")
-end
-
-local function getReplicatedCommonItemsFolder(): Instance?
 	local contentDrawer = ReplicatedStorage:FindFirstChild("ContentDrawer")
 	if not contentDrawer then
 		return nil
@@ -133,20 +123,11 @@ local function getReplicatedCommonItemsFolder(): Instance?
 	return itemModels:FindFirstChild("CommonItems")
 end
 
-local function resolveCommonItemModelName(modelName: string): string
-	if ModelReplicationService and ModelReplicationService.resolveCommonItemVisualName then
-		local resolved = ModelReplicationService.resolveCommonItemVisualName(modelName)
-		if typeof(resolved) == "string" and resolved ~= "" then
-			return resolved
-		end
-	end
-	if ModelReplicationService and ModelReplicationService.resolveCommonItemName then
-		local resolved = ModelReplicationService.resolveCommonItemName(modelName)
-		if typeof(resolved) == "string" and resolved ~= "" then
-			return resolved
-		end
-	end
+local function getReplicatedCommonItemsFolder(): Instance?
+	return getCommonItemsFolder()
+end
 
+local function resolveCommonItemModelName(modelName: string): string
 	local commonItems = getCommonItemsFolder()
 	if not commonItems then
 		return modelName
@@ -166,28 +147,8 @@ local function resolveCommonItemModelName(modelName: string): string
 	return modelName
 end
 
-local function replicateCommonItemModel(modelName: string)
-	local replicatedCommonItems = getReplicatedCommonItemsFolder()
-	if replicatedCommonItems then
-		local exact = replicatedCommonItems:FindFirstChild(modelName)
-		if isCommonItemVisualInstance(exact) then
-			return
-		end
-
-		local wanted = normalizeLookupKey(modelName)
-		for _, child in ipairs(replicatedCommonItems:GetChildren()) do
-			if isCommonItemVisualInstance(child) and normalizeLookupKey(child.Name) == wanted then
-				return
-			end
-		end
-	end
-	if ModelReplicationService and ModelReplicationService.replicateCommonItemVisual then
-		ModelReplicationService.replicateCommonItemVisual(modelName)
-		return
-	end
-	if ModelReplicationService and ModelReplicationService.replicateCommonItem then
-		ModelReplicationService.replicateCommonItem(modelName)
-	end
+-- Items live in ReplicatedStorage natively; no replication needed.
+local function replicateCommonItemModel(_modelName: string)
 end
 
 local function getCommonItemTemplate(modelName: string): Instance?
@@ -278,6 +239,26 @@ local function getModelGroundPivotLift(modelName: string, fallback: number): num
 	return getTemplateGroundPivotLift(template, fallback)
 end
 
+local function getTemplateAuraAttachmentOffset(template: Instance?): Vector3
+	if not template or not template:IsA("Model") then
+		return Vector3.zero
+	end
+
+	local primary = template.PrimaryPart or template:FindFirstChildWhichIsA("BasePart")
+	if not primary then
+		return Vector3.zero
+	end
+
+	local ok, boundsCFrame = pcall(function()
+		return template:GetBoundingBox()
+	end)
+	if not ok or typeof(boundsCFrame) ~= "CFrame" then
+		return Vector3.zero
+	end
+
+	return primary.CFrame:PointToObjectSpace(boundsCFrame.Position)
+end
+
 local function spawnWorldModel(modelName: string, position: Vector3, stripHighlight: boolean?): Instance?
 	local template = getCommonItemTemplate(modelName)
 	if not template then
@@ -335,6 +316,18 @@ local function getPlayerFromEntity(playerEntity: number): Player?
 	local stats = world:get(playerEntity, PlayerStats)
 	if stats and stats.player and stats.player.Parent == Players then
 		return stats.player
+	end
+	return nil
+end
+
+local function getEntityFromPlayer(player: Player): number?
+	if not world or not PlayerStats then
+		return nil
+	end
+	for entity, stats in world:query(PlayerStats) do
+		if stats and stats.player == player then
+			return entity
+		end
 	end
 	return nil
 end
@@ -409,16 +402,8 @@ local function getStuffingTemplate(): Instance?
 	return nil
 end
 
+-- Items live in ReplicatedStorage natively; no replication needed.
 local function replicateStuffingModel()
-	local replicatedCommonItems = getReplicatedCommonItemsFolder()
-	if replicatedCommonItems and isCommonItemVisualInstance(replicatedCommonItems:FindFirstChild("Stuffing")) then
-		return
-	end
-	if ModelReplicationService and ModelReplicationService.replicateCommonItemWithExtracts then
-		ModelReplicationService.replicateCommonItemWithExtracts("TeddyBloxpin", { "Stuffing" })
-		return
-	end
-	replicateCommonItemModel("TeddyBloxpin")
 end
 
 local function ensureEntityState(playerEntity: number): ItemState
@@ -483,12 +468,14 @@ local function sendItemState(playerEntity: number)
 	})
 end
 
+local BASE_CRIT_CHANCE = 0.01
+
 local function clearEntityState(playerEntity: number, sendEmptyState: boolean)
 	if world and world:contains(playerEntity) then
 		if PassiveEffects then
 			local effects = world:get(playerEntity, PassiveEffects)
 			if effects then
-				effects.critChance = 0
+				effects.critChance = BASE_CRIT_CHANCE
 				effects.healthMultiplier = 1.0
 				effects.healthFlatBonus = 0
 				effects.moveSpeedMultiplier = 1.0
@@ -617,6 +604,70 @@ local function tryProcLaserElectrocutor(sourcePlayerEntity: number, targetEnemyE
 	EnemyStunSystem.applyStun(targetEnemyEntity, cfg.stunDuration, "Stun")
 end
 
+local function tryProcWitchesBrew(sourcePlayerEntity: number, targetEnemyEntity: number, rawProcCoefficient: any)
+	if not EnemyAilmentSystemRef or not EnemyAilmentSystemRef.applyLesserPoison then
+		return
+	end
+	if getEntityTypeName(targetEnemyEntity) ~= "Enemy" then
+		return
+	end
+
+	local stacks = getItemStackCount(sourcePlayerEntity, RunItems.Ids.WitchesBrew)
+	if stacks <= 0 then
+		return
+	end
+	if typeof(rawProcCoefficient) ~= "number" or rawProcCoefficient <= 0 then
+		return
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.WitchesBrew].witchesBrew
+	local coeff = clampProcCoefficient(rawProcCoefficient)
+	local chance = cfg.baseProcChance + (cfg.procChancePerAdditionalStack * math.max(0, stacks - 1))
+	local effectiveChance = math.clamp(chance * coeff, 0, 1)
+	if effectiveChance <= 0 or RNG:NextNumber() > effectiveChance then
+		return
+	end
+
+	EnemyAilmentSystemRef.applyLesserPoison(
+		targetEnemyEntity,
+		sourcePlayerEntity,
+		cfg.stacksAppliedOnProc,
+		coeff
+	)
+end
+
+local function tryProcSurvivalKnife(sourcePlayerEntity: number, targetEnemyEntity: number, rawProcCoefficient: any)
+	if not EnemyAilmentSystemRef or not EnemyAilmentSystemRef.applyBleed then
+		return
+	end
+	if getEntityTypeName(targetEnemyEntity) ~= "Enemy" then
+		return
+	end
+
+	local stacks = getItemStackCount(sourcePlayerEntity, RunItems.Ids.SurvivalKnife)
+	if stacks <= 0 then
+		return
+	end
+	if typeof(rawProcCoefficient) ~= "number" or rawProcCoefficient <= 0 then
+		return
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.SurvivalKnife].survivalKnife
+	local coeff = clampProcCoefficient(rawProcCoefficient)
+	local chance = cfg.baseProcChance + (cfg.procChancePerAdditionalStack * math.max(0, stacks - 1))
+	local effectiveChance = math.clamp(chance * coeff, 0, 1)
+	if effectiveChance <= 0 or RNG:NextNumber() > effectiveChance then
+		return
+	end
+
+	EnemyAilmentSystemRef.applyBleed(
+		targetEnemyEntity,
+		sourcePlayerEntity,
+		cfg.stacksAppliedOnProc,
+		coeff
+	)
+end
+
 local function tryGrantBuildersClubHardHatTix(targetPlayerEntity: number)
 	local stacks = getItemStackCount(targetPlayerEntity, RunItems.Ids.BuildersClubHardHat)
 	if stacks <= 0 then
@@ -648,6 +699,63 @@ local function tryGrantAppleOverheal(sourcePlayerEntity: number)
 		+ (cfg.overhealOnKillPerAdditionalStack * math.max(0, stacks - 1))
 	if overhealAmount > 0 then
 		OverhealSystem.grantOverheal(sourcePlayerEntity, overhealAmount)
+	end
+end
+
+local function triggerHotSauce(sourcePlayerEntity: number, killedEnemyEntity: number)
+	if not EnemyAilmentSystemRef or not EnemyAilmentSystemRef.applyLesserFlame then
+		return
+	end
+	if getEntityTypeName(killedEnemyEntity) ~= "Enemy" then
+		return
+	end
+
+	local stacks = getItemStackCount(sourcePlayerEntity, RunItems.Ids.HotSauce)
+	if stacks <= 0 then
+		return
+	end
+
+	local centerPos = getEntityPosition(killedEnemyEntity)
+	if not centerPos then
+		return
+	end
+
+	local cfg = RunItems.Definitions[RunItems.Ids.HotSauce].hotSauce
+	local extraStacks = math.max(0, stacks - 1)
+	local radius = cfg.baseRadius + (cfg.radiusPerAdditionalStack * extraStacks)
+	local damage = getScaledBaseDamage(sourcePlayerEntity) * cfg.damageCoefficient
+	local candidates = OctreeSystem.getEnemiesInRadius(centerPos, radius + cfg.octreePadding)
+
+	for _, enemyId in ipairs(candidates) do
+		if enemyId == killedEnemyEntity then
+			continue
+		end
+		if not isEnemyAlive(enemyId) then
+			continue
+		end
+
+		local hit = false
+		local collider = EnemyColliderService.getWorldHitbox(enemyId)
+		if collider then
+			hit = (collider.center - centerPos).Magnitude <= (radius + collider.radius)
+		else
+			local enemyPos = getEntityPosition(enemyId)
+			if enemyPos then
+				hit = (enemyPos - centerPos).Magnitude <= radius
+			end
+		end
+
+		if hit then
+			EnemyAilmentSystemRef.applyLesserFlame(
+				enemyId,
+				sourcePlayerEntity,
+				cfg.lesserFlameStacksApplied,
+				1.0
+			)
+			DamageSystem.applyDamage(enemyId, damage, "explosion", sourcePlayerEntity, "HotSauce", {
+				procCoefficient = 0,
+			})
+		end
 	end
 end
 
@@ -705,7 +813,7 @@ local function recomputeStaticItemPassives(playerEntity: number)
 		return
 	end
 
-	local critChance = 0
+	local critChance = BASE_CRIT_CHANCE
 	local moveSpeedBonus = 0
 	local healthMultiplierBonus = 0
 	local healthFlatBonus = 0
@@ -716,7 +824,7 @@ local function recomputeStaticItemPassives(playerEntity: number)
 	local aduriteStacks = getItemStackCount(playerEntity, RunItems.Ids.AduriteCape)
 	if aduriteStacks > 0 then
 		local cfg = RunItems.Definitions[RunItems.Ids.AduriteCape].aduriteCape
-		critChance = cfg.baseCritChance + (cfg.critChancePerAdditionalStack * math.max(0, aduriteStacks - 1))
+		critChance += cfg.baseCritChance + (cfg.critChancePerAdditionalStack * math.max(0, aduriteStacks - 1))
 	end
 
 	local speedCoilStacks = getItemStackCount(playerEntity, RunItems.Ids.SpeedCoil)
@@ -760,7 +868,7 @@ local function recomputeStaticItemPassives(playerEntity: number)
 			+ (cfg.closeRangeDamageBonusPerAdditionalStack * extraStacks)
 	end
 
-	effects.critChance = math.max(0, critChance)
+	effects.critChance = math.clamp(critChance, 0, 1)
 	effects.moveSpeedMultiplier = math.max(0.1, 1.0 + moveSpeedBonus)
 	effects.healthMultiplier = math.max(0.1, 1.0 + healthMultiplierBonus)
 	effects.healthFlatBonus = math.max(0, healthFlatBonus)
@@ -1010,7 +1118,7 @@ local function addItemToEntity(playerEntity: number, itemId: string)
 	sendItemState(playerEntity)
 end
 
-local function getScaledBaseDamage(playerEntity: number): number
+getScaledBaseDamage = function(playerEntity: number): number
 	local level = 1
 	if Level then
 		local levelComp = world:get(playerEntity, Level)
@@ -1182,7 +1290,7 @@ local function triggerFuseBomb(targetPlayerEntity: number, procCoefficient: numb
 	})
 end
 
-local function isEnemyAlive(enemyEntity: number?): boolean
+isEnemyAlive = function(enemyEntity: number?): boolean
 	if typeof(enemyEntity) ~= "number" then
 		return false
 	end
@@ -1318,7 +1426,7 @@ function ItemSystem.onAttackAttempt(data: {[string]: any})
 	end
 
 	local now = GameTimeSystem.getGameTime()
-	if abilityId == "OathkeeperPrimary" then
+	if abilityId == "HeavyTrigger" then
 		handleHistoricTimmyPrimaryAttack(sourceEntity, now)
 	else
 		breakHistoricTimmy(sourceEntity, now, true)
@@ -1335,7 +1443,6 @@ function ItemSystem.init(worldRef: any, components: any, deps: {[string]: any})
 	Components = components
 	PickupService = deps.PickupService
 	ProjectileService = deps.ProjectileService
-	ModelReplicationService = deps.ModelReplicationService
 	PassiveEffectSystemRef = deps.PassiveEffectSystem
 	ExpSystemRef = deps.ExpSystem
 
@@ -1362,27 +1469,27 @@ function ItemSystem.setEnemyStunSystem(enemyStunSystemRef: any)
 	EnemyStunSystem = enemyStunSystemRef
 end
 
+function ItemSystem.setEnemyAilmentSystem(enemyAilmentSystemRef: any)
+	EnemyAilmentSystemRef = enemyAilmentSystemRef
+end
+
+function ItemSystem.setItemSpawnService(itemSpawnServiceRef: any)
+	ItemSpawnServiceRef = itemSpawnServiceRef
+end
+
 function ItemSystem.onEntityRemoved(entity: number)
 	if itemStateByEntity[entity] then
 		clearEntityState(entity, true)
 	end
 end
 
-function ItemSystem.spawnDebugDropForPlayer(player: Player, itemId: string): (boolean, string)
+local function spawnItemPickupAtPosition(itemId: string, spawnPos: Vector3): number?
 	local def = RunItems.get(itemId)
-	if not def then
-		return false, "Unknown item id"
-	end
-	if not PickupService then
-		return false, "PickupService unavailable"
+	if not def or not PickupService then
+		return nil
 	end
 
 	local dropCfg = RunItems.DefaultDropSettings
-	local spawnPos = getForwardGroundedDropPosition(player, dropCfg.forwardDistance, dropCfg.groundLift)
-	if not spawnPos then
-		return false, "Missing HumanoidRootPart"
-	end
-
 	local resolvedDropModelName = resolveCommonItemModelName(def.dropModelName)
 	replicateCommonItemModel(resolvedDropModelName)
 	local modelPath = buildReplicatedCommonItemPath(resolvedDropModelName)
@@ -1419,7 +1526,96 @@ function ItemSystem.spawnDebugDropForPlayer(player: Player, itemId: string): (bo
 		activeItemDropIds[pickupId] = true
 	end
 
+	return pickupId
+end
+
+local function getAnimatedSpawnOrigin(player: Player): (Vector3?, Instance?)
+	local character = player.Character
+	if not character then
+		return nil, nil
+	end
+
+	local originPart = character:FindFirstChild("UpperTorso")
+	if not originPart then
+		originPart = character:FindFirstChild("Torso")
+	end
+	if not originPart then
+		originPart = character:FindFirstChild("HumanoidRootPart")
+	end
+	if not originPart or not originPart:IsA("BasePart") then
+		return nil, character
+	end
+
+	return originPart.Position, character
+end
+
+local function spawnAnimatedItemDropForPlayer(player: Player, itemId: string): (boolean, string)
+	local def = RunItems.get(itemId)
+	if not def then
+		return false, "Unknown item id"
+	end
+	if not ItemSpawnServiceRef or not ItemSpawnServiceRef.spawnAnimatedItemDrop then
+		return false, "ItemSpawnService unavailable"
+	end
+
+	local originPosition, ignoreInstance = getAnimatedSpawnOrigin(player)
+	if not originPosition then
+		return false, "Missing torso"
+	end
+
+	local resolvedDropModelName = resolveCommonItemModelName(def.dropModelName)
+	local template = getCommonItemTemplate(resolvedDropModelName)
+	local auraAttachmentOffset = getTemplateAuraAttachmentOffset(template)
+	local landingLift = getModelGroundPivotLift(resolvedDropModelName, 0.25) + 0.05
+	local ownerEntity = getEntityFromPlayer(player)
+
+	local ok, message = ItemSpawnServiceRef.spawnAnimatedItemDrop({
+		itemId = itemId,
+		originPosition = originPosition,
+		ownerEntity = ownerEntity,
+		landingSearchRadius = 10.0,
+		landingLift = landingLift,
+		auraAttachmentOffset = auraAttachmentOffset,
+		ignoreInstance = ignoreInstance,
+		pickupFactory = function(landingPosition: Vector3): number?
+			return spawnItemPickupAtPosition(itemId, landingPosition)
+		end,
+	})
+
+	return ok, message
+end
+
+function ItemSystem.spawnDebugDropForPlayer(player: Player, itemId: string): (boolean, string)
+	local def = RunItems.get(itemId)
+	if not def then
+		return false, "Unknown item id"
+	end
+	if not PickupService then
+		return false, "PickupService unavailable"
+	end
+
+	if ItemSpawnServiceRef and ItemSpawnServiceRef.spawnAnimatedItemDrop then
+		return spawnAnimatedItemDropForPlayer(player, itemId)
+	end
+
+	local dropCfg = RunItems.DefaultDropSettings
+	local spawnPos = getForwardGroundedDropPosition(player, dropCfg.forwardDistance, dropCfg.groundLift)
+	if not spawnPos then
+		return false, "Missing HumanoidRootPart"
+	end
+
+	local pickupId = spawnItemPickupAtPosition(itemId, spawnPos)
 	return pickupId ~= nil, if pickupId then "Spawned item drop" else "Failed to spawn item drop"
+end
+
+function ItemSystem.clearDebugItemsForPlayer(player: Player): (boolean, string)
+	local playerEntity = getEntityFromPlayer(player)
+	if not playerEntity then
+		return false, "Player entity missing"
+	end
+
+	clearEntityState(playerEntity, true)
+	return true, "Cleared all items"
 end
 
 function ItemSystem.onDamageResolved(data: {[string]: any})
@@ -1433,6 +1629,7 @@ function ItemSystem.onDamageResolved(data: {[string]: any})
 		return
 	end
 
+	local rawProcCoefficient = data.procCoefficient
 	local procCoefficient = clampProcCoefficient(data.procCoefficient)
 
 	local targetEntity = data.targetEntity
@@ -1465,7 +1662,10 @@ function ItemSystem.onDamageResolved(data: {[string]: any})
 	then
 		if died then
 			tryGrantAppleOverheal(sourceEntity)
+			triggerHotSauce(sourceEntity, targetEntity)
 		end
+		tryProcWitchesBrew(sourceEntity, targetEntity, rawProcCoefficient)
+		tryProcSurvivalKnife(sourceEntity, targetEntity, rawProcCoefficient)
 		tryProcLaserElectrocutor(sourceEntity, targetEntity, procCoefficient)
 	end
 
@@ -1474,8 +1674,8 @@ function ItemSystem.onDamageResolved(data: {[string]: any})
 		and typeof(sourceEntity) == "number"
 		and getEntityTypeName(sourceEntity) == "Player"
 		and abilityId ~= "SilverNinjaStaroftheBrilliantLight"
-		and abilityId ~= "OathkeeperPrimary"
-		and abilityId ~= "OathkeeperSecondary"
+		and abilityId ~= "HeavyTrigger"
+		and abilityId ~= "PowerSurge"
 	then
 		triggerSilverStar(sourceEntity, targetEntity, procCoefficient, nil)
 	end

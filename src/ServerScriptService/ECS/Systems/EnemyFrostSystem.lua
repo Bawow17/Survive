@@ -91,6 +91,50 @@ local function getActiveFreezeData(enemyEntity: number, now: number): any?
 	return nil
 end
 
+local function refreshCombinedExecuteThreshold(enemyEntity: number)
+	if DamageSystemRef and DamageSystemRef.refreshEnemyExecuteThreshold then
+		DamageSystemRef.refreshEnemyExecuteThreshold(enemyEntity)
+	end
+end
+
+local function getGreaterFrostExecuteThresholdForStacks(stacks: number): number
+	local normalizedStacks = math.max(math.floor(stacks or 0), 0)
+	if normalizedStacks <= 0 then
+		return 0
+	end
+	return math.min(BASE_EXECUTE_THRESHOLD + (0.15 * math.max(normalizedStacks - 1, 0)), MAX_EXECUTE_THRESHOLD)
+end
+
+local function refreshFreezeExecuteContribution(enemyEntity: number, nowOverride: number?)
+	if not world or not EnemyFreeze or not enemyEntity or not world:contains(enemyEntity) then
+		return
+	end
+
+	local now = nowOverride or tick()
+	local freezeData = world:get(enemyEntity, EnemyFreeze)
+	if not (freezeData and typeof(freezeData) == "table") then
+		refreshCombinedExecuteThreshold(enemyEntity)
+		return
+	end
+	if (tonumber(freezeData.endTime) or 0) <= now then
+		refreshCombinedExecuteThreshold(enemyEntity)
+		return
+	end
+
+	local executeThreshold = 0
+	if EnemyGreaterFrost then
+		local greaterFrost = world:get(enemyEntity, EnemyGreaterFrost)
+		if greaterFrost and typeof(greaterFrost) == "table" and (tonumber(greaterFrost.endTime) or 0) > now then
+			executeThreshold = getGreaterFrostExecuteThresholdForStacks(tonumber(greaterFrost.stacks) or 0)
+		end
+	end
+
+	local updated = table.clone(freezeData)
+	updated.executeThreshold = executeThreshold
+	DirtyService.setIfChanged(world, enemyEntity, EnemyFreeze, updated, "EnemyFreeze")
+	refreshCombinedExecuteThreshold(enemyEntity)
+end
+
 local function refreshFreeze(
 	enemyEntity: number,
 	source: string,
@@ -130,44 +174,10 @@ local function refreshFreeze(
 end
 
 local function tryExecuteFrozenEnemy(enemyEntity: number, sourceEntity: number?): boolean
-	if not world or not DamageSystemRef or not enemyEntity or not isEnemyEntity(enemyEntity) then
+	if not DamageSystemRef or not DamageSystemRef.tryExecuteEnemyByThreshold then
 		return false
 	end
-
-	local now = tick()
-	local freezeData = getActiveFreezeData(enemyEntity, now)
-	if not freezeData then
-		return false
-	end
-	if DeathAnimation and world:has(enemyEntity, DeathAnimation) then
-		return false
-	end
-
-	local health = world:get(enemyEntity, Health)
-	if not health or not health.current or health.current <= 0 or not health.max or health.max <= 0 then
-		return false
-	end
-
-	local executeThreshold = math.clamp(tonumber(freezeData.executeThreshold) or 0, 0, MAX_EXECUTE_THRESHOLD)
-	if executeThreshold <= 0 then
-		return false
-	end
-	if health.current > (health.max * executeThreshold) then
-		return false
-	end
-
-	DamageSystemRef.applyDamage(
-		enemyEntity,
-		health.current,
-		"magic",
-		sourceEntity,
-		"EnemyFreezeExecute",
-		{
-			skipTemporalStasis = true,
-			skipFrostExecuteCheck = true,
-		}
-	)
-	return true
+	return DamageSystemRef.tryExecuteEnemyByThreshold(enemyEntity, sourceEntity, "EnemyFreezeExecute")
 end
 
 local function applyFrostDamage(enemyEntity: number, amount: number, sourceEntity: number?, abilityId: string)
@@ -182,12 +192,10 @@ local function applyFrostDamage(enemyEntity: number, amount: number, sourceEntit
 		abilityId,
 		{
 			skipTemporalStasis = true,
-			skipFrostExecuteCheck = true,
+			skipExecuteCheck = true,
 		}
 	)
-	if applied then
-		tryExecuteFrozenEnemy(enemyEntity, sourceEntity)
-	end
+	return applied
 end
 
 local function applyLesserFrostBonusDamage(enemyEntity: number, sourceEntity: number?, bonusHits: number)
@@ -326,10 +334,9 @@ function EnemyFrostSystem.applyLesserFrost(
 
 	local healthAfterBonus = world:get(enemyEntity, Health)
 	if nextStacks >= 3 and healthAfterBonus and healthAfterBonus.current and healthAfterBonus.current > 0 then
-		refreshFreeze(enemyEntity, "LesserFrost", LESSER_FROST_FREEZE_DURATION, BASE_EXECUTE_THRESHOLD, true)
+		refreshFreeze(enemyEntity, "LesserFrost", LESSER_FROST_FREEZE_DURATION, 0, true)
+		refreshFreezeExecuteContribution(enemyEntity, now)
 	end
-
-	tryExecuteFrozenEnemy(enemyEntity, sourceEntity)
 	return true
 end
 
@@ -369,7 +376,7 @@ function EnemyFrostSystem.applyGreaterFrost(
 		return false
 	end
 
-	local executeThreshold = math.min(BASE_EXECUTE_THRESHOLD + (0.30 * nextStacks), MAX_EXECUTE_THRESHOLD)
+	local executeThreshold = getGreaterFrostExecuteThresholdForStacks(nextStacks)
 
 	DirtyService.setIfChanged(world, enemyEntity, EnemyGreaterFrost, {
 		statusId = "GreaterFrost",
@@ -384,17 +391,16 @@ function EnemyFrostSystem.applyGreaterFrost(
 	end
 
 	refreshFreeze(enemyEntity, "GreaterFrost", GREATER_FROST_FREEZE_DURATION, executeThreshold, false)
+	refreshFreezeExecuteContribution(enemyEntity, now)
 
 	if existingActive then
 		applyGreaterFrostBurst(enemyEntity, sourceEntity or greaterFrostSourceByEntity[enemyEntity])
 	end
-
-	tryExecuteFrozenEnemy(enemyEntity, sourceEntity)
 	return true
 end
 
 function EnemyFrostSystem.onEnemyDamaged(enemyEntity: number, sourceEntity: number?)
-	tryExecuteFrozenEnemy(enemyEntity, sourceEntity)
+	return tryExecuteFrozenEnemy(enemyEntity, sourceEntity)
 end
 
 function EnemyFrostSystem.step(_dt: number)
@@ -424,10 +430,12 @@ function EnemyFrostSystem.step(_dt: number)
 		for enemyEntity, greaterFrost, health in greaterFrostQuery do
 			if not health or not health.current or health.current <= 0 then
 				removeStatusComponent(enemyEntity, EnemyGreaterFrost, "EnemyGreaterFrost")
+				refreshFreezeExecuteContribution(enemyEntity, now)
 			else
 				local endTime = tonumber(greaterFrost.endTime) or 0
 				if endTime <= now then
 					removeStatusComponent(enemyEntity, EnemyGreaterFrost, "EnemyGreaterFrost")
+					refreshFreezeExecuteContribution(enemyEntity, now)
 				else
 					local burstAt = tonumber(greaterFrost.burstAt)
 					if burstAt and burstAt <= now then
@@ -445,8 +453,10 @@ function EnemyFrostSystem.step(_dt: number)
 		for enemyEntity, freezeData, health in freezeQuery do
 			if not health or not health.current or health.current <= 0 then
 				removeStatusComponent(enemyEntity, EnemyFreeze, "EnemyFreeze")
+				refreshCombinedExecuteThreshold(enemyEntity)
 			elseif (tonumber(freezeData.endTime) or 0) <= now then
 				removeStatusComponent(enemyEntity, EnemyFreeze, "EnemyFreeze")
+				refreshCombinedExecuteThreshold(enemyEntity)
 			end
 		end
 	end

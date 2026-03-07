@@ -22,6 +22,9 @@ RunItems.Ids = {
 	EnergySword = "energy_sword",
 	Magic8Ball = "magic_8_ball",
 	Apple = "apple",
+	WitchesBrew = "witches_brew",
+	SurvivalKnife = "survival_knife",
+	HotSauce = "hot_sauce",
 }
 
 RunItems.Order = {
@@ -44,6 +47,9 @@ RunItems.Order = {
 	RunItems.Ids.EnergySword,
 	RunItems.Ids.Magic8Ball,
 	RunItems.Ids.Apple,
+	RunItems.Ids.WitchesBrew,
+	RunItems.Ids.SurvivalKnife,
+	RunItems.Ids.HotSauce,
 }
 
 RunItems.DefaultDropSettings = {
@@ -376,6 +382,50 @@ RunItems.Definitions = {
 		apple = {
 			baseOverhealOnKill = 5,
 			overhealOnKillPerAdditionalStack = 5,
+		},
+	},
+	[RunItems.Ids.WitchesBrew] = {
+		id = RunItems.Ids.WitchesBrew,
+		entryId = "item:" .. RunItems.Ids.WitchesBrew,
+		displayName = "Witches Brew",
+		description = "Gain a 10% (+10% per stack) chance to inflict 'Lesser poison' to an enemy.",
+		promptDescription = [[Gain a <font color="#F4A11A">10%</font> <font color="#7A7A7A">(+10% per stack)</font> chance to inflict <font color="#F4A11A">'Lesser poison'</font> to an enemy.]],
+		dropModelName = "WitchesBrew",
+		viewportFrameName = "WitchesBrewViewportFrame",
+		witchesBrew = {
+			baseProcChance = 0.10,
+			procChancePerAdditionalStack = 0.10,
+			stacksAppliedOnProc = 1,
+		},
+	},
+	[RunItems.Ids.SurvivalKnife] = {
+		id = RunItems.Ids.SurvivalKnife,
+		entryId = "item:" .. RunItems.Ids.SurvivalKnife,
+		displayName = "Survival Knife",
+		description = "Gain a 10% (+10% per stack) chance to inflict 'Bleed' to an enemy.",
+		promptDescription = [[Gain a <font color="#F4A11A">10%</font> <font color="#7A7A7A">(+10% per stack)</font> chance to inflict <font color="#F4A11A">'Bleed'</font> to an enemy.]],
+		dropModelName = "SurvivalKnife",
+		viewportFrameName = "SurvivalKnifeViewportFrame",
+		survivalKnife = {
+			baseProcChance = 0.10,
+			procChancePerAdditionalStack = 0.10,
+			stacksAppliedOnProc = 1,
+		},
+	},
+	[RunItems.Ids.HotSauce] = {
+		id = RunItems.Ids.HotSauce,
+		entryId = "item:" .. RunItems.Ids.HotSauce,
+		displayName = "Hot Sauce",
+		description = "Killing an enemy inflicts all enemies within 20 studs (+6 studs per stack) with 'Lesser flame' and deals 125% base damage.",
+		promptDescription = [[Killing an enemy inflicts all enemies within 20 studs <font color="#7A7A7A">(+6 studs per stack)</font> with <font color="#F4A11A">'Lesser flame'</font> and deals 125% base damage.]],
+		dropModelName = "HotSauce",
+		viewportFrameName = "HotSauceViewportFrame",
+		hotSauce = {
+			baseRadius = 20.0,
+			radiusPerAdditionalStack = 6.0,
+			damageCoefficient = 1.25,
+			lesserFlameStacksApplied = 1,
+			octreePadding = 8.0,
 		},
 	},
 }

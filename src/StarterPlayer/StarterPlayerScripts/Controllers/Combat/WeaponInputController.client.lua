@@ -258,6 +258,9 @@ local function canAttemptFire(): boolean
 end
 
 local function shouldRetainSecondaryBuffer(): boolean
+	if not m2Held then
+		return false
+	end
 	local character = localPlayer.Character
 	if localPlayer:GetAttribute("CooldownsFrozen") == true then
 		return false
@@ -279,7 +282,7 @@ local function shouldRetainSecondaryBuffer(): boolean
 		return false
 	end
 	local availableCharges = character:GetAttribute(ATTR_WEAPON_M2_CHARGES)
-	if (not m2Held) and (typeof(availableCharges) ~= "number" or availableCharges <= 0) then
+	if typeof(availableCharges) ~= "number" or availableCharges <= 0 then
 		return false
 	end
 	return true
@@ -541,6 +544,7 @@ end)
 UserInputService.InputEnded:Connect(function(input: InputObject, _gameProcessed: boolean)
 	if input.UserInputType == Enum.UserInputType.MouseButton2 then
 		m2Held = false
+		pendingSecondaryBuffered = false
 		refreshWeaponBufferAttributes()
 		return
 	end

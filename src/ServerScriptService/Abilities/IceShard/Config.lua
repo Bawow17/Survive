@@ -14,8 +14,13 @@ return {
 	Unlockable = false,
 
 	-- Client-visible projectile path; source model is explicitly cloned from the moved asset.
+	-- The model is authored with +Y as its forward axis instead of the standard -Z (LookVector).
+	-- CFrame.lookAt produces a CFrame whose local -Z = travel direction.
+	-- To make the model's +Y align with -Z, we need Rx(-90°):
+	--   Rx(-90°) * [0,1,0] = [0,0,-1]  →  model tip (+Y) now points along LookVector (travel direction).
+	-- NOTE: +90° is WRONG — it maps +Y to local +Z which is -direction (tail-first).
 	modelPath = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel",
-	replicationSourcePath = "ServerStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel",
+	modelRotationOffset = CFrame.Angles(-math.rad(90), 0, 0),
 
 	-- Core stats
 	damageCoefficient = 8.0,
@@ -70,7 +75,7 @@ return {
 	animations = {
 		-- Optional server-side source path used to resolve animation IDs automatically.
 		-- Supports Animation instances or containers with Animation descendants.
-		sourcePath = "ServerStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShard",
+		sourcePath = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShard",
 		animationIds = {
 			first = "",
 			loop = "",

@@ -1,5 +1,5 @@
 --!strict
--- IceTracerRenderer - Renders replicated IceTracer path/beams for other players.
+-- GlacialPathRenderer - Renders replicated GlacialPath path/beams for other players.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -9,12 +9,15 @@ local Workspace = game:GetService("Workspace")
 local localPlayer = Players.LocalPlayer
 
 local remotes = ReplicatedStorage:WaitForChild("RemoteEvents")
-local IceTracerPathReplicate = remotes:WaitForChild("IceTracerPathReplicate") :: RemoteEvent
+local GlacialPathReplicate = remotes:WaitForChild("GlacialPathReplicate") :: RemoteEvent
 local GamePaused = remotes:WaitForChild("GamePaused") :: RemoteEvent
 
-local PATH_TEMPLATE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IcePath"
-local BEAM1_TEMPLATE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser"
-local BEAM2_TEMPLATE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser2"
+local PATH_TEMPLATE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.IcePath"
+local LEGACY_PATH_TEMPLATE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IcePath"
+local BEAM1_TEMPLATE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.IceLaser"
+local LEGACY_BEAM1_TEMPLATE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser"
+local BEAM2_TEMPLATE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.IceLaser2"
+local LEGACY_BEAM2_TEMPLATE_PATH = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.IceTracer.IceLaser2"
 local PATH_PART_LIFETIME = 2.0
 local PATH_FADE_DURATION = 0.35
 local CAST_TIMEOUT = 1.5
@@ -50,6 +53,16 @@ local function findInstanceByPath(path: string): Instance?
 		end
 	end
 	return if typeof(current) == "Instance" then current else nil
+end
+
+local function resolveExistingPath(primaryPath: string, fallbackPath: string): string
+	if findInstanceByPath(primaryPath) then
+		return primaryPath
+	end
+	if findInstanceByPath(fallbackPath) then
+		return fallbackPath
+	end
+	return primaryPath
 end
 
 local function getBasePartFromInstance(instance: Instance?): BasePart?
@@ -202,8 +215,8 @@ local function findLeftArmGripAttachment(characterModel: Model?): Attachment?
 	return nil
 end
 
-local function createBeamFromTemplate(path: string, name: string, startAttachment: Attachment, endAttachment: Attachment, parent: Instance): BeamEntry
-	local template = findInstanceByPath(path)
+local function createBeamFromTemplate(path: string, fallbackPath: string, name: string, startAttachment: Attachment, endAttachment: Attachment, parent: Instance): BeamEntry
+	local template = findInstanceByPath(resolveExistingPath(path, fallbackPath))
 	local container: Instance
 	local beam: Beam?
 
@@ -261,7 +274,7 @@ local function getOrCreateState(sourcePlayer: Player, castId: number): CastState
 	end
 
 	local folder = Instance.new("Folder")
-	folder.Name = "IceTracer_" .. tostring(sourcePlayer.UserId) .. "_" .. tostring(castId)
+	folder.Name = "GlacialPath_" .. tostring(sourcePlayer.UserId) .. "_" .. tostring(castId)
 	folder.Parent = Workspace
 
 	local startPart = Instance.new("Part")
@@ -290,8 +303,8 @@ local function getOrCreateState(sourcePlayer: Player, castId: number): CastState
 		startPart = startPart,
 		folder = folder,
 		beams = {
-			createBeamFromTemplate(BEAM1_TEMPLATE_PATH, "IceTracerBeam1", startAttachment, endAttachment, folder),
-			createBeamFromTemplate(BEAM2_TEMPLATE_PATH, "IceTracerBeam2", startAttachment, endAttachment, folder),
+			createBeamFromTemplate(BEAM1_TEMPLATE_PATH, LEGACY_BEAM1_TEMPLATE_PATH, "GlacialPathBeam1", startAttachment, endAttachment, folder),
+			createBeamFromTemplate(BEAM2_TEMPLATE_PATH, LEGACY_BEAM2_TEMPLATE_PATH, "GlacialPathBeam2", startAttachment, endAttachment, folder),
 		},
 		expiresAt = tick() + CAST_TIMEOUT,
 	}
@@ -300,7 +313,7 @@ local function getOrCreateState(sourcePlayer: Player, castId: number): CastState
 end
 
 local function spawnPathSegment(state: CastState, position: Vector3, forward: Vector3, yawDeg: number)
-	local template = findInstanceByPath(PATH_TEMPLATE_PATH)
+	local template = findInstanceByPath(resolveExistingPath(PATH_TEMPLATE_PATH, LEGACY_PATH_TEMPLATE_PATH))
 	if not template then
 		return
 	end
@@ -358,7 +371,7 @@ local function clearAllStates()
 	end
 end
 
-IceTracerPathReplicate.OnClientEvent:Connect(function(sourcePlayer: Player, castId: number, segments: {any}, isFinal: boolean)
+GlacialPathReplicate.OnClientEvent:Connect(function(sourcePlayer: Player, castId: number, segments: {any}, isFinal: boolean)
 	if sourcePlayer == localPlayer then
 		return
 	end

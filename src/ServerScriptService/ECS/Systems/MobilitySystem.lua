@@ -17,7 +17,7 @@ local ModelHitboxHelper = require(game.ServerScriptService.Utilities.ModelHitbox
 
 -- Mobility configs
 local DashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Dash)
-local IceTracerConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.IceTracer)
+local GlacialPathConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.GlacialPath)
 local ShieldBashConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.ShieldBash)
 local DoubleJumpConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.DoubleJump)
 local BlinkConfig = require(game.ServerScriptService.Balance.Player.MobilityAbilities.Blink)
@@ -39,7 +39,7 @@ local PassiveEffects: any
 local MobilityActivateRemote: RemoteEvent
 local AbilityCastRemote: RemoteEvent
 local DashAfterimageRemote: RemoteEvent
-local IceTracerPathReplicateRemote: RemoteEvent
+local GlacialPathReplicateRemote: RemoteEvent
 
 -- Active Shield Bash dashes (server-side collision tracking)
 local activeShieldBashes: {{
@@ -62,7 +62,7 @@ local activeShieldBashes: {{
 
 -- Active afterimage tasks (for cleanup)
 local activeAfterimageTasks: {thread} = {}
-local activeIceTracerReplication: {[number]: {
+local activeGlacialPathReplication: {[number]: {
 	playerEntity: number,
 	expiresAt: number,
 	castId: number?,
@@ -72,14 +72,14 @@ local utilityCastTokenByUserId: {[number]: number} = {}
 
 local UTILITY_CAST_ACTIVE_ATTRIBUTE = "UtilityCastActiveServer"
 
-local ICE_TRACER_ALLOWED_BUFFER = 0.5
-local ICE_TRACER_MAX_SEGMENTS_PER_PACKET = 48
-local ICE_TRACER_MAX_SEGMENTS_PER_CAST = 720
+local GLACIAL_PATH_ALLOWED_BUFFER = 0.5
+local GLACIAL_PATH_MAX_SEGMENTS_PER_PACKET = 48
+local GLACIAL_PATH_MAX_SEGMENTS_PER_CAST = 720
 
 -- Mobility config lookup
 local MOBILITY_CONFIGS = {
 	Dash = DashConfig,
-	IceTracer = IceTracerConfig,
+	GlacialPath = GlacialPathConfig,
 	ShieldBash = ShieldBashConfig,
 	DoubleJump = DoubleJumpConfig,
 	Blink = BlinkConfig,
@@ -89,7 +89,7 @@ local MOBILITY_CONFIGS = {
 -- Mobility display names for UI
 local MOBILITY_DISPLAY_NAMES = {
 	Dash = "Dash",
-	IceTracer = "Ice Tracer",
+	GlacialPath = "Glacial Path",
 	ShieldBash = "Shield Bash",
 	DoubleJump = "Double Jump",
 	Blink = "Blink",
@@ -110,19 +110,19 @@ local function getPlayerEntity(player: Player): number?
 	return nil
 end
 
-local function pruneExpiredIceTracerWindows(now: number)
-	for userId, state in pairs(activeIceTracerReplication) do
+local function pruneExpiredGlacialPathWindows(now: number)
+	for userId, state in pairs(activeGlacialPathReplication) do
 		if now > state.expiresAt then
-			activeIceTracerReplication[userId] = nil
+			activeGlacialPathReplication[userId] = nil
 		end
 	end
 end
 
-local function beginIceTracerReplicationWindow(player: Player, playerEntity: number, now: number, duration: number)
+local function beginGlacialPathReplicationWindow(player: Player, playerEntity: number, now: number, duration: number)
 	local safeDuration = math.max(0.05, duration)
-	activeIceTracerReplication[player.UserId] = {
+	activeGlacialPathReplication[player.UserId] = {
 		playerEntity = playerEntity,
-		expiresAt = now + safeDuration + ICE_TRACER_ALLOWED_BUFFER,
+		expiresAt = now + safeDuration + GLACIAL_PATH_ALLOWED_BUFFER,
 		castId = nil,
 		totalSegments = 0,
 	}
@@ -150,7 +150,7 @@ local function beginUtilityCastWindow(player: Player, duration: number)
 	end)
 end
 
-local function validateIceTracerSegment(rawSegment: any): (boolean, any?)
+local function validateGlacialPathSegment(rawSegment: any): (boolean, any?)
 	if typeof(rawSegment) ~= "table" then
 		return false, nil
 	end
@@ -174,8 +174,8 @@ local function validateIceTracerSegment(rawSegment: any): (boolean, any?)
 	}
 end
 
-local function handleIceTracerPathReplication(player: Player, payload: any)
-	if not IceTracerPathReplicateRemote then
+local function handleGlacialPathReplication(player: Player, payload: any)
+	if not GlacialPathReplicateRemote then
 		return
 	end
 	if typeof(payload) ~= "table" then
@@ -183,14 +183,14 @@ local function handleIceTracerPathReplication(player: Player, payload: any)
 	end
 
 	local now = GameTimeSystem.getGameTime()
-	pruneExpiredIceTracerWindows(now)
+	pruneExpiredGlacialPathWindows(now)
 
-	local state = activeIceTracerReplication[player.UserId]
+	local state = activeGlacialPathReplication[player.UserId]
 	if not state then
 		return
 	end
 	if now > state.expiresAt then
-		activeIceTracerReplication[player.UserId] = nil
+		activeGlacialPathReplication[player.UserId] = nil
 		return
 	end
 
@@ -220,13 +220,13 @@ local function handleIceTracerPathReplication(player: Player, payload: any)
 	end
 
 	local segmentCount = #rawSegments
-	if segmentCount > ICE_TRACER_MAX_SEGMENTS_PER_PACKET then
+	if segmentCount > GLACIAL_PATH_MAX_SEGMENTS_PER_PACKET then
 		return
 	end
 
 	state.totalSegments += segmentCount
-	if state.totalSegments > ICE_TRACER_MAX_SEGMENTS_PER_CAST then
-		activeIceTracerReplication[player.UserId] = nil
+	if state.totalSegments > GLACIAL_PATH_MAX_SEGMENTS_PER_CAST then
+		activeGlacialPathReplication[player.UserId] = nil
 		return
 	end
 
@@ -235,13 +235,13 @@ local function handleIceTracerPathReplication(player: Player, payload: any)
 		return
 	end
 	local mobilityData = world and MobilityData and world:get(playerEntity, MobilityData)
-	if not mobilityData or mobilityData.equippedMobility ~= "IceTracer" then
+	if not mobilityData or mobilityData.equippedMobility ~= "GlacialPath" then
 		return
 	end
 
 	local sanitizedSegments = table.create(segmentCount)
 	for _, rawSegment in ipairs(rawSegments) do
-		local ok, sanitized = validateIceTracerSegment(rawSegment)
+		local ok, sanitized = validateGlacialPathSegment(rawSegment)
 		if ok and sanitized then
 			table.insert(sanitizedSegments, sanitized)
 		end
@@ -253,12 +253,12 @@ local function handleIceTracerPathReplication(player: Player, payload: any)
 
 	for _, otherPlayer in ipairs(Players:GetPlayers()) do
 		if otherPlayer ~= player then
-			IceTracerPathReplicateRemote:FireClient(otherPlayer, player, castId, sanitizedSegments, isFinal)
+			GlacialPathReplicateRemote:FireClient(otherPlayer, player, castId, sanitizedSegments, isFinal)
 		end
 	end
 
 	if isFinal then
-		activeIceTracerReplication[player.UserId] = nil
+		activeGlacialPathReplication[player.UserId] = nil
 	end
 end
 
@@ -366,10 +366,10 @@ local function handleMobilityActivation(player: Player, mobilityId: string, vari
 		AbilityCastRemote:FireClient(player, "Mobility_" .. mobilityId, effectiveCooldown, displayName)
 	end
 
-	if mobilityId == "IceTracer" then
+	if mobilityId == "GlacialPath" then
 		local castDuration = mobilityData.duration or config.duration or (35 / 60)
 		beginUtilityCastWindow(player, castDuration)
-		beginIceTracerReplicationWindow(player, playerEntity, currentTime, castDuration)
+		beginGlacialPathReplicationWindow(player, playerEntity, currentTime, castDuration)
 	end
 	
 	-- Apply server-side effects
@@ -694,23 +694,23 @@ function MobilitySystem.init(worldRef: any, components: any, dirtyService: any)
 		warn("[MobilitySystem] DashAfterimage remote not found - afterimage effects may not work")
 	end
 
-	IceTracerPathReplicateRemote = remotes:FindFirstChild("IceTracerPathReplicate")
-	if not IceTracerPathReplicateRemote then
-		IceTracerPathReplicateRemote = Instance.new("RemoteEvent")
-		IceTracerPathReplicateRemote.Name = "IceTracerPathReplicate"
-		IceTracerPathReplicateRemote.Parent = remotes
+	GlacialPathReplicateRemote = remotes:FindFirstChild("GlacialPathReplicate")
+	if not GlacialPathReplicateRemote then
+		GlacialPathReplicateRemote = Instance.new("RemoteEvent")
+		GlacialPathReplicateRemote.Name = "GlacialPathReplicate"
+		GlacialPathReplicateRemote.Parent = remotes
 	end
 	
 	-- Handle client activation requests
 	MobilityActivateRemote.OnServerEvent:Connect(function(player: Player, mobilityId: string, variant: string?)
 		handleMobilityActivation(player, mobilityId, variant)
 	end)
-	IceTracerPathReplicateRemote.OnServerEvent:Connect(function(player: Player, payload: any)
-		handleIceTracerPathReplication(player, payload)
+	GlacialPathReplicateRemote.OnServerEvent:Connect(function(player: Player, payload: any)
+		handleGlacialPathReplication(player, payload)
 	end)
 
 	Players.PlayerRemoving:Connect(function(player: Player)
-		activeIceTracerReplication[player.UserId] = nil
+		activeGlacialPathReplication[player.UserId] = nil
 		utilityCastTokenByUserId[player.UserId] = nil
 		player:SetAttribute(UTILITY_CAST_ACTIVE_ATTRIBUTE, false)
 	end)
@@ -725,7 +725,7 @@ function MobilitySystem.step(dt: number)
 	if #activeShieldBashes > 0 then
 		processShieldBashCollisions(dt)
 	end
-	pruneExpiredIceTracerWindows(GameTimeSystem.getGameTime())
+	pruneExpiredGlacialPathWindows(GameTimeSystem.getGameTime())
 end
 
 return MobilitySystem

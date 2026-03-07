@@ -1,5 +1,5 @@
 --!strict
--- UpgradeIcons - per-upgrade icon mapping (paste rbxassetid:// IDs here)
+-- UpgradeIcons - per-upgrade icon mapping (asset ids or replicated asset paths)
 -- Keys are stable ids used by the upgrade system.
 -- Supported keys:
 --  Passive stats: statId (e.g. "damage", "cooldownReduction")
@@ -20,13 +20,13 @@ local UpgradeIcons = {
 	-- Ability upgrades (fill in as you add icons)
 	MagicBolt = "137338447639770",
 	FireBall = "129036102914829",
-	IceShard = "101138111348070",
+	IceShard = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardDecal",
 	Refractions = "87778366744205",
 
 	-- Ability unlocks (optional, separate from ability upgrade icons)
 	["unlock:MagicBolt"] = "137338447639770",
 	["unlock:FireBall"] = "129036102914829",
-	["unlock:IceShard"] = "101138111348070",
+	["unlock:IceShard"] = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardDecal",
 	["unlock:Refractions"] = "87778366744205",
 
 	-- Passive upgrades
@@ -48,12 +48,13 @@ local UpgradeIcons = {
 
 	-- Mobility upgrades
 	["mobility:Dash"] = "99817712946636",
-	["mobility:IceTracer"] = "99817712946636",
+	["mobility:GlacialPath"] = "ReplicatedStorage.ContentDrawer.PlayerAbilities.Ice.Utility.GlacialPath.GlacialPathDecal",
 	["mobility:ShieldBash"] = "98379470571047",
 	["mobility:DoubleJump"] = "118165830384003",
 	["mobility:Blink"] = "103856385303705",
 	["mobility:ManaGrapple"] = "135518071156835",
-	["weapon:Oathkeeper"] = "137338447639770",
+	["weapon:HeavyTrigger"] = "ReplicatedStorage.ContentDrawer.WeaponModels.HandCannons.Oathkeeper.HeavyTriggerDecal",
+	["weapon:PowerSurge"] = "ReplicatedStorage.ContentDrawer.WeaponModels.HandCannons.Oathkeeper.PowerSurgeDecal",
 
 	-- Attributes
 	["attr:MagicBolt:ChainCasting"] = "",

@@ -2,11 +2,9 @@
 -- IceShard System - Manual-cast IceShard that fires toward cursor aim.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ServerStorage = game:GetService("ServerStorage")
 
 local AbilitySystemBase = require(script.Parent.Parent.AbilitySystemBase)
 local TargetingService = require(script.Parent.Parent.TargetingService)
-local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
 local PassiveEffectSystem = require(game.ServerScriptService.ECS.Systems.PassiveEffectSystem)
 local Config = require(script.Parent.Config)
 local Balance = Config
@@ -36,18 +34,8 @@ local castRequestConnection: RBXScriptConnection? = nil
 local sprintForceOffRemote: RemoteEvent? = nil
 local animationIdsBySourcePath: {[string]: {[string]: string}} = {}
 local warnedMissingAnimationSource: {[string]: boolean} = {}
-local warnedMissingProjectileModel = false
 local pendingCastTokenByEntity: {[number]: number} = {}
 local pendingCastTokenCounter = 0
-
-local function ensureProjectileModelReplicated(): boolean
-	local success = ModelReplicationService.replicateIceSpecialAssets()
-	if not success and not warnedMissingProjectileModel then
-		warnedMissingProjectileModel = true
-		warn("[IceShard] Failed to replicate projectile model from ServerStorage.ContentDrawer.PlayerAbilities.Ice.Special.IceShard.IceShardModel")
-	end
-	return success
-end
 
 local function normalizeAnimationId(rawId: any): string?
 	if typeof(rawId) == "number" then
@@ -99,9 +87,6 @@ local function findInstanceByDotPath(path: string): Instance?
 	local current: Instance? = game
 	local startIndex = 1
 	if parts[1] == "game" then
-		startIndex = 2
-	elseif parts[1] == "ServerStorage" then
-		current = ServerStorage
 		startIndex = 2
 	elseif parts[1] == "ReplicatedStorage" then
 		current = ReplicatedStorage
@@ -367,8 +352,6 @@ local function performIceShardBurst(
 
 	local created = 0
 	for shotIndex = 1, shots do
-		ensureProjectileModelReplicated()
-
 		if targetEntity then
 			TargetingService.recordPredictedDamage(playerEntity, ICESHARD_ID, targetEntity, stats.damage)
 		end
@@ -595,8 +578,6 @@ function IceShardSystem.init(worldRef: any, components: any, dirtyService: any, 
 	AbilityData = Components.AbilityData
 	AbilityCooldown = Components.AbilityCooldown
 	AbilityPulse = Components.AbilityPulse
-
-	ensureProjectileModelReplicated()
 
 	playerQuery = world:query(Components.EntityType, Components.Position, Components.Ability):cached()
 

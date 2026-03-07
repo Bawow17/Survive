@@ -725,7 +725,7 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 		DamageSystem.notifyAttackAttempt({
 			sourceEntity = playerEntity,
 			targetEntity = shot.hitEnemyEntity,
-			abilityId = "OathkeeperPrimary",
+			abilityId = "HeavyTrigger",
 			procCoefficient = procCoefficient,
 			aimPoint = targetPoint,
 		})
@@ -747,7 +747,7 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 			sourceEntity = playerEntity,
 			damageAmount = damageAmount,
 			damageType = "weapon",
-			abilityId = "OathkeeperPrimary",
+			abilityId = "HeavyTrigger",
 			procCoefficient = procCoefficient,
 			timestamp = now,
 			forceDefer = true,
@@ -769,7 +769,7 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 				sourceEntity = playerEntity,
 				damageAmount = damageAmount,
 				damageType = "weapon",
-				abilityId = "OathkeeperPrimary",
+				abilityId = "HeavyTrigger",
 				procCoefficient = procCoefficient,
 				timestamp = now,
 			})
@@ -781,7 +781,7 @@ local function handlePrimaryFireRequest(player: Player, requestPayload: any)
 				damageAmount,
 				"weapon",
 				playerEntity,
-				"OathkeeperPrimary",
+				"HeavyTrigger",
 				{ procCoefficient = procCoefficient }
 			)
 			didApplyDamage = applied == true
@@ -899,7 +899,7 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 			DamageSystem.notifyAttackAttempt({
 				sourceEntity = livePlayerEntity,
 				targetEntity = preferredSilverTarget,
-				abilityId = "OathkeeperSecondary",
+				abilityId = "PowerSurge",
 				procCoefficient = procCoefficient,
 				aimPoint = castState.targetPoint,
 			})
@@ -919,7 +919,7 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 					sourceEntity = livePlayerEntity,
 					damageAmount = damageAmount,
 					damageType = "weapon",
-					abilityId = "OathkeeperSecondary",
+					abilityId = "PowerSurge",
 					procCoefficient = procCoefficient,
 					timestamp = tick(),
 					forceDefer = true,
@@ -933,7 +933,7 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 					sourceEntity = livePlayerEntity,
 					damageAmount = damageAmount,
 					damageType = "weapon",
-					abilityId = "OathkeeperSecondary",
+					abilityId = "PowerSurge",
 					procCoefficient = procCoefficient,
 					timestamp = tick(),
 				})
@@ -945,7 +945,7 @@ local function handleSecondaryFireRequest(player: Player, requestPayload: any)
 					damageAmount,
 					"weapon",
 					livePlayerEntity,
-					"OathkeeperSecondary",
+					"PowerSurge",
 					{ procCoefficient = procCoefficient }
 				)
 				applied = didApply == true

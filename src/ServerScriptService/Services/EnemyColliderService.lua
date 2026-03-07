@@ -173,7 +173,7 @@ local function ensureHitboxProfile(subtype: string?): ColliderProfile?
 	end
 	local hitbox = ModelReplicationService.getEnemyHitbox(subtype)
 	if not hitbox then
-		ModelReplicationService.replicateEnemy(subtype)
+		ModelReplicationService.ensureEnemyHitbox(subtype)
 		hitbox = ModelReplicationService.getEnemyHitbox(subtype)
 	end
 	local profile = toColliderProfile(hitbox)
@@ -193,7 +193,7 @@ local function ensureAttackboxProfile(subtype: string?): ColliderProfile?
 	end
 	local attackbox = ModelReplicationService.getEnemyAttackbox(subtype)
 	if not attackbox then
-		ModelReplicationService.replicateEnemy(subtype)
+		ModelReplicationService.ensureEnemyHitbox(subtype)
 		attackbox = ModelReplicationService.getEnemyAttackbox(subtype)
 	end
 	local profile = toColliderProfile(attackbox)

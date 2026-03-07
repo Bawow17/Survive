@@ -445,7 +445,7 @@ local function processTarget(
 		local subtype = targetEntityType.subtype or "Zombie"
 		local hitbox = ModelReplicationService.getEnemyHitbox(subtype)
 		if not hitbox then
-			ModelReplicationService.replicateEnemy(subtype)
+			ModelReplicationService.ensureEnemyHitbox(subtype)
 			hitbox = ModelReplicationService.getEnemyHitbox(subtype)
 		end
 

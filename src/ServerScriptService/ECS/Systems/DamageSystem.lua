@@ -21,6 +21,7 @@ local UltimateSystem: any  -- Reference to ultimate charge system
 local TemporalStasisSystem: any  -- Reference to Tempus Gelidum stasis system
 local ItemSystem: any  -- Reference to run item trigger system
 local EnemyFrostSystem: any  -- Reference to Lesser/Greater Frost system
+local EnemyAilmentSystem: any  -- Reference to flame/poison/bleed status system
 local PlayerHitMarkerRemote: RemoteEvent? = nil
 
 -- Component references
@@ -36,6 +37,11 @@ local AttackCooldown: any
 local EnemyTier: any
 local EnemyFrostbite: any
 local EnemyArmor: any
+local EnemyFreeze: any
+local EnemyLesserFlame: any
+local EnemyGreaterFlame: any
+local EnemyGreaterPoison: any
+local EnemyExecuteThreshold: any
 
 local RNG = Random.new()
 
@@ -150,9 +156,6 @@ end
 
 DamageSystem.getArmorDamageMultiplier = getArmorDamageMultiplier
 
--- Pseudo-random distribution to smooth crit streaks without changing average rate.
-local critAccumulators: {[number]: number} = {}
-
 function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	world = worldRef
 	Components = components
@@ -170,6 +173,11 @@ function DamageSystem.init(worldRef: any, components: any, dirtyService: any)
 	EnemyTier = Components.EnemyTier
 	EnemyFrostbite = Components.EnemyFrostbite
 	EnemyArmor = Components.EnemyArmor
+	EnemyFreeze = Components.EnemyFreeze
+	EnemyLesserFlame = Components.EnemyLesserFlame
+	EnemyGreaterFlame = Components.EnemyGreaterFlame
+	EnemyGreaterPoison = Components.EnemyGreaterPoison
+	EnemyExecuteThreshold = Components.EnemyExecuteThreshold
 
 	local remotesFolder = ReplicatedStorage:FindFirstChild("RemoteEvents")
 	if not remotesFolder then
@@ -213,6 +221,10 @@ end
 
 function DamageSystem.setEnemyFrostSystem(enemyFrostSystem: any)
 	EnemyFrostSystem = enemyFrostSystem
+end
+
+function DamageSystem.setEnemyAilmentSystem(enemyAilmentSystem: any)
+	EnemyAilmentSystem = enemyAilmentSystem
 end
 
 local function notifyItemSystemResolved(data: {[string]: any})
@@ -524,6 +536,115 @@ local function getEnemyFrostbiteMultiplier(enemyEntity: number, now: number): nu
 	return 1 + (stacks * damageTakenPerStack)
 end
 
+function DamageSystem.refreshEnemyExecuteThreshold(enemyEntity: number): number
+	if not world or not enemyEntity or not EnemyExecuteThreshold then
+		return 0
+	end
+
+	local function clearExecuteThreshold(): number
+		if world:contains(enemyEntity) and world:has(enemyEntity, EnemyExecuteThreshold) then
+			world:remove(enemyEntity, EnemyExecuteThreshold)
+			DirtyService.mark(enemyEntity, "EnemyExecuteThreshold")
+		end
+		return 0
+	end
+
+	if not world:contains(enemyEntity) then
+		return 0
+	end
+
+	local entityType = world:get(enemyEntity, EntityType)
+	if not (entityType and entityType.type == "Enemy") then
+		return clearExecuteThreshold()
+	end
+	if DeathAnimation and world:has(enemyEntity, DeathAnimation) then
+		return clearExecuteThreshold()
+	end
+
+	local health = world:get(enemyEntity, Health)
+	if not health or not health.current or health.current <= 0 or not health.max or health.max <= 0 then
+		return clearExecuteThreshold()
+	end
+
+	local now = tick()
+	local totalThreshold = 0
+
+	if EnemyFreeze then
+		local freezeData = world:get(enemyEntity, EnemyFreeze)
+		if freezeData and typeof(freezeData) == "table" and (tonumber(freezeData.endTime) or 0) > now then
+			totalThreshold += math.clamp(tonumber(freezeData.executeThreshold) or 0, 0, 0.75)
+		end
+	end
+
+	if EnemyLesserFlame then
+		local lesserFlame = world:get(enemyEntity, EnemyLesserFlame)
+		if lesserFlame and typeof(lesserFlame) == "table" and (tonumber(lesserFlame.endTime) or 0) > now then
+			local stacks = math.max(math.floor(tonumber(lesserFlame.stacks) or 0), 0)
+			if stacks >= 3 then
+				totalThreshold += 0.075
+			end
+		end
+	end
+
+	if EnemyGreaterFlame then
+		local greaterFlame = world:get(enemyEntity, EnemyGreaterFlame)
+		if greaterFlame and typeof(greaterFlame) == "table" and (tonumber(greaterFlame.endTime) or 0) > now then
+			totalThreshold += 0.10
+		end
+	end
+
+	if EnemyGreaterPoison then
+		local greaterPoison = world:get(enemyEntity, EnemyGreaterPoison)
+		if greaterPoison and typeof(greaterPoison) == "table" and (tonumber(greaterPoison.endTime) or 0) > now then
+			totalThreshold += 0.05
+		end
+	end
+
+	totalThreshold = math.clamp(totalThreshold, 0, 0.75)
+	if totalThreshold <= 0 then
+		return clearExecuteThreshold()
+	end
+
+	DirtyService.setIfChanged(world, enemyEntity, EnemyExecuteThreshold, {
+		threshold = totalThreshold,
+	}, "EnemyExecuteThreshold")
+	return totalThreshold
+end
+
+function DamageSystem.tryExecuteEnemyByThreshold(enemyEntity: number, sourceEntity: number?, abilityId: string?): boolean
+	if not world or not enemyEntity or not EnemyExecuteThreshold or not world:contains(enemyEntity) then
+		return false
+	end
+
+	local entityType = world:get(enemyEntity, EntityType)
+	if not (entityType and entityType.type == "Enemy") then
+		return false
+	end
+	if DeathAnimation and world:has(enemyEntity, DeathAnimation) then
+		return false
+	end
+
+	local executeData = world:get(enemyEntity, EnemyExecuteThreshold)
+	local threshold = if typeof(executeData) == "table" then math.clamp(tonumber(executeData.threshold) or 0, 0, 0.75) else 0
+	if threshold <= 0 then
+		return false
+	end
+
+	local health = world:get(enemyEntity, Health)
+	if not health or not health.current or health.current <= 0 or not health.max or health.max <= 0 then
+		return false
+	end
+	if health.current > (health.max * threshold) then
+		return false
+	end
+
+	local _, applied = DamageSystem.applyDamage(enemyEntity, health.current, "magic", sourceEntity, abilityId or "EnemyStatusExecute", {
+		skipTemporalStasis = true,
+		skipExecuteCheck = true,
+	})
+	return applied == true
+end
+
 -- Apply damage to an entity with all feedback effects
 -- sourceEntity: optional player entity that dealt the damage (for ability tracking)
 -- abilityId: optional ability identifier (for damage stat tracking)
@@ -555,7 +676,7 @@ function DamageSystem.applyDamage(
 	if options and typeof(options.procCoefficient) == "number" then
 		procCoefficient = options.procCoefficient
 	end
-	local skipFrostExecuteCheck = options and options.skipFrostExecuteCheck == true
+	local skipExecuteCheck = options and (options.skipExecuteCheck == true or options.skipFrostExecuteCheck == true)
 
 	-- Get entity type to determine if this is a player or enemy
 	local entityType = world:get(targetEntity, EntityType)
@@ -614,16 +735,10 @@ function DamageSystem.applyDamage(
 		local sourceEffects = world:get(sourceEntity, PassiveEffects)
 		if sourceEffects then
 			local critChance = normalizeCritChance(sourceEffects.critChance)
-			if critChance > 0 then
-				local acc = critAccumulators[sourceEntity] or 0
-				acc += critChance
-				if RNG:NextNumber() < acc then
-					local critDamage = sourceEffects.critDamage or 0
-					damageAmount = damageAmount * (2 + critDamage)
-					wasCrit = true
-					acc -= 1
-				end
-				critAccumulators[sourceEntity] = acc
+			if critChance > 0 and RNG:NextNumber() < critChance then
+				local critDamage = sourceEffects.critDamage or 0
+				damageAmount = damageAmount * (2 + critDamage)
+				wasCrit = true
 			end
 		end
 	end
@@ -1100,8 +1215,8 @@ function DamageSystem.applyDamage(
 		deferred = false,
 	})
 
-	if applied and isEnemy and not skipFrostExecuteCheck and EnemyFrostSystem and EnemyFrostSystem.onEnemyDamaged then
-		EnemyFrostSystem.onEnemyDamaged(targetEntity, sourceEntity)
+	if applied and isEnemy and not skipExecuteCheck then
+		DamageSystem.tryExecuteEnemyByThreshold(targetEntity, sourceEntity, abilityId)
 	end
 
 	return died, applied

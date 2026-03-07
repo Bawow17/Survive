@@ -2,7 +2,7 @@
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
-local ServerStorage = game:GetService("ServerStorage")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
 
 local ChunkBiomeConfig = require(script.Parent:WaitForChild("ChunkBiomeConfig"))
@@ -338,7 +338,7 @@ local function setModelCollidable(instance: Instance, isCollidable: boolean)
 end
 
 local function locateTemplatesRoot(): Folder?
-	local chunkTemplates = ServerStorage:FindFirstChild(ChunkBiomeConfig.TemplateRootName)
+	local chunkTemplates = ReplicatedStorage:FindFirstChild(ChunkBiomeConfig.TemplateRootName)
 	if chunkTemplates and chunkTemplates:IsA("Folder") then
 		return chunkTemplates
 	end
@@ -784,7 +784,7 @@ function ChunkGenerationService.init()
 
 	templatesRoot = locateTemplatesRoot()
 	if not templatesRoot then
-		error("[ChunkGenerationService] Missing ServerStorage.ChunkTemplates in the Roblox place.")
+		error("[ChunkGenerationService] Missing ReplicatedStorage.ChunkTemplates in the Roblox place.")
 	end
 
 	local allPresent, missingPaths = validateRequiredTemplates(templatesRoot)

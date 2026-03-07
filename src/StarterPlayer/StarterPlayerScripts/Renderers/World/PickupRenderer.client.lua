@@ -51,8 +51,11 @@ local ORB_TEMPLATE_PATH = {"ContentDrawer", "ItemModels", "OrbTemplate"}
 local DEFAULT_INTERACT_RADIUS = 20
 local DEFAULT_AUTO_PICKUP_RADIUS = 5
 local DEFAULT_SPIN_PERIOD = 8
-local PICKUP_VISUAL_HEIGHT_OFFSET = 1.0
+local ITEM_WORLD_SPIN_PERIOD = 15
+local PICKUP_VISUAL_HEIGHT_OFFSET = 2.0
 local COMMON_ITEM_AURA_PATH = "ReplicatedStorage.ContentDrawer.ItemModels.VFX.CommonAura"
+local VFX_WARMUP_SECONDS = 5.0
+local VFX_WARMUP_FPS = 60
 
 local COLOR_BY_KIND = {
 	expBlue = Color3.fromRGB(100, 150, 255),
@@ -114,12 +117,15 @@ local warnedMissingCommonItemAura = false
 local MIRRORED_SPECIAL_MESH_ITEM_AXES: {[string]: "x" | "y" | "z"} = {
 	adurite_cape = "x",
 	apple = "x",
+	bloxiade = "x",
 	bloxy_cola = "x",
 	cake = "x",
 	cheezburger = "x",
+	delete_tool = "x",
 	energy_sword = "x",
 	fuse_bomb = "x",
 	magic_8_ball = "x",
+	hot_sauce = "x",
 	silver_ninja_star_of_the_brilliant_light = "x",
 	speed_coil = "x",
 	teddy_bloxpin = "z",
@@ -129,12 +135,15 @@ local MIRRORED_SPECIAL_MESH_ITEM_AXES: {[string]: "x" | "y" | "z"} = {
 	historic_timmy_gun = "x",
 	healing_potion = "x",
 	pepperoni_pizza = "y",
+	survival_knife = "y",
+	witches_brew = "x",
 }
 local COMMON_ITEM_ROTATION_OFFSETS: {[string]: CFrame} = {
 	energy_sword = CFrame.Angles(math.pi, 0, 0),
-	healing_potion = CFrame.Angles(math.pi, 0, 0),
+	healing_potion = CFrame.Angles(0, 0, math.pi),
 	magic_8_ball = CFrame.Angles(math.pi, 0, 0),
 	pepperoni_pizza = CFrame.Angles(math.pi, 0, 0),
+	survival_knife = CFrame.Angles(math.pi, 0, 0),
 }
 local NORMALIZE_ONLY_ITEM_IDS: {[string]: boolean} = {
 }
@@ -224,6 +233,43 @@ local function findCommonItemAuraTemplate(): Instance?
 		commonItemAuraTemplate = current
 	end
 	return commonItemAuraTemplate
+end
+
+local function warmupVfx(root: Instance, emitParticles: boolean?)
+	local instances = { root }
+	for _, descendant in ipairs(root:GetDescendants()) do
+		table.insert(instances, descendant)
+	end
+
+	for _, instance in ipairs(instances) do
+		if instance:IsA("ParticleEmitter") then
+			local maxLifetime = math.max(instance.Lifetime.Min, instance.Lifetime.Max)
+			local frames = math.max(1, math.ceil(VFX_WARMUP_SECONDS * VFX_WARMUP_FPS))
+			pcall(function()
+				instance:FastForward(frames)
+			end)
+			if emitParticles ~= false then
+				local emitCount = math.max(1, math.ceil(instance.Rate * maxLifetime))
+				pcall(function()
+					instance:Emit(emitCount)
+				end)
+			end
+		end
+	end
+end
+
+local function warmupVfxDeferred(root: Instance)
+	warmupVfx(root, true)
+	task.defer(function()
+		if not root.Parent then
+			return
+		end
+		RunService.Heartbeat:Wait()
+		if not root.Parent then
+			return
+		end
+		warmupVfx(root, false)
+	end)
 end
 
 local function isStuffingModelPath(modelPath: string?): boolean
@@ -330,12 +376,27 @@ local function normalizeVisualAssetIds(instance: Instance)
 			if normalizedTextureId ~= textureId then
 				descendant.TextureId = normalizedTextureId
 			end
+		elseif descendant:IsA("FileMesh") then
+			local meshId = tostring(descendant.MeshId)
+			local textureId = tostring(descendant.TextureId)
+			local normalizedMeshId = normalizeLegacyAssetUrl(meshId)
+			local normalizedTextureId = normalizeLegacyAssetUrl(textureId)
+			if normalizedMeshId ~= meshId then
+				descendant.MeshId = normalizedMeshId
+			end
+			if normalizedTextureId ~= textureId then
+				descendant.TextureId = normalizedTextureId
+			end
 		end
 	end
 end
 
+local function findLegacyMesh(part: BasePart): Instance?
+	return part:FindFirstChildWhichIsA("SpecialMesh") or part:FindFirstChildWhichIsA("FileMesh")
+end
+
 local function findLargestSpecialMeshPart(instance: Instance): BasePart?
-	if instance:IsA("BasePart") and instance:FindFirstChildWhichIsA("SpecialMesh") then
+	if instance:IsA("BasePart") and findLegacyMesh(instance) then
 		return instance
 	end
 	if not instance:IsA("Model") then
@@ -345,7 +406,7 @@ local function findLargestSpecialMeshPart(instance: Instance): BasePart?
 	local bestPart: BasePart? = nil
 	local bestScore = -math.huge
 	for _, descendant in ipairs(instance:GetDescendants()) do
-		if descendant:IsA("BasePart") and descendant:FindFirstChildWhichIsA("SpecialMesh") then
+		if descendant:IsA("BasePart") and findLegacyMesh(descendant) then
 			local size = descendant.Size
 			local score = size.X * size.Y * size.Z
 			if score > bestScore then
@@ -367,7 +428,7 @@ local function buildMirroredSpecialMeshVisual(template: Instance, mirrorAxis: "x
 	normalizeVisualAssetIds(clone)
 
 	for _, descendant in ipairs(clone:GetDescendants()) do
-		if descendant:IsA("SpecialMesh") then
+		if descendant:IsA("SpecialMesh") or descendant:IsA("FileMesh") then
 			local scale = descendant.Scale
 			local mirroredX = scale.X
 			local mirroredY = scale.Y
@@ -499,6 +560,12 @@ local function configureVisualInstance(instance: Instance, modelPath: string?): 
 			end
 		end
 
+		if instance.PrimaryPart ~= primary then
+			pcall(function()
+				(instance :: Model).PrimaryPart = primary :: BasePart
+			end)
+		end
+
 		return primary :: BasePart, parts
 	end
 
@@ -543,6 +610,7 @@ local function attachCommonItemAura(visual: Instance, primary: BasePart, modelPa
 		auraAttachment.Position = attachmentOffset
 		auraAttachment.Orientation = Vector3.zero
 		auraAttachment.Parent = primary
+		warmupVfxDeferred(auraAttachment)
 		return
 	end
 
@@ -555,6 +623,7 @@ local function attachCommonItemAura(visual: Instance, primary: BasePart, modelPa
 	local auraInstance = auraTemplate:Clone()
 	auraInstance.Name = "CommonAuraVFX"
 	auraInstance.Parent = auraAttachment
+	warmupVfxDeferred(auraAttachment)
 end
 
 local function extractRotation(cf: CFrame): CFrame
@@ -600,9 +669,12 @@ local function acquireVisual(modelPath: string?, itemId: string?): (Instance, Ba
 					))
 				end
 			end
-			local baseRotation = if visual:IsA("Model")
-				then extractRotation(visual:GetPivot())
-				else extractRotation((visual :: BasePart).CFrame)
+			local baseRotation: CFrame
+			if visual:IsA("Model") then
+				baseRotation = extractRotation(primary:GetPivot())
+			else
+				baseRotation = extractRotation(primary.CFrame)
+			end
 			local rotationOffset = getCommonItemRotationOffset(itemId, modelPath)
 			if rotationOffset then
 				baseRotation = baseRotation * rotationOffset
@@ -640,7 +712,7 @@ local function acquireVisual(modelPath: string?, itemId: string?): (Instance, Ba
 		end
 		model.Parent = pickupsFolder
 		local primary, parts = configureVisualInstance(model, nil)
-		return model, primary, parts, "orbModel", extractRotation(model:GetPivot())
+		return model, primary, parts, "orbModel", extractRotation(primary:GetPivot())
 	end
 
 	local part = table.remove(partPool)
@@ -693,19 +765,28 @@ local function applyVisual(record: PickupRecord)
 	end
 end
 
-local function setRecordCFrame(record: PickupRecord, cf: CFrame)
+local function setRecordCFrame(record: PickupRecord, cf: CFrame, now: number)
 	cf = cf + Vector3.new(0, PICKUP_VISUAL_HEIGHT_OFFSET, 0)
-	if record.instance:IsA("Model") then
-		local finalCf = cf
-		if record.baseRotation then
-			finalCf = cf * record.baseRotation
+	local finalCf = cf
+	local spinAngle = 0
+	if record.itemId
+		or record.visualKind == "customModel"
+		or record.visualKind == "missingCustom"
+		or record.modelPath
+	then
+		local spinPhase = math.fmod(now + record.seed, ITEM_WORLD_SPIN_PERIOD)
+		if spinPhase < 0 then
+			spinPhase += ITEM_WORLD_SPIN_PERIOD
 		end
+		spinAngle = (spinPhase / ITEM_WORLD_SPIN_PERIOD) * (math.pi * 2)
+		finalCf = finalCf * CFrame.Angles(0, spinAngle, 0)
+	end
+	if record.baseRotation then
+		finalCf = finalCf * record.baseRotation
+	end
+	if record.instance:IsA("Model") then
 		(record.instance :: Model):PivotTo(finalCf)
 	else
-		local finalCf = cf
-		if record.baseRotation then
-			finalCf = cf * record.baseRotation
-		end
 		record.primary.CFrame = finalCf
 	end
 end
@@ -770,7 +851,7 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 				existing.seeking = true
 			end
 			applyVisual(existing)
-			setRecordCFrame(existing, CFrame.new(pos))
+			setRecordCFrame(existing, CFrame.new(pos), tick())
 			continue
 		end
 
@@ -806,7 +887,7 @@ PickupsSpawnBatch.OnClientEvent:Connect(function(payloads: any)
 
 		activePickups[id] = record
 		applyVisual(record)
-		setRecordCFrame(record, CFrame.new(pos))
+		setRecordCFrame(record, CFrame.new(pos), tick())
 	end
 end)
 
@@ -1043,9 +1124,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 		if isInteractItem and not record.modelPath then
 			local spinPeriod = math.max(0.1, record.spinPeriod or DEFAULT_SPIN_PERIOD)
 			local angle = ((now + record.seed) / spinPeriod) * (math.pi * 2)
-			setRecordCFrame(record, CFrame.new(record.currentPos + Vector3.new(0, bob, 0)) * CFrame.Angles(0, angle, 0))
+			setRecordCFrame(record, CFrame.new(record.currentPos + Vector3.new(0, bob, 0)) * CFrame.Angles(0, angle, 0), now)
 		else
-			setRecordCFrame(record, CFrame.new(record.currentPos + Vector3.new(0, bob, 0)))
+			setRecordCFrame(record, CFrame.new(record.currentPos + Vector3.new(0, bob, 0)), now)
 		end
 
 		if isInteractItem then

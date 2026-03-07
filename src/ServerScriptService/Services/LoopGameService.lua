@@ -7,8 +7,6 @@ local Workspace = game:GetService("Workspace")
 
 local GameStateManager = require(game.ServerScriptService.ECS.Systems.GameStateManager)
 local GameTimeSystem = require(game.ServerScriptService.ECS.Systems.GameTimeSystem)
-local ModelReplicationService = require(game.ServerScriptService.ECS.ModelReplicationService)
-
 local LoopGameService = {}
 
 local world: any = nil
@@ -316,10 +314,6 @@ function LoopGameService.init(worldRef: any?, componentsRef: any?, _expSystemRef
 
 	lastSpawnTime = GameTimeSystem.getGameTime() - spawnInterval
 	lastInGame = GameStateManager.getCurrentState() == "InGame"
-	ModelReplicationService.replicateModel(
-		"ContentDrawer.Structures.LoopPuzzleStatue",
-		"ContentDrawer.Structures"
-	)
 end
 
 function LoopGameService.step(_dt: number)

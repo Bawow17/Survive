@@ -48,6 +48,9 @@ local ITEM_SLOT_BY_ID = {
 	energy_sword = "EnergySwordViewportFrame",
 	magic_8_ball = "Magic8BallViewportFrame",
 	apple = "AppleViewportFrame",
+	witches_brew = "WitchesBrewViewportFrame",
+	survival_knife = "SurvivalKnifeViewportFrame",
+	hot_sauce = "HotSauceViewportFrame",
 }
 
 type PromptBindings = {
